@@ -5,10 +5,10 @@ import (
 	"strconv"
 )
 
-type Color int64
+type Color uint32
 
-type ColorMode int64
-type ColorType int64
+type ColorMode uint32
+type ColorType uint32
 
 const (
 	mask256color Color = 256 - 1
@@ -158,13 +158,14 @@ func ansiEscapeColor(c Color, ctype byte) []byte {
 
 // ANSI Escape sequence to set this color
 func ANSIEscape(fg Color, bg Color) []byte {
-	seq := []byte{ESC, '[', '0'}
+	seq := []byte{ESC, '[', '0', 'm'}
 	for i, m := range ColorModes {
 		if fg.TestMode(m) {
-			seq = append(seq, []byte(";"+strconv.Itoa(i))...)
+			seq = append(seq, ESC, '[')
+			seq = append(seq, []byte(strconv.Itoa(1+i))...)
+			seq = append(seq, 'm')
 		}
 	}
-	seq = append(seq, 'm')
 
 	seq = append(seq, ansiEscapeColor(fg, '3')...)
 	seq = append(seq, ansiEscapeColor(bg, '4')...)

@@ -2,6 +2,7 @@ package termemu
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -32,15 +33,20 @@ type terminal struct {
 
 	pty, tty *os.File
 	dup      *os.File
+
+	viewFlags   []bool
+	viewInts    []int
+	viewStrings []string
 }
 
-func New() Terminal {
-
-	f := &dummyFrontend{}
+func New(f Frontend) Terminal {
 
 	t := &terminal{
-		frontend: f,
-		screen:   newScreen(f),
+		frontend:    f,
+		screen:      newScreen(f),
+		viewFlags:   make([]bool, viewFlagCount),
+		viewInts:    make([]int, viewIntCount),
+		viewStrings: make([]string, viewStringCount),
 	}
 
 	var err error
@@ -102,6 +108,7 @@ func (t *terminal) StartCommand(c *exec.Cmd) error {
 	}
 	c.SysProcAttr.Setctty = true
 	c.SysProcAttr.Setsid = true
+	c.SysProcAttr.Ctty = int(t.tty.Fd())
 	err := c.Start()
 	if err != nil {
 		return err
@@ -176,4 +183,97 @@ func (t *terminal) DupTo(f *os.File) {
 
 func (t *terminal) PrintTerminal() {
 	t.screen.printScreen()
+}
+
+const (
+	// low 2 bits
+	M_btn1     = 0
+	M_btn2     = 1
+	M_btn3     = 2
+	M_release  = 3
+	M_whichBtn = 3
+
+	// flags
+	M_shift   = 4
+	M_meta    = 8
+	M_control = 16
+	M_motion  = 32
+	M_wheel   = 64
+)
+
+// x and y should start at 1
+// wheel events should use btn1 for wheel up, btn2 for wheel down, true for press, and M_wheel for mods
+func (t *terminal) SendMouseRaw(btn byte, press bool, mods byte, x, y int) {
+	switch t.viewInts[VI_MouseMode] {
+	case MM_None:
+		return
+	case MM_Press:
+		if !press {
+			return
+		}
+	case MM_PressRelease:
+		if mods&M_motion != 0 {
+			return
+		}
+	case MM_PressReleaseMove:
+		if mods&M_whichBtn == M_release {
+			return
+		}
+	case MM_PressReleaseMoveAll:
+	}
+
+	switch t.viewInts[VI_MouseEncoding] {
+	case ME_X10:
+		btnByte := (btn & M_whichBtn) | mods
+		if !press {
+			btnByte |= M_release
+		}
+
+		if 32+x > 255 {
+			x = 255 - 32
+		}
+		if 32+y > 255 {
+			y = 255 - 32
+		}
+
+		t.Write([]byte("\033[M" + string(32+btnByte) + string(byte(32+x)) + string(byte(32+y))))
+
+	case ME_UTF8:
+		btnByte := (btn & M_whichBtn) | mods
+		if !press {
+			btnByte |= M_release
+		}
+
+		t.Write([]byte("\033[M" + string(32+btnByte) + string(rune(32+x)) + string(rune(32+y))))
+
+	case ME_SGR:
+		btnByte := (btn & M_whichBtn) | mods
+		pressByte := 'M'
+		if !press {
+			pressByte = 'm'
+		}
+		t.Write([]byte(fmt.Sprintf("\033[<%v;%v;%v%c", btnByte, x, y, pressByte)))
+	}
+}
+
+func (t *terminal) setViewFlag(flag ViewFlag, value bool) {
+	t.viewFlags[flag] = value
+	t.frontend.ViewFlagChanged(flag, value)
+}
+func (t *terminal) GetViewFlag(flag ViewFlag) bool {
+	return t.viewFlags[flag]
+}
+func (t *terminal) setViewInt(flag ViewInt, value int) {
+	t.viewInts[flag] = value
+	t.frontend.ViewIntChanged(flag, value)
+}
+func (t *terminal) GetViewInt(flag ViewInt) int {
+	return t.viewInts[flag]
+}
+func (t *terminal) setViewString(flag ViewString, value string) {
+	t.viewStrings[flag] = value
+	t.frontend.ViewStringChanged(flag, value)
+}
+func (t *terminal) GetViewString(flag ViewString) string {
+	return t.viewStrings[flag]
 }

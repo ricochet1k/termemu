@@ -2,13 +2,10 @@ package termemu
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
+	"os"
 	"strings"
 )
-
-var debugCursor = flag.Bool("debugCursor", false, "Print cursor debugging")
-var debugErase = flag.Bool("debugErase", false, "Print erase debugging")
 
 type screen struct {
 	chars       [][]rune
@@ -28,6 +25,8 @@ type screen struct {
 	cursorPos Pos
 
 	topMargin, bottomMargin int
+
+	autoWrap bool
 }
 
 func newScreen(f Frontend) *screen {
@@ -67,6 +66,7 @@ func (s *screen) renderLineANSI(y int) string {
 
 		for x < len(line) && fg == s.frontColors[y][x] && bg == s.backColors[y][x] {
 			buf.WriteRune(line[x])
+			x++
 		}
 	}
 	return string(buf.Bytes())
@@ -167,9 +167,7 @@ func (s *screen) eraseRegion(r Region) {
 		bytes[i] = ' '
 	}
 	for i := r.Y; i < r.Y2; i++ {
-		if *debugErase {
-			fmt.Println("erase: ", r.X, i, len(bytes))
-		}
+		debugPrintln(debugErase, "erase: ", r.X, i, len(bytes))
 		s.rawWriteRunes(r.X, i, bytes)
 	}
 }
@@ -189,11 +187,27 @@ func (s *screen) writeRunes(b []rune) {
 	}
 }
 
+// This is like writeRunes, but it moves existing runes to the right
+func (s *screen) insertRunes(b []rune) {
+  y := s.cursorPos.Y
+  fsx := s.cursorPos.X
+  fex := fsx + len(b)
+  tsx := s.size.X - len(b)
+  tex := s.size.X
+
+  // first: move everything over
+	copy(s.chars[y][tsx:tex], s.chars[y][fsx:fex])
+	copy(s.frontColors[y][tsx:tex], s.frontColors[y][fsx:fex])
+	copy(s.backColors[y][tsx:tex], s.backColors[y][fsx:fex])
+
+  s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b)
+}
+
 // This is a very raw write function. It assumes all the bytes are printable bytes
 // If you use this to write beyond the end of the line, it will panic.
 func (s *screen) rawWriteRunes(x int, y int, b []rune) {
 	if y >= s.size.Y || x+len(b) > s.size.X {
-		fmt.Printf("rawWriteBytes out of range: %v,%v,%v %v %#v, %v,%v\n", x, y, x+len(b), len(b), string(b), len(s.chars), len(s.chars[0]))
+		fmt.Printf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v, %v,%v\n", s.size, x, y, x+len(b), len(b), string(b), len(s.chars), len(s.chars[0]))
 	}
 	copy(s.chars[y][x:x+len(b)], b)
 	s.rawWriteColors(y, x, x+len(b))
@@ -218,29 +232,27 @@ func (s *screen) rawWriteColors(y int, x1 int, x2 int) {
 // }
 
 func (s *screen) setCursorPos(x, y int) {
-	s.cursorPos.X = clamp(x, 0, s.size.X)
-	s.cursorPos.Y = clamp(y, 0, s.size.Y)
+	s.cursorPos.X = clamp(x, 0, s.size.X-1)
+	s.cursorPos.Y = clamp(y, 0, s.size.Y-1)
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
-	if *debugCursor {
-		fmt.Println("cursor set: ", s.cursorPos.X, s.cursorPos.Y)
-	}
+	debugPrintln(debugCursor, "cursor set: ", x, y, s.cursorPos, s.size)
 }
 
 func (s *screen) setScrollMarginTopBottom(top, bottom int) {
-	fmt.Println("scroll margins:", top, bottom)
-	s.topMargin = clamp(top, 0, s.size.Y)
-	s.bottomMargin = clamp(bottom, 0, s.size.Y)
+	debugPrintln(debugScroll, "scroll margins:", top, bottom)
+	s.topMargin = clamp(top, 0, s.size.Y-1)
+	s.bottomMargin = clamp(bottom, 0, s.size.Y-1)
 }
 
 func (s *screen) scroll(y1 int, y2 int, dy int) {
-	fmt.Println("scroll:", y1, y2, dy)
+	debugPrintln(debugScroll, "scroll:", y1, y2, dy)
 	y1 = clamp(y1, 0, s.size.Y-1)
 	y2 = clamp(y2, 0, s.size.Y-1)
 	// if y < s.topMargin || y > s.bottomMargin {
 	// 	fmt.Println("scroll outside margin", y, s.topMargin, s.bottomMargin)
 	// }
 	if y1 > y2 {
-		fmt.Println("scroll ys out of order", y1, y2, dy)
+		fmt.Fprintln(os.Stderr, "scroll ys out of order", y1, y2, dy)
 	}
 
 	if dy > 0 {
@@ -252,7 +264,7 @@ func (s *screen) scroll(y1 int, y2 int, dy int) {
 		}
 		// these are non-inclusive, so need +1
 		s.frontend.RegionChanged(Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X})
-		fmt.Println(Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
+		debugPrintln(debugScroll, "scroll changed region:", Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
 		s.eraseRegion(Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
 	} else {
 		for y := y1; y <= y2+dy; y++ {
@@ -265,29 +277,28 @@ func (s *screen) scroll(y1 int, y2 int, dy int) {
 		s.frontend.RegionChanged(Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X})
 		s.eraseRegion(Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X})
 	}
-
 }
 
 func clamp(v int, low, high int) int {
 	if v < low {
 		v = low
 	}
-	if v >= high {
+	if v > high {
 		v = high
 	}
 	return v
 }
 
 func (s *screen) clampRegion(r Region) Region {
-	r.X = clamp(r.X, 0, s.size.X)
-	r.Y = clamp(r.Y, 0, s.size.Y)
-	r.X2 = clamp(r.X2, 0, s.size.X)
-	r.Y2 = clamp(r.Y2, 0, s.size.Y)
+	r.X = clamp(r.X, 0, s.size.X-1)
+	r.Y = clamp(r.Y, 0, s.size.Y-1)
+	r.X2 = clamp(r.X2, 0, s.size.X-1)
+	r.Y2 = clamp(r.Y2, 0, s.size.Y-1)
 	return r
 }
 
 func (s *screen) moveCursor(dx, dy int, wrap bool, scroll bool) {
-	if wrap {
+	if wrap && s.autoWrap {
 		s.cursorPos.X += dx
 		for s.cursorPos.X < 0 {
 			s.cursorPos.X += s.size.X
@@ -297,46 +308,35 @@ func (s *screen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 			s.cursorPos.X -= s.size.X
 			s.cursorPos.Y += 1
 		}
-		s.cursorPos.Y += dy
-		if scroll {
-			if s.cursorPos.Y < s.topMargin {
-				s.scroll(s.topMargin, s.bottomMargin, s.topMargin-s.cursorPos.Y)
-				s.cursorPos.Y = s.topMargin
-			}
-			if s.cursorPos.Y > s.bottomMargin {
-				s.scroll(s.topMargin, s.bottomMargin, s.bottomMargin-s.cursorPos.Y)
-				s.cursorPos.Y = s.bottomMargin
-			}
-		} else {
-			for s.cursorPos.Y < 0 {
-				s.cursorPos.Y += s.size.Y
-			}
-			for s.cursorPos.Y >= s.size.Y {
-				s.cursorPos.Y -= s.size.Y
-			}
-		}
 	} else {
 		s.cursorPos.X += dx
-		s.cursorPos.Y += dy
-		s.cursorPos.X = clamp(s.cursorPos.X, 0, s.size.X)
+		s.cursorPos.X = clamp(s.cursorPos.X, 0, s.size.X-1)
+	}
 
-		if scroll {
-			if s.cursorPos.Y < s.topMargin {
-				s.scroll(s.topMargin, s.bottomMargin, s.topMargin-s.cursorPos.Y)
-				s.cursorPos.Y = s.topMargin
-			}
-			if s.cursorPos.Y > s.bottomMargin {
-				s.scroll(s.topMargin, s.bottomMargin, s.bottomMargin-s.cursorPos.Y)
-				s.cursorPos.Y = s.bottomMargin
-			}
-		} else {
-			s.cursorPos.Y = clamp(s.cursorPos.Y, 0, s.size.Y)
+	s.cursorPos.Y += dy
+	if scroll {
+		if s.cursorPos.Y < s.topMargin {
+			s.scroll(s.topMargin, s.bottomMargin, s.topMargin-s.cursorPos.Y)
+			s.cursorPos.Y = s.topMargin
 		}
+		if s.cursorPos.Y > s.bottomMargin {
+			s.scroll(s.topMargin, s.bottomMargin, s.bottomMargin-s.cursorPos.Y)
+			s.cursorPos.Y = s.bottomMargin - 1
+		}
+	} else {
+		/*for s.cursorPos.Y < 0 {
+			s.cursorPos.Y += s.size.Y
+		}
+		for s.cursorPos.Y >= s.size.Y {
+			s.cursorPos.Y -= s.size.Y
+		}*/
+		s.cursorPos.Y = clamp(s.cursorPos.Y, 0, s.size.Y-1)
+	}
+	if s.cursorPos.Y >= s.size.Y {
+		panic(fmt.Sprintf("moveCursor outside, %v %v  %v, %v, %v, %v", s.cursorPos, s.size, dx, dy, wrap, scroll))
 	}
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
-	if *debugCursor {
-		fmt.Printf("cursor move: %v, %v  %v, %v: %v %v\n", s.cursorPos.X, s.cursorPos.Y, dx, dy, wrap, scroll)
-	}
+	//debugPrintf(debugCursor, "cursor move: %v, %v  %v, %v: %v %v\n", s.cursorPos.X, s.cursorPos.Y, dx, dy, wrap, scroll)
 }
 
 func (s *screen) printScreen() {

@@ -3,58 +3,37 @@ package termemu
 import (
 	"bufio"
 	"bytes"
-	"flag"
-	"fmt"
 	"strconv"
 	"strings"
 )
 
-var debugTxt = flag.Bool("debugTxt", false, "Print all text written to screen")
-var debugCmd = flag.Bool("debugCmd", false, "Print all commands")
-
 type dupReader struct {
 	reader *bufio.Reader
+	buf    *bytes.Buffer
 	t      *terminal
-
-	unread int
 }
-
-// func (r *dupReader) Read(b []byte) (n int, err error) {
-// 	n, err = r.reader.Read(b)
-// 	if n > 0 && r.t.dup != nil {
-// 		_, err2 := r.t.dup.Write(b[:n])
-// 		if err2 != nil {
-// 			fmt.Println(err2)
-// 			r.t.dup = nil
-// 		}
-// 	}
-//
-// 	return n, err
-// }
 
 func (r *dupReader) ReadByte() (byte, error) {
 	b, err := r.reader.ReadByte()
 	if err == nil && r.t.dup != nil {
 		r.t.dup.Write([]byte{b})
 	}
-	if r.unread > 0 {
-		r.unread -= 1
+	if r.buf != nil {
+		r.buf.Write([]byte{b})
 	}
 	return b, err
 }
-func (r *dupReader) UnreadByte() error {
-	err := r.reader.UnreadByte()
-	r.unread += 1
-	return err
-}
+
 func (r *dupReader) ReadRune() (rune, int, error) {
 	b, n, err := r.reader.ReadRune()
-	if err == nil && r.t.dup != nil {
-		r.t.dup.Write([]byte(string(b))[r.unread:])
-	}
-	r.unread -= n
-	if r.unread < 0 {
-		r.unread = 0
+	if err == nil {
+		byts := []byte(string(b))
+		if r.t.dup != nil {
+			r.t.dup.Write(byts)
+		}
+		if r.buf != nil {
+			r.buf.Write(byts)
+		}
 	}
 	return b, n, err
 }
@@ -62,171 +41,43 @@ func (r *dupReader) Buffered() int {
 	return r.reader.Buffered()
 }
 
-type recordingReader struct {
-	r   *dupReader
-	buf *bytes.Buffer
-}
-
-func (r *recordingReader) ReadByte() (b byte, err error) {
-	b, err = r.r.ReadByte()
-	if err == nil && r.buf != nil {
-		_, _ = r.buf.Write([]byte{b})
-	}
-
-	return b, err
-}
-
-func (r *recordingReader) StartRecording() {
-	r.buf = &bytes.Buffer{}
-}
-
-func (r *recordingReader) StopRecording() []byte {
-	bs := r.buf.Bytes()
-	r.buf = nil
-	return bs
-}
-
-// type ptyReader struct {
-// 	t        *terminal
-// 	buffer   []byte
-// 	curBytes []byte
-// }
-//
-// func (r *ptyReader) read() ([]byte, error) {
-// 	if len(r.curBytes) == 0 {
-// 		n, err := r.t.pty.Read(r.buffer)
-// 		if err != nil {
-// 			fmt.Println(err)
-// 			return nil, err
-// 		}
-//
-// 		r.curBytes = r.buffer[:n]
-// 	}
-//
-// 	return r.curBytes, nil
-// }
-//
-// func (r *ptyReader) readAll(b func(byte) bool) (matched []byte, rest []byte, err error) {
-// 	bs, err := r.read()
-// 	if err != nil {
-// 		return nil, nil, err
-// 	}
-//
-// 	i := 0
-//
-// 	prefix := []byte{}
-// 	for {
-// 		if i >= len(bs) {
-// 			prefix = append(prefix, bs...)
-// 			bs, err = r.advance(i)
-// 			if err != nil {
-// 				return nil, nil, err
-// 			}
-// 			i = 0
-// 		}
-// 		if !b(bs[i]) {
-// 			break
-// 		}
-// 		i++
-// 	}
-//
-// 	ret := append(prefix, bs[:i]...)
-//
-// 	rest, err = r.advance(i)
-//
-// 	return ret, rest, err
-// }
-//
-// func (r *ptyReader) advance(l int) (rest []byte, err error) {
-//
-// 	if r.t.dup != nil && l > 0 {
-// 		n, err := r.t.dup.Write(r.curBytes[:l])
-// 		if err != nil || n != l {
-// 			fmt.Println("dup: ", err)
-// 			r.t.dup = nil
-// 		}
-// 	}
-//
-// 	r.curBytes = r.curBytes[l:]
-// 	rest, err = r.read()
-// 	return rest, err
-// }
-
-func isPrintable(c byte) bool {
-	return (32 <= c && c <= 126) // || (128 <= c && c <= 255)
-}
-
-func waitPrompt() {
-	fmt.Print(":")
-	fmt.Scanln()
-	fmt.Print("\033[A\033[2K")
-}
-
 func (t *terminal) ptyReadLoop() {
 
-	// r := ptyReader{
-	// 	t:        t,
-	// 	buffer:   make([]byte, 1024),
-	// 	curBytes: []byte{},
-	// }
 	r := &dupReader{
 		reader: bufio.NewReader(t.pty),
+		buf:    nil,
 		t:      t,
 	}
-	rr := &recordingReader{r: r}
-	// r :=
-
-	// i := 0
 
 	for {
-		// bs, err := r.advance(i)
-		// if err != nil {
-		// 	return
-		// }
-
-		b, err := r.ReadByte()
+		b, _, err := r.ReadRune()
 		if err != nil {
-			fmt.Println(err)
+			debugPrintln(debugErrors, err)
 			return
 		}
 
 		// printables
 		runes := []rune{}
 		for {
-			// fmt.Println("byte:", b, string(b))
-			if isPrintable(b) {
-				runes = append(runes, rune(b))
-			} else if b >= 128 && b <= 255 {
-				r.UnreadByte()
-				rn, _, err := r.ReadRune()
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-				// fmt.Println("rune:", rn, string(rn))
-				runes = append(runes, rn)
-			} else {
+			if b < 32 || b > 126 && b < 128 {
 				break
 			}
+
+			runes = append(runes, rune(b))
 
 			if r.Buffered() == 0 {
 				break
 			}
 
-			// fmt.Println("r.Buffered():", r.Buffered())
-
-			b, err = r.ReadByte()
+			b, _, err = r.ReadRune()
 			if err != nil {
-				fmt.Println(err)
+				debugPrintln(debugErrors, err)
 				return
 			}
 		}
 		if len(runes) > 0 {
 			t.screen.writeRunes(runes)
-			if *debugTxt {
-				fmt.Printf("\033[32mtxt: %#v\033[0m %v\n", string(runes), len(runes))
-				waitPrompt()
-			}
+			debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", string(runes), len(runes))
 
 			if r.Buffered() == 0 {
 				continue
@@ -239,105 +90,62 @@ func (t *terminal) ptyReadLoop() {
 		case 0: // NUL Null byte, ignore
 
 		case 5: // ENQ ^E Return Terminal Status
-			fmt.Println("ENQ")
+			debugPrintln(debugTodo, "TODO: ENQ")
 		case 7: // BEL ^G Bell
-			// fmt.Println("bell")
 			t.frontend.Bell()
 
 		case 8: // BS ^H Backspace
 			t.screen.moveCursor(-1, 0, false, false)
 
 		case 9: // HT ^I Horizontal TAB
-			fmt.Println("tab")
+			debugPrintln(debugTodo, "TODO: tab")
 
 		case 10: // LF ^J Linefeed (newline)
-			// fmt.Println("linefeed")
 			t.screen.moveCursor(0, 1, true, true)
 
 		case 11: // VT ^K Vertical TAB
-			fmt.Println("vtab")
+			debugPrintln(debugTodo, "TODO: vtab")
 
 		case 12: // FF ^L Formfeed (also: New page NP)
-			// fmt.Println("formfeed")
 			t.screen.moveCursor(0, 1, false, true)
 
 		case 13: // CR ^M Carriage Return
-			// fmt.Println("carriage return")
 			t.screen.moveCursor(-t.screen.cursorPos.X, 0, true, true)
 
 		case 27: // ESC ^[ Escape Character
 
-			rr.StartRecording()
-			success := t.handleCommand(rr)
-			cmd := rr.StopRecording()
+			var cmdBytes bytes.Buffer
+			r.buf = &cmdBytes
+			success := t.handleCommand(r)
+			r.buf = nil
+			cmd := cmdBytes.Bytes()
 
-			if !success {
-				fmt.Printf("Unhandled command: %#v\n", string(cmd))
-			} else if *debugCmd {
-				fmt.Printf("cmd: %#v\n", string(cmd))
-				waitPrompt()
+			if success {
+				debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen.cursorPos, string(cmd))
+				if string(cmd) == "[?25l" {
+					// hide cursor
+					if t.dup != nil {
+						t.dup.Write([]byte(string("\033[?25h")))
+					}
+				}
+			} else {
+				debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
 			}
-
-			// b, err = r.ReadByte() // skip escape char
-			// if err != nil {
-			// 	fmt.Println(err)
-			// 	return
-			// }
-			// var cmdBytes []byte
-			//
-			// if b == '[' || b == ']' {
-			// 	cmdBytes = append(cmdBytes, b)
-			// 	b, err = r.ReadByte()
-			// 	if err != nil {
-			// 		fmt.Println(err)
-			// 		return
-			// 	}
-			// 	if b == '?' {
-			// 		cmdBytes = append(cmdBytes, b)
-			// 		b, err = r.ReadByte()
-			// 		if err != nil {
-			// 			fmt.Println(err)
-			// 			return
-			// 		}
-			// 	}
-			// 	for b == ';' || (b >= '0' && b <= '9') {
-			// 		cmdBytes = append(cmdBytes, b)
-			// 		b, err = r.ReadByte()
-			// 		if err != nil {
-			// 			fmt.Println(err)
-			// 			return
-			// 		}
-			// 	}
-			// 	cmdBytes = append(cmdBytes, b)
-			// } else {
-			// 	cmdBytes = append(cmdBytes, b)
-			// }
-			//
-			// cmd := string(cmdBytes)
-			// handled := t.handleCommand(cmd)
-			// if !handled {
-			// 	fmt.Printf("unhandled command: %#v\n", cmd)
-			// } else if *debugCmd {
-			// 	fmt.Printf("cmd: %#v\n", cmd)
-			// }
 			continue
 
 		case 127: // DEL  Delete Character
-			fmt.Println("delete character")
+			debugPrintln(debugTodo, "TODO: delete character")
 		default:
-			fmt.Printf("unhandled char %v %#v\n", b, string(b))
+			debugPrintf(debugTodo, "TODO: unhandled char %v %#v\n", b, string(b))
 			continue
 		}
-
-		fmt.Printf("byte: %v %#v\n", b, string(b))
-		waitPrompt()
 	}
 }
 
-func (t *terminal) handleCommand(r *recordingReader) bool {
-	b, err := r.ReadByte()
+func (t *terminal) handleCommand(r *dupReader) bool {
+	b, _, err := r.ReadRune()
 	if err != nil {
-		fmt.Println(err)
+		debugPrintln(debugErrors, err)
 		return false
 	}
 
@@ -345,7 +153,7 @@ func (t *terminal) handleCommand(r *recordingReader) bool {
 	switch b {
 
 	case 'c': // reset
-		fmt.Println("cmd: reset") // TODO
+		debugPrintln(debugTodo, "TODO: cmd: reset") // TODO
 
 	case 'D': // Index, scroll down if necessary
 		t.screen.moveCursor(0, 1, false, true)
@@ -359,11 +167,32 @@ func (t *terminal) handleCommand(r *recordingReader) bool {
 	case ']': // OSC Operating System Commands
 		return t.handleCmdOSC(r)
 
+	case '(': // G0
+		fallthrough
+	case ')': // G1
+		fallthrough
+	case '*': // G2
+		fallthrough
+	case '+': // G3
+		C, _, err := r.ReadRune()
+		if err != nil {
+			debugPrintln(debugErrors, err)
+			return false
+		}
+
+		debugPrintf(debugCharSet, "TODO: Character Set %c %c\n", b, C)
+
 	case '=': // Application Keypad
-		fmt.Println("Application Keypad") // TODO
+		debugPrintln(debugTodo, "TODO: Application Keypad") // TODO
 
 	case '>': // Normal Keypad
-		fmt.Println("Normal Keypad") // TODO
+		debugPrintln(debugTodo, "TODO: Normal Keypad") // TODO
+
+	/*case 'l': // Memory Lock
+		debugPrintln("Memory Lock") // TODO
+
+	case 'm': // Memory Unlock
+		debugPrintln("Memory Unlock") // TODO*/
 
 	default:
 		return false
@@ -371,32 +200,32 @@ func (t *terminal) handleCommand(r *recordingReader) bool {
 	return true
 }
 
-func (t *terminal) handleCmdCSI(r *recordingReader) bool {
+func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
-	b, err := r.ReadByte()
+	b, _, err := r.ReadRune()
 	if err != nil {
-		fmt.Println(err)
+		debugPrintln(debugErrors, err)
 		return false
 	}
 
 	var prefix = []byte{}
 	if b == '?' || b == '>' {
-		prefix = append(prefix, b)
+		prefix = append(prefix, byte(b))
 
-		b, err = r.ReadByte()
+		b, _, err = r.ReadRune()
 		if err != nil {
-			fmt.Println(err)
+			debugPrintln(debugErrors, err)
 			return false
 		}
 	}
 
 	paramBytes := []byte{}
 	for b == ';' || (b >= '0' && b <= '9') {
-		paramBytes = append(paramBytes, b)
+		paramBytes = append(paramBytes, byte(b))
 
-		b, err = r.ReadByte()
+		b, _, err = r.ReadRune()
 		if err != nil {
-			fmt.Println(err)
+			debugPrintln(debugErrors, err)
 			return false
 		}
 	}
@@ -433,6 +262,27 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 			}
 			t.screen.moveCursor(-params[0], 0, false, false)
 
+		case 'G': // Cursor Character Absolute
+			if len(params) == 0 {
+				params = []int{1}
+			}
+			t.screen.setCursorPos(params[0]-1, t.screen.cursorPos.Y)
+
+		case 'c': // Send Device Attributes
+			if len(params) == 0 {
+				params = []int{1}
+			}
+			switch params[0] {
+			case 0:
+				t.pty.Write([]byte("\033[?1;2c"))
+			}
+
+		case 'd': // Line Position Absolute
+			if len(params) == 0 {
+				params = []int{1}
+			}
+			t.screen.setCursorPos(t.screen.cursorPos.X, params[0]-1)
+
 		case 'f', 'H': // Cursor Home
 			x := 1
 			y := 1
@@ -442,8 +292,27 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 			if len(params) >= 2 {
 				x = params[1]
 			}
-			// fmt.Printf("cursor home: %v, %v\n", x, y)
+			// debugPrintf("cursor home: %v, %v\n", x, y)
 			t.screen.setCursorPos(x-1, y-1)
+
+		case 'h', 'l': // h=Set, l=Reset Mode
+			var value bool
+			if b == 'h' {
+				value = true
+			}
+
+			if len(params) != 1 {
+				debugPrintln(debugTodo, "TODO: Unhandled CSI mode params: ", params, b)
+				return false
+			}
+
+			switch params[0] {
+			case 4:
+				debugPrintln(debugTodo, "TODO: Insert Mode = ", value) // TODO
+			default:
+				debugPrintln(debugTodo, "TODO: Unhandled CSI mode param: ", params[0])
+				return false
+			}
 
 		case 'm': // Set color/mode
 			if len(params) == 0 {
@@ -507,7 +376,7 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 								i += 4
 							}
 						default:
-							fmt.Println("unhandled extended color: ", params[i+1])
+							debugPrintln(debugTodo, "TODO: unhandled extended color: ", params[i+1])
 							continue
 						}
 					}
@@ -519,18 +388,18 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 					bc = bc.SetColor(Color(p - 100 + 8))
 
 				default:
-					fmt.Println("Unhandled set color: ", p)
+					debugPrintln(debugTodo, "TODO: Unhandled set color: ", p)
 					return false
 				}
 
-				// fmt.Printf("m %v: %x, %x\n", p, fc, bc)
+				// debugPrintf("m %v: %x, %x\n", p, fc, bc)
 
 				t.screen.setColors(fc, bc)
 			}
 
 		case 'K': // Erase
 			// eraseRegion clamps the region to the window, so we don't have to be too careful here
-			// fmt.Println("erase: ", params)
+			// debugPrintln("erase: ", params)
 
 			switch {
 			case len(params) == 0 || params[0] == 0: // Erase to end of line
@@ -555,13 +424,13 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 					Y2: t.screen.cursorPos.Y + 1,
 				})
 			default:
-				fmt.Println("Unhandled K params: ", params)
+				debugPrintln(debugTodo, "TODO: Unhandled K params: ", params)
 				return false
 			}
 
 		case 'J': // Erase Lines
 			// eraseRegion clamps the region to the window, so we don't have to be too careful here
-			// fmt.Println("erase lines: ", params)
+			// debugPrintln("erase lines: ", params)
 
 			switch {
 			case len(params) == 0 || params[0] == 0: // Erase to bottom of screen
@@ -585,17 +454,35 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 					X2: t.screen.size.X,
 					Y2: t.screen.size.Y,
 				})
-				// t.screen.setCursorPos(0, 0)
+				t.screen.setCursorPos(0, 0)
 			default:
-				fmt.Println("Unhandled J params: ", params)
+				debugPrintln(debugTodo, "TODO: Unhandled J params: ", params)
 				return false
 			}
+
+		case 'L': // Insert lines, scroll down
+			if len(params) == 0 {
+				params = []int{1}
+			}
+			t.screen.scroll(t.screen.cursorPos.Y, t.screen.bottomMargin, params[0])
 
 		case 'M': // Delete lines, scroll up
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.scroll(t.screen.topMargin, t.screen.cursorPos.Y, -params[0])
+			t.screen.scroll(t.screen.cursorPos.Y, t.screen.bottomMargin, -params[0])
+
+		case 'S': // Scroll up
+			if len(params) == 0 {
+				params = []int{1}
+			}
+			t.screen.scroll(t.screen.topMargin, t.screen.bottomMargin, -params[0])
+
+		case 'T': // Scroll down
+			if len(params) == 0 {
+				params = []int{1}
+			}
+			t.screen.scroll(t.screen.topMargin, t.screen.bottomMargin, params[0])
 
 		case 'P': // Delete n characters
 			if len(params) == 0 {
@@ -607,7 +494,18 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 				X2: t.screen.cursorPos.X + params[0],
 				Y2: t.screen.cursorPos.Y + 1,
 			})
-			fmt.Println("Delete", params[0], "chars")
+			debugPrintln(debugTodo, "TODO: Delete", params[0], "chars")
+
+		case 'X': // Erase from cursor pos to the right
+			if len(params) == 0 {
+				params = []int{1}
+			}
+			t.screen.eraseRegion(Region{
+				X:  t.screen.cursorPos.X,
+				Y:  t.screen.cursorPos.Y,
+				X2: t.screen.cursorPos.X + params[0],
+				Y2: t.screen.cursorPos.Y + 1,
+			})
 
 		case 'r': // Set Scroll margins
 			top := 1
@@ -618,13 +516,13 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 			if len(params) >= 2 {
 				bottom = params[1]
 			}
-			// fmt.Printf("cursor home: %v, %v\n", x, y)
+			// debugPrintf("cursor home: %v, %v\n", x, y)
 			t.screen.setScrollMarginTopBottom(top-1, bottom-1)
 
 		case 'n': // Device Status Report
 
 		default:
-			fmt.Printf("Unhandled CSI Command: %v %#v\n", params, string(b))
+			debugPrintf(debugTodo, "TODO: Unhandled CSI Command: %v %#v\n", params, string(b))
 			return true
 		}
 	} else if string(prefix) == "?" {
@@ -638,27 +536,76 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 			for _, p := range params {
 				switch p {
 				case 1: // Application / Normal Cursor Keys
-					fmt.Println("Application Cursor Keys =", value) // TODO
+					debugPrintln(debugTodo, "TODO: Application Cursor Keys =", value) // TODO
+
+				case 7: // Wraparound
+					t.screen.autoWrap = value
+
+				case 9: // Send MouseXY on press
+					debugPrintln(debugTodo, "TODO: Send MouseXY on press =", value) // TODO
+					if value {
+						t.setViewInt(VI_MouseMode, MM_Press)
+					} else {
+						t.setViewInt(VI_MouseMode, MM_None)
+					}
 
 				case 12: // Blink Cursor
-					fmt.Println("Blink Cursor =", value) // TODO
+					t.setViewFlag(VF_BlinkCursor, value)
 
 				case 25: // Show Cursor
-					fmt.Println("Show Cursor =", value) // TODO
+					t.setViewFlag(VF_ShowCursor, value)
+
+				case 1000: // Send MouseXY on press/release
+					if value {
+						t.setViewInt(VI_MouseMode, MM_PressRelease)
+					} else {
+						t.setViewInt(VI_MouseMode, MM_None)
+					}
+
+				case 1002: // Cell Motion Mouse Tracking
+					if value {
+						t.setViewInt(VI_MouseMode, MM_PressReleaseMove)
+					} else {
+						t.setViewInt(VI_MouseMode, MM_None)
+					}
+
+				case 1003: // All Motion Mouse Tracking
+					if value {
+						t.setViewInt(VI_MouseMode, MM_PressReleaseMoveAll)
+					} else {
+						t.setViewInt(VI_MouseMode, MM_None)
+					}
+
+				case 1004: // Report focus changed
+					t.setViewFlag(VF_ReportFocus, value)
+
+				case 1005: // xterm UTF-8 extended mouse reporting
+					if value {
+						t.setViewInt(VI_MouseEncoding, ME_UTF8)
+					} else {
+						t.setViewInt(VI_MouseEncoding, ME_X10)
+					}
+
+				case 1006: // xterm SGR extended mouse reporting
+					if value {
+						t.setViewInt(VI_MouseEncoding, ME_SGR)
+					} else {
+						t.setViewInt(VI_MouseEncoding, ME_X10)
+					}
 
 				case 1049: // Save/Restore cursor and alternate screen
-					fmt.Println("Save Cursor and alternate screen =", value) // TODO
+					debugPrintln(debugTodo, "TODO: Save Cursor and alternate screen =", value) // TODO
 
 				case 2004: // Bracketed paste
-					fmt.Println("Bracketed paste =", value) // TODO
+					t.setViewFlag(VF_BracketedPaste, value)
 
 				default:
-					fmt.Printf("Unhandled flag: %#v %v, %v %#v\n", string(prefix), params, p, string(b))
+					debugPrintf(debugTodo, "TODO: Unhandled flag: %#v %v, %v %#v\n", string(prefix), params, p, string(b))
 				}
 			}
 
 		default:
-			fmt.Printf("Unhandled ? command: %#v %v, %#v\n", string(prefix), params, string(b))
+			debugPrintf(debugTodo, "TODO: Unhandled ? command: %#v %v, %#v\n", string(prefix), params, string(b))
 		}
 	} else if string(prefix) == ">" {
 		switch b {
@@ -666,63 +613,89 @@ func (t *terminal) handleCmdCSI(r *recordingReader) bool {
 			attrs := "\x1b[>1;4402;0c"
 			n, err := t.pty.WriteString(attrs)
 			if err != nil || n != len(attrs) {
-				fmt.Println("Error sending device attrs:", err)
+				debugPrintln(debugErrors, "Error sending device attrs:", err)
 			}
 
 		default:
 			return false
 		}
 	} else {
-		fmt.Printf("Unhandled prefix: %#v %v, %#v\n", string(prefix), params, string(b))
+		debugPrintf(debugTodo, "TODO: Unhandled prefix: %#v %v, %#v\n", string(prefix), params, string(b))
 		return true
 	}
 
 	return true
 }
 
-func (t *terminal) handleCmdOSC(r *recordingReader) bool {
+func (t *terminal) handleCmdOSC(r *dupReader) bool {
 	paramBytes := []byte{}
 	var err error
-	var b byte = '9'
-	for b >= '0' && b <= '9' {
-		paramBytes = append(paramBytes, b)
-
-		b, err = r.ReadByte()
+	var b rune
+	for {
+		b, _, err = r.ReadRune()
 		if err != nil {
-			fmt.Println(err)
+			debugPrintln(debugErrors, err)
 			return false
 		}
-	}
 
-	param, _ := strconv.Atoi(string(paramBytes[1:]))
-
-	// skip the ';'
-	b, err = r.ReadByte()
-	if err != nil {
-		fmt.Println(err)
-		return false
-	}
-
-	param2 := []byte{}
-	for b != 7 && b != 0x9c { // BEL , ST
-		if len(param2) > 0 && param2[len(param2)-1] == 27 && b == '\\' { // ESC \ is also ST
+		if b >= '0' && b <= '9' {
+			paramBytes = append(paramBytes, byte(b))
+		} else {
 			break
 		}
-		param2 = append(param2, b)
+	}
 
-		b, err = r.ReadByte()
-		if err != nil {
-			fmt.Println(err)
-			return false
+	param, _ := strconv.Atoi(string(paramBytes))
+
+	param2 := []byte{}
+
+	if b == ';' {
+		// skip the ';'
+		for {
+			b, _, err = r.ReadRune()
+			if err != nil {
+				debugPrintln(debugErrors, err)
+				return false
+			}
+			if b == 7 || b == 0x9c { // BEL , ST
+				break
+			}
+			if len(param2) > 0 && param2[len(param2)-1] == 27 && b == '\\' { // ESC \ is also ST
+				param2 = param2[:len(param2)-1]
+				break
+			}
+
+			param2 = append(param2, byte(b))
 		}
+	} else if b != 7 && b != 0x9c { // BEL, ST
+		debugPrintln(debugErrors, "OSC command number not followed by ;, BEL, or ST?", b)
+		return false
 	}
 
 	switch param {
 	case 0:
-		fmt.Printf("window title: %#v\n", string(param2))
+		t.setViewString(VS_WindowTitle, string(param2))
+
+	case 2:
+		t.setViewString(VS_WindowTitle, string(param2))
+
+	case 4:
+		debugPrintf(debugTodo, "TODO: change color : %#v\n", string(param2))
+
+	case 6:
+		t.setViewString(VS_CurrentDirectory, string(param2))
+
+	case 7:
+		t.setViewString(VS_CurrentFile, string(param2))
+
+	case 104:
+		debugPrintln(debugTodo, "TODO: Reset Color Palette", string(param2))
+
+	case 112:
+		debugPrintln(debugTodo, "TODO: Reset Cursor Color", string(param2))
 
 	default:
-		fmt.Println("Unhandled OSC Command: ", param, string(b))
+		debugPrintln(debugTodo, "TODO: Unhandled OSC Command: ", param, string(b))
 		return false
 	}
 

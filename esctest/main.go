@@ -12,6 +12,7 @@ func main() {
 	tios, err := raw.MakeRaw(os.Stdin.Fd())
 	if err != nil {
 		fmt.Println("MakeRaw failed:", err)
+		return
 	}
 
 	irestore := -1
@@ -39,7 +40,9 @@ func main() {
 		}
 	}()
 
-	time.Sleep(2 * time.Second)
+	fmt.Println("Waiting for 10 secs, press some keys...")
+
+	time.Sleep(10 * time.Second)
 
 	if irestore != -1 {
 		for _, a := range os.Args[1+irestore+1:] {
