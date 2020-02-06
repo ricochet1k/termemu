@@ -78,7 +78,7 @@ func (s *screen) StyledLine(x, w, y int) *Line {
 	}
 	return &Line{
 		Spans: spans,
-		Text:  text[x : x+w],
+		Text:  append([]rune(nil), text[x:x+w]...), // copy
 		Width: uint32(w),
 	}
 }
