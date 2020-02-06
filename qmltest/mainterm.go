@@ -10,8 +10,7 @@ import (
 
 func mainTerm() {
 	f := &frontend{}
-	t := termemu.New()
-	t.SetFrontend(f)
+	t := termemu.New(f)
 	f.t = t
 
 	t.Resize(90, 25)
@@ -37,6 +36,7 @@ func mainTerm() {
 }
 
 type frontend struct {
+	termemu.EmptyFrontend
 	t termemu.Terminal
 }
 
@@ -44,7 +44,7 @@ func (f *frontend) Bell() {
 	fmt.Println("bell")
 }
 
-func (f *frontend) RegionChanged(r termemu.Region) {
+func (f *frontend) RegionChanged(r termemu.Region, cr termemu.ChangeReason) {
 	// line := f.t.Line(r.Y)
 	// fmt.Printf("RegionChanged: %v, %#v\n", r, string(line[r.X:r.X+r.W]))
 }

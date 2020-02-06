@@ -34,9 +34,9 @@ func newScreen(f Frontend) *screen {
 		frontend: f,
 	}
 	s.setSize(80, 14)
-	s.setColors(ColWhite, ColBlack)
+	s.setColors(ColDefault, ColDefault)
 	s.bottomMargin = s.size.Y - 1
-	s.eraseRegion(Region{X: 0, Y: 0, X2: s.size.X, Y2: s.size.Y})
+	s.eraseRegion(Region{X: 0, Y: 0, X2: s.size.X, Y2: s.size.Y}, CRClear)
 	return s
 }
 
@@ -51,6 +51,44 @@ func (s *screen) getLine(y int) []rune {
 
 func (s *screen) getLineColors(y int) ([]Color, []Color) {
 	return s.frontColors[y], s.backColors[y]
+}
+
+func (s *screen) StyledLine(x, w, y int) *Line {
+	text := s.getLine(y)
+	fgs := s.frontColors[y]
+	bgs := s.backColors[y]
+
+	var spans []StyledSpan
+
+	if w < 0 || x+w > len(fgs) {
+		w = len(fgs) - x
+	}
+
+	for i := x; i < x+w; {
+		fg := fgs[i]
+		bg := bgs[i]
+		width := uint32(1)
+		i++
+
+		for i < x+w && fg == fgs[i] && bg == bgs[i] {
+			i++
+			width++
+		}
+		spans = append(spans, StyledSpan{fg, bg, width})
+	}
+	return &Line{
+		Spans: spans,
+		Text:  text[x : x+w],
+		Width: uint32(w),
+	}
+}
+
+func (s *screen) StyledLines(r Region) []*Line {
+	var lines []*Line
+	for y := r.Y; y < r.Y2; y++ {
+		lines = append(lines, s.StyledLine(r.X, r.X2-r.X, y))
+	}
+	return lines
 }
 
 func (s *screen) renderLineANSI(y int) string {
@@ -159,7 +197,7 @@ func (s *screen) setSize(w, h int) {
 	s.setColors(s.frontColor, s.backColor)
 }
 
-func (s *screen) eraseRegion(r Region) {
+func (s *screen) eraseRegion(r Region, cr ChangeReason) {
 	r = s.clampRegion(r)
 	// fmt.Printf("eraseRegion: %#v\n", r)
 	bytes := make([]rune, r.X2-r.X)
@@ -168,7 +206,7 @@ func (s *screen) eraseRegion(r Region) {
 	}
 	for i := r.Y; i < r.Y2; i++ {
 		debugPrintln(debugErase, "erase: ", r.X, i, len(bytes))
-		s.rawWriteRunes(r.X, i, bytes)
+		s.rawWriteRunes(r.X, i, bytes, cr)
 	}
 }
 
@@ -181,7 +219,7 @@ func (s *screen) writeRunes(b []rune) {
 			l = len(b)
 		}
 
-		s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b[:l])
+		s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b[:l], CRText)
 		b = b[l:]
 		s.moveCursor(l, 0, true, true)
 	}
@@ -189,29 +227,30 @@ func (s *screen) writeRunes(b []rune) {
 
 // This is like writeRunes, but it moves existing runes to the right
 func (s *screen) insertRunes(b []rune) {
-  y := s.cursorPos.Y
-  fsx := s.cursorPos.X
-  fex := fsx + len(b)
-  tsx := s.size.X - len(b)
-  tex := s.size.X
+	y := s.cursorPos.Y
+	fsx := s.cursorPos.X
+	fex := fsx + len(b)
+	tsx := s.size.X - len(b)
+	tex := s.size.X
 
-  // first: move everything over
+	// first: move everything over
 	copy(s.chars[y][tsx:tex], s.chars[y][fsx:fex])
 	copy(s.frontColors[y][tsx:tex], s.frontColors[y][fsx:fex])
 	copy(s.backColors[y][tsx:tex], s.backColors[y][fsx:fex])
+	// TODO! RegionChanged!
 
-  s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b)
+	s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b, CRText)
 }
 
 // This is a very raw write function. It assumes all the bytes are printable bytes
 // If you use this to write beyond the end of the line, it will panic.
-func (s *screen) rawWriteRunes(x int, y int, b []rune) {
+func (s *screen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
 	if y >= s.size.Y || x+len(b) > s.size.X {
 		fmt.Printf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v, %v,%v\n", s.size, x, y, x+len(b), len(b), string(b), len(s.chars), len(s.chars[0]))
 	}
 	copy(s.chars[y][x:x+len(b)], b)
 	s.rawWriteColors(y, x, x+len(b))
-	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + len(b)})
+	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + len(b)}, cr)
 }
 
 // rawWriteColors copies one line of current colors to the screen, from x1 to x2
@@ -263,9 +302,9 @@ func (s *screen) scroll(y1 int, y2 int, dy int) {
 			copy(s.backColors[y], s.backColors[y-dy])
 		}
 		// these are non-inclusive, so need +1
-		s.frontend.RegionChanged(Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X})
+		s.frontend.RegionChanged(Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 		debugPrintln(debugScroll, "scroll changed region:", Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
-		s.eraseRegion(Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
+		s.eraseRegion(Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X}, CRScroll)
 	} else {
 		for y := y1; y <= y2+dy; y++ {
 			// fmt.Println("   3: ", y, y1, y2+dy)
@@ -274,8 +313,8 @@ func (s *screen) scroll(y1 int, y2 int, dy int) {
 			copy(s.backColors[y], s.backColors[y-dy])
 		}
 		// these are non-inclusive, so need +1
-		s.frontend.RegionChanged(Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X})
-		s.eraseRegion(Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X})
+		s.frontend.RegionChanged(Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X}, CRScroll)
+		s.eraseRegion(Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 	}
 }
 
@@ -290,10 +329,10 @@ func clamp(v int, low, high int) int {
 }
 
 func (s *screen) clampRegion(r Region) Region {
-	r.X = clamp(r.X, 0, s.size.X-1)
-	r.Y = clamp(r.Y, 0, s.size.Y-1)
-	r.X2 = clamp(r.X2, 0, s.size.X-1)
-	r.Y2 = clamp(r.Y2, 0, s.size.Y-1)
+	r.X = clamp(r.X, 0, s.size.X)
+	r.Y = clamp(r.Y, 0, s.size.Y)
+	r.X2 = clamp(r.X2, 0, s.size.X)
+	r.Y2 = clamp(r.Y2, 0, s.size.Y)
 	return r
 }
 
@@ -302,11 +341,11 @@ func (s *screen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 		s.cursorPos.X += dx
 		for s.cursorPos.X < 0 {
 			s.cursorPos.X += s.size.X
-			s.cursorPos.Y -= 1
+			s.cursorPos.Y--
 		}
 		for s.cursorPos.X >= s.size.X {
 			s.cursorPos.X -= s.size.X
-			s.cursorPos.Y += 1
+			s.cursorPos.Y++
 		}
 	} else {
 		s.cursorPos.X += dx

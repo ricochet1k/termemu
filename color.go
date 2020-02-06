@@ -11,9 +11,10 @@ type ColorMode uint32
 type ColorType uint32
 
 const (
-	mask256color Color = 256 - 1
+	mask256color Color = 0xff
 	maskRGBcolor Color = 0xffffff // 24-bit
 
+	ColDefault Color = mask256color + 1 // outside the range
 	ColBlack   Color = 0
 	ColRed     Color = 1
 	ColGreen   Color = 2
@@ -53,7 +54,6 @@ var ColorModes = []ColorMode{
 	ModeDim,
 	ModeItalic,
 	ModeUnderline,
-	ModeBlink,
 	ModeBlink,
 	ModeReverse,
 	ModeInvisible,
@@ -144,6 +144,8 @@ func ansiEscapeColor(c Color, ctype byte) []byte {
 	case ColorType256:
 		if color < 8 {
 			seq = append(seq, ESC, '[', ctype, byte(colorStr[0]), 'm')
+		} else if c == ColDefault {
+			// ANSIEscape below already resets colors, so we don't have to do anything here
 		} else {
 			seq = append(seq, ESC, '[', ctype, '8', ';', '5', ';')
 			seq = append(seq, []byte(colorStr+"m")...)

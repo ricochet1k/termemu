@@ -82,7 +82,7 @@ func qmlLoop() error {
 func (c *Ctrl) SetView(o qml.Object) {
 
 	f := &qmlfrontend{}
-	c.terminal = termemu.New()
+	c.terminal = termemu.New(f)
 	c.terminal.SetFrontend(f)
 	f.t = c.terminal
 	ctrl.terminal = c.terminal
@@ -178,10 +178,11 @@ func (c *Ctrl) RedrawAll() {
 		return
 	}
 	w, h := c.terminal.Size()
-	c.frontend.RegionChanged(termemu.Region{X: 0, Y: 0, X2: w, Y2: h})
+	c.frontend.RegionChanged(termemu.Region{X: 0, Y: 0, X2: w, Y2: h}, termemu.CRRedraw)
 }
 
 type qmlfrontend struct {
+	termemu.EmptyFrontend
 	t termemu.Terminal
 }
 
@@ -193,7 +194,7 @@ func (f *qmlfrontend) CursorMoved(x, y int) {
 	ctrl.termObj.Call("cursorMoved", x, y)
 }
 
-func (f *qmlfrontend) RegionChanged(r termemu.Region) {
+func (f *qmlfrontend) RegionChanged(r termemu.Region, cr termemu.ChangeReason) {
 	for y := r.Y; y < r.Y2; y++ {
 		line := ctrl.terminal.Line(y)
 		fgColors, bgColors := ctrl.terminal.LineColors(y)

@@ -76,7 +76,9 @@ func (t *terminal) ptyReadLoop() {
 			}
 		}
 		if len(runes) > 0 {
-			t.screen.writeRunes(runes)
+			t.WithLock(func() {
+				t.screen().writeRunes(runes)
+			})
 			debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", string(runes), len(runes))
 
 			if r.Buffered() == 0 {
@@ -92,45 +94,58 @@ func (t *terminal) ptyReadLoop() {
 		case 5: // ENQ ^E Return Terminal Status
 			debugPrintln(debugTodo, "TODO: ENQ")
 		case 7: // BEL ^G Bell
-			t.frontend.Bell()
+			t.WithLock(func() {
+				t.frontend.Bell()
+			})
 
 		case 8: // BS ^H Backspace
-			t.screen.moveCursor(-1, 0, false, false)
+			t.WithLock(func() {
+				t.screen().moveCursor(-1, 0, false, false)
+			})
 
 		case 9: // HT ^I Horizontal TAB
 			debugPrintln(debugTodo, "TODO: tab")
 
 		case 10: // LF ^J Linefeed (newline)
-			t.screen.moveCursor(0, 1, true, true)
+			t.WithLock(func() {
+				t.screen().moveCursor(0, 1, true, true)
+			})
 
 		case 11: // VT ^K Vertical TAB
 			debugPrintln(debugTodo, "TODO: vtab")
 
 		case 12: // FF ^L Formfeed (also: New page NP)
-			t.screen.moveCursor(0, 1, false, true)
+			t.WithLock(func() {
+				t.screen().moveCursor(0, 1, false, true)
+			})
 
 		case 13: // CR ^M Carriage Return
-			t.screen.moveCursor(-t.screen.cursorPos.X, 0, true, true)
+			t.WithLock(func() {
+				t.screen().moveCursor(-t.screen().cursorPos.X, 0, true, true)
+			})
 
 		case 27: // ESC ^[ Escape Character
 
 			var cmdBytes bytes.Buffer
 			r.buf = &cmdBytes
-			success := t.handleCommand(r)
-			r.buf = nil
-			cmd := cmdBytes.Bytes()
 
-			if success {
-				debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen.cursorPos, string(cmd))
-				if string(cmd) == "[?25l" {
-					// hide cursor
-					if t.dup != nil {
-						t.dup.Write([]byte(string("\033[?25h")))
+			t.WithLock(func() {
+				success := t.handleCommand(r)
+				r.buf = nil
+				cmd := cmdBytes.Bytes()
+
+				if success {
+					debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().cursorPos, string(cmd))
+					if string(cmd) == "[?25l" {
+						// hide cursor
+						if t.dup != nil {
+							t.dup.Write([]byte(string("\033[?25h")))
+						}
 					}
+				} else {
+					debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
 				}
-			} else {
-				debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
-			}
+			})
 			continue
 
 		case 127: // DEL  Delete Character
@@ -156,10 +171,10 @@ func (t *terminal) handleCommand(r *dupReader) bool {
 		debugPrintln(debugTodo, "TODO: cmd: reset") // TODO
 
 	case 'D': // Index, scroll down if necessary
-		t.screen.moveCursor(0, 1, false, true)
+		t.screen().moveCursor(0, 1, false, true)
 
 	case 'M': // Reverse index, scroll up if necessary
-		t.screen.moveCursor(0, -1, false, true)
+		t.screen().moveCursor(0, -1, false, true)
 
 	case '[': // CSI Control Sequence Introducer
 		return t.handleCmdCSI(r)
@@ -245,28 +260,28 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.moveCursor(0, -params[0], false, true)
+			t.screen().moveCursor(0, -params[0], false, true)
 		case 'B': // Move cursor down
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.moveCursor(0, params[0], false, true)
+			t.screen().moveCursor(0, params[0], false, true)
 		case 'C': // Move cursor forward
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.moveCursor(params[0], 0, false, false)
+			t.screen().moveCursor(params[0], 0, false, false)
 		case 'D': // Move cursor backward
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.moveCursor(-params[0], 0, false, false)
+			t.screen().moveCursor(-params[0], 0, false, false)
 
 		case 'G': // Cursor Character Absolute
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.setCursorPos(params[0]-1, t.screen.cursorPos.Y)
+			t.screen().setCursorPos(params[0]-1, t.screen().cursorPos.Y)
 
 		case 'c': // Send Device Attributes
 			if len(params) == 0 {
@@ -281,7 +296,7 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.setCursorPos(t.screen.cursorPos.X, params[0]-1)
+			t.screen().setCursorPos(t.screen().cursorPos.X, params[0]-1)
 
 		case 'f', 'H': // Cursor Home
 			x := 1
@@ -293,7 +308,7 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 				x = params[1]
 			}
 			// debugPrintf("cursor home: %v, %v\n", x, y)
-			t.screen.setCursorPos(x-1, y-1)
+			t.screen().setCursorPos(x-1, y-1)
 
 		case 'h', 'l': // h=Set, l=Reset Mode
 			var value bool
@@ -319,8 +334,8 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 				params = []int{0}
 			}
 
-			fc := t.screen.frontColor
-			bc := t.screen.backColor
+			fc := t.screen().frontColor
+			bc := t.screen().backColor
 
 			for i := 0; i < len(params); i++ {
 				p := params[i]
@@ -394,7 +409,7 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
 				// debugPrintf("m %v: %x, %x\n", p, fc, bc)
 
-				t.screen.setColors(fc, bc)
+				t.screen().setColors(fc, bc)
 			}
 
 		case 'K': // Erase
@@ -403,26 +418,26 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
 			switch {
 			case len(params) == 0 || params[0] == 0: // Erase to end of line
-				t.screen.eraseRegion(Region{
-					X:  t.screen.cursorPos.X,
-					Y:  t.screen.cursorPos.Y,
-					X2: t.screen.size.X,
-					Y2: t.screen.cursorPos.Y + 1,
-				})
+				t.screen().eraseRegion(Region{
+					X:  t.screen().cursorPos.X,
+					Y:  t.screen().cursorPos.Y,
+					X2: t.screen().size.X,
+					Y2: t.screen().cursorPos.Y + 1,
+				}, CRClear)
 			case params[0] == 1: // Erase to start of line
-				t.screen.eraseRegion(Region{
+				t.screen().eraseRegion(Region{
 					X:  0,
-					Y:  t.screen.cursorPos.Y,
-					X2: t.screen.cursorPos.X,
-					Y2: t.screen.cursorPos.Y + 1,
-				})
+					Y:  t.screen().cursorPos.Y,
+					X2: t.screen().cursorPos.X,
+					Y2: t.screen().cursorPos.Y + 1,
+				}, CRClear)
 			case params[0] == 2: // Erase entire line
-				t.screen.eraseRegion(Region{
+				t.screen().eraseRegion(Region{
 					X:  0,
-					Y:  t.screen.cursorPos.Y,
-					X2: t.screen.size.X,
-					Y2: t.screen.cursorPos.Y + 1,
-				})
+					Y:  t.screen().cursorPos.Y,
+					X2: t.screen().size.X,
+					Y2: t.screen().cursorPos.Y + 1,
+				}, CRClear)
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled K params: ", params)
 				return false
@@ -434,27 +449,27 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
 			switch {
 			case len(params) == 0 || params[0] == 0: // Erase to bottom of screen
-				t.screen.eraseRegion(Region{
+				t.screen().eraseRegion(Region{
 					X:  0,
-					Y:  t.screen.cursorPos.Y,
-					X2: t.screen.size.X,
-					Y2: t.screen.size.Y,
-				})
+					Y:  t.screen().cursorPos.Y,
+					X2: t.screen().size.X,
+					Y2: t.screen().size.Y,
+				}, CRClear)
 			case params[0] == 1: // Erase to top of screen
-				t.screen.eraseRegion(Region{
+				t.screen().eraseRegion(Region{
 					X:  0,
 					Y:  0,
-					X2: t.screen.size.X,
-					Y2: t.screen.cursorPos.Y,
-				})
+					X2: t.screen().size.X,
+					Y2: t.screen().cursorPos.Y,
+				}, CRClear)
 			case params[0] == 2: // Erase screen and home cursor
-				t.screen.eraseRegion(Region{
+				t.screen().eraseRegion(Region{
 					X:  0,
 					Y:  0,
-					X2: t.screen.size.X,
-					Y2: t.screen.size.Y,
-				})
-				t.screen.setCursorPos(0, 0)
+					X2: t.screen().size.X,
+					Y2: t.screen().size.Y,
+				}, CRClear)
+				t.screen().setCursorPos(0, 0)
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled J params: ", params)
 				return false
@@ -464,52 +479,52 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.scroll(t.screen.cursorPos.Y, t.screen.bottomMargin, params[0])
+			t.screen().scroll(t.screen().cursorPos.Y, t.screen().bottomMargin, params[0])
 
 		case 'M': // Delete lines, scroll up
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.scroll(t.screen.cursorPos.Y, t.screen.bottomMargin, -params[0])
+			t.screen().scroll(t.screen().cursorPos.Y, t.screen().bottomMargin, -params[0])
 
 		case 'S': // Scroll up
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.scroll(t.screen.topMargin, t.screen.bottomMargin, -params[0])
+			t.screen().scroll(t.screen().topMargin, t.screen().bottomMargin, -params[0])
 
 		case 'T': // Scroll down
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.scroll(t.screen.topMargin, t.screen.bottomMargin, params[0])
+			t.screen().scroll(t.screen().topMargin, t.screen().bottomMargin, params[0])
 
 		case 'P': // Delete n characters
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.eraseRegion(Region{
-				X:  t.screen.cursorPos.X,
-				Y:  t.screen.cursorPos.Y,
-				X2: t.screen.cursorPos.X + params[0],
-				Y2: t.screen.cursorPos.Y + 1,
-			})
+			t.screen().eraseRegion(Region{
+				X:  t.screen().cursorPos.X,
+				Y:  t.screen().cursorPos.Y,
+				X2: t.screen().cursorPos.X + params[0],
+				Y2: t.screen().cursorPos.Y + 1,
+			}, CRClear)
 			debugPrintln(debugTodo, "TODO: Delete", params[0], "chars")
 
 		case 'X': // Erase from cursor pos to the right
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen.eraseRegion(Region{
-				X:  t.screen.cursorPos.X,
-				Y:  t.screen.cursorPos.Y,
-				X2: t.screen.cursorPos.X + params[0],
-				Y2: t.screen.cursorPos.Y + 1,
-			})
+			t.screen().eraseRegion(Region{
+				X:  t.screen().cursorPos.X,
+				Y:  t.screen().cursorPos.Y,
+				X2: t.screen().cursorPos.X + params[0],
+				Y2: t.screen().cursorPos.Y + 1,
+			}, CRClear)
 
 		case 'r': // Set Scroll margins
 			top := 1
-			bottom := t.screen.size.Y
+			bottom := t.screen().size.Y
 			if len(params) >= 1 {
 				top = params[0]
 			}
@@ -517,7 +532,7 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 				bottom = params[1]
 			}
 			// debugPrintf("cursor home: %v, %v\n", x, y)
-			t.screen.setScrollMarginTopBottom(top-1, bottom-1)
+			t.screen().setScrollMarginTopBottom(top-1, bottom-1)
 
 		case 'n': // Device Status Report
 
@@ -539,65 +554,65 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 					debugPrintln(debugTodo, "TODO: Application Cursor Keys =", value) // TODO
 
 				case 7: // Wraparound
-					t.screen.autoWrap = value
+					t.screen().autoWrap = value
 
 				case 9: // Send MouseXY on press
 					debugPrintln(debugTodo, "TODO: Send MouseXY on press =", value) // TODO
 					if value {
-						t.setViewInt(VI_MouseMode, MM_Press)
+						t.setViewInt(VIMouseMode, MMPress)
 					} else {
-						t.setViewInt(VI_MouseMode, MM_None)
+						t.setViewInt(VIMouseMode, MMNone)
 					}
 
 				case 12: // Blink Cursor
-					t.setViewFlag(VF_BlinkCursor, value)
+					t.setViewFlag(VFBlinkCursor, value)
 
 				case 25: // Show Cursor
-					t.setViewFlag(VF_ShowCursor, value)
+					t.setViewFlag(VFShowCursor, value)
 
 				case 1000: // Send MouseXY on press/release
 					if value {
-						t.setViewInt(VI_MouseMode, MM_PressRelease)
+						t.setViewInt(VIMouseMode, MMPressRelease)
 					} else {
-						t.setViewInt(VI_MouseMode, MM_None)
+						t.setViewInt(VIMouseMode, MMNone)
 					}
 
 				case 1002: // Cell Motion Mouse Tracking
 					if value {
-						t.setViewInt(VI_MouseMode, MM_PressReleaseMove)
+						t.setViewInt(VIMouseMode, MMPressReleaseMove)
 					} else {
-						t.setViewInt(VI_MouseMode, MM_None)
+						t.setViewInt(VIMouseMode, MMNone)
 					}
 
 				case 1003: // All Motion Mouse Tracking
 					if value {
-						t.setViewInt(VI_MouseMode, MM_PressReleaseMoveAll)
+						t.setViewInt(VIMouseMode, MMPressReleaseMoveAll)
 					} else {
-						t.setViewInt(VI_MouseMode, MM_None)
+						t.setViewInt(VIMouseMode, MMNone)
 					}
 
 				case 1004: // Report focus changed
-					t.setViewFlag(VF_ReportFocus, value)
+					t.setViewFlag(VFReportFocus, value)
 
 				case 1005: // xterm UTF-8 extended mouse reporting
 					if value {
-						t.setViewInt(VI_MouseEncoding, ME_UTF8)
+						t.setViewInt(VIMouseEncoding, MEUTF8)
 					} else {
-						t.setViewInt(VI_MouseEncoding, ME_X10)
+						t.setViewInt(VIMouseEncoding, MEX10)
 					}
 
 				case 1006: // xterm SGR extended mouse reporting
 					if value {
-						t.setViewInt(VI_MouseEncoding, ME_SGR)
+						t.setViewInt(VIMouseEncoding, MESGR)
 					} else {
-						t.setViewInt(VI_MouseEncoding, ME_X10)
+						t.setViewInt(VIMouseEncoding, MEX10)
 					}
 
 				case 1049: // Save/Restore cursor and alternate screen
 					debugPrintln(debugTodo, "TODO: Save Cursor and alternate screen =", value) // TODO
 
 				case 2004: // Bracketed paste
-					t.setViewFlag(VF_BracketedPaste, value)
+					t.setViewFlag(VFBracketedPaste, value)
 
 				default:
 					debugPrintf(debugTodo, "TODO: Unhandled flag: %#v %v, %v %#v\n", string(prefix), params, p, string(b))
@@ -674,19 +689,19 @@ func (t *terminal) handleCmdOSC(r *dupReader) bool {
 
 	switch param {
 	case 0:
-		t.setViewString(VS_WindowTitle, string(param2))
+		t.setViewString(VSWindowTitle, string(param2))
 
 	case 2:
-		t.setViewString(VS_WindowTitle, string(param2))
+		t.setViewString(VSWindowTitle, string(param2))
 
 	case 4:
 		debugPrintf(debugTodo, "TODO: change color : %#v\n", string(param2))
 
 	case 6:
-		t.setViewString(VS_CurrentDirectory, string(param2))
+		t.setViewString(VSCurrentDirectory, string(param2))
 
 	case 7:
-		t.setViewString(VS_CurrentFile, string(param2))
+		t.setViewString(VSCurrentFile, string(param2))
 
 	case 104:
 		debugPrintln(debugTodo, "TODO: Reset Color Palette", string(param2))

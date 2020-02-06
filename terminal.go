@@ -6,14 +6,20 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
-	"unsafe"
 
-	"github.com/kr/pty"
+	"github.com/creack/pty"
 )
 
+// Terminal is a wrapper around a pty that sends rendering commands
+// to a provided Frontend.
 type Terminal interface {
 	SetFrontend(f Frontend)
+
+	Lock()
+	Unlock()
+	WithLock(func())
 
 	StartCommand(c *exec.Cmd) error
 	Write(b []byte) (int, error)
@@ -22,14 +28,20 @@ type Terminal interface {
 	Line(int) []rune
 	ANSILine(y int) string
 	LineColors(int) ([]Color, []Color)
+	StyledLine(x, w, y int) *Line
+	StyledLines(r Region) []*Line
 	DupTo(*os.File)
 
 	PrintTerminal() // for debugging
 }
 
 type terminal struct {
-	frontend Frontend
-	screen   *screen
+	sync.Mutex
+
+	frontend    Frontend
+	onAltScreen bool
+	mainScreen  *screen
+	altScreen   *screen
 
 	pty, tty *os.File
 	dup      *os.File
@@ -39,11 +51,17 @@ type terminal struct {
 	viewStrings []string
 }
 
+// New makes a new terminal using the provided Frontend
 func New(f Frontend) Terminal {
+
+	if f == nil {
+		f = &EmptyFrontend{}
+	}
 
 	t := &terminal{
 		frontend:    f,
-		screen:      newScreen(f),
+		mainScreen:  newScreen(f),
+		altScreen:   newScreen(f),
 		viewFlags:   make([]bool, viewFlagCount),
 		viewInts:    make([]int, viewIntCount),
 		viewStrings: make([]string, viewStringCount),
@@ -65,7 +83,8 @@ func New(f Frontend) Terminal {
 
 func (t *terminal) SetFrontend(f Frontend) {
 	t.frontend = f
-	t.screen.frontend = f
+	t.mainScreen.frontend = f
+	t.altScreen.frontend = f
 }
 
 // func NewNoPTY(f Frontend) Terminal {
@@ -122,59 +141,61 @@ func (t *terminal) Write(b []byte) (int, error) {
 }
 
 func (t *terminal) Size() (w, h int) {
-	return t.screen.size.X, t.screen.size.Y
+	return t.screen().size.X, t.screen().size.Y
 }
 
 type winsize struct {
-	ws_row    uint16
-	ws_col    uint16
-	ws_xpixel uint16
-	ws_ypixel uint16
+	wsRow    uint16
+	wsCol    uint16
+	wsXPixel uint16
+	wsYPixel uint16
 }
 
 func (t *terminal) Resize(w, h int) error {
 
-	ws := winsize{
-		ws_row:    uint16(h),
-		ws_col:    uint16(w),
-		ws_xpixel: uint16(w * 8),
-		ws_ypixel: uint16(h * 16),
+	err := pty.Setsize(t.pty, &pty.Winsize{
+		Rows: uint16(h),
+		Cols: uint16(w),
+		X:    uint16(w * 8),
+		Y:    uint16(h * 16),
+	})
+	if err != nil {
+		return err
 	}
 
-	_, _, errno := syscall.Syscall(
-		syscall.SYS_IOCTL,
-		t.pty.Fd(),
-		syscall.TIOCSWINSZ,
-		uintptr(unsafe.Pointer(&ws)),
-	)
-	if errno != 0 {
-		return syscall.Errno(errno)
-	}
-
-	t.screen.setSize(w, h)
+	t.mainScreen.setSize(w, h)
+	t.altScreen.setSize(w, h)
 
 	return nil
 }
 
 func (t *terminal) Line(y int) []rune {
-	if y >= t.screen.size.Y {
+	if y >= t.screen().size.Y {
 		return nil
 	}
-	return t.screen.getLine(y)
+	return t.screen().getLine(y)
 }
 
 func (t *terminal) ANSILine(y int) string {
-	if y >= t.screen.size.Y {
+	if y >= t.screen().size.Y {
 		return ""
 	}
-	return t.screen.renderLineANSI(y)
+	return t.screen().renderLineANSI(y)
 }
 
 func (t *terminal) LineColors(y int) (fg []Color, bg []Color) {
-	if y >= t.screen.size.Y {
+	if y >= t.screen().size.Y {
 		return nil, nil
 	}
-	return t.screen.getLineColors(y)
+	return t.screen().getLineColors(y)
+}
+
+func (t *terminal) StyledLine(x, w, y int) *Line {
+	return t.screen().StyledLine(x, w, y)
+}
+
+func (t *terminal) StyledLines(r Region) []*Line {
+	return t.screen().StyledLines(r)
 }
 
 func (t *terminal) DupTo(f *os.File) {
@@ -182,51 +203,54 @@ func (t *terminal) DupTo(f *os.File) {
 }
 
 func (t *terminal) PrintTerminal() {
-	t.screen.printScreen()
+	t.screen().printScreen()
 }
+
+type MouseBtn byte
+type MouseFlag byte
 
 const (
 	// low 2 bits
-	M_btn1     = 0
-	M_btn2     = 1
-	M_btn3     = 2
-	M_release  = 3
-	M_whichBtn = 3
+	MBtn1     MouseBtn = 0
+	MBtn2     MouseBtn = 1
+	MBtn3     MouseBtn = 2
+	MRelease  MouseBtn = 3
+	mWhichBtn byte     = 3
 
 	// flags
-	M_shift   = 4
-	M_meta    = 8
-	M_control = 16
-	M_motion  = 32
-	M_wheel   = 64
+	MShift   MouseFlag = 4
+	MMeta    MouseFlag = 8
+	MControl MouseFlag = 16
+	MMotion  MouseFlag = 32
+	MWheel   MouseFlag = 64
 )
 
 // x and y should start at 1
 // wheel events should use btn1 for wheel up, btn2 for wheel down, true for press, and M_wheel for mods
-func (t *terminal) SendMouseRaw(btn byte, press bool, mods byte, x, y int) {
-	switch t.viewInts[VI_MouseMode] {
-	case MM_None:
+func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int) {
+	switch t.viewInts[VIMouseMode] {
+	case MMNone:
 		return
-	case MM_Press:
+	case MMPress:
 		if !press {
 			return
 		}
-	case MM_PressRelease:
-		if mods&M_motion != 0 {
+	case MMPressRelease:
+		if mods&MMotion != 0 {
 			return
 		}
-	case MM_PressReleaseMove:
-		if mods&M_whichBtn == M_release {
+	case MMPressReleaseMove:
+		if byte(mods)&mWhichBtn == byte(MRelease) {
 			return
 		}
-	case MM_PressReleaseMoveAll:
+	case MMPressReleaseMoveAll:
 	}
 
-	switch t.viewInts[VI_MouseEncoding] {
-	case ME_X10:
-		btnByte := (btn & M_whichBtn) | mods
+	switch t.viewInts[VIMouseEncoding] {
+	case MEX10:
+		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
 		if !press {
-			btnByte |= M_release
+			btnByte |= byte(MRelease)
 		}
 
 		if 32+x > 255 {
@@ -238,16 +262,16 @@ func (t *terminal) SendMouseRaw(btn byte, press bool, mods byte, x, y int) {
 
 		t.Write([]byte("\033[M" + string(32+btnByte) + string(byte(32+x)) + string(byte(32+y))))
 
-	case ME_UTF8:
-		btnByte := (btn & M_whichBtn) | mods
+	case MEUTF8:
+		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
 		if !press {
-			btnByte |= M_release
+			btnByte |= byte(MRelease)
 		}
 
 		t.Write([]byte("\033[M" + string(32+btnByte) + string(rune(32+x)) + string(rune(32+y))))
 
-	case ME_SGR:
-		btnByte := (btn & M_whichBtn) | mods
+	case MESGR:
+		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
 		pressByte := 'M'
 		if !press {
 			pressByte = 'm'
@@ -276,4 +300,24 @@ func (t *terminal) setViewString(flag ViewString, value string) {
 }
 func (t *terminal) GetViewString(flag ViewString) string {
 	return t.viewStrings[flag]
+}
+
+// returns screen and unlock fn, must defer the unlock fn
+func (t *terminal) screen() *screen {
+	if t.onAltScreen {
+		return t.altScreen
+	}
+	return t.mainScreen
+}
+
+// calls f with screen locked
+func (t *terminal) WithLock(f func()) {
+	t.Lock()
+	defer t.Unlock()
+	f()
+}
+
+func (t *terminal) switchScreen() {
+	t.onAltScreen = !t.onAltScreen
+	t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: t.screen().size.X, Y2: t.screen().size.Y}, CRScreenSwitch)
 }
