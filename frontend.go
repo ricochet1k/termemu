@@ -14,6 +14,17 @@ func (r Region) Add(x, y int) Region {
 	}
 }
 
+func (r Region) Clamp(rc Region) Region {
+	nx := clamp(r.X, rc.X, rc.X2)
+	ny := clamp(r.Y, rc.Y, rc.Y2)
+	return Region{
+		X:  nx,
+		X2: clamp(r.X2, nx, rc.X2),
+		Y:  ny,
+		Y2: clamp(r.Y2, ny, rc.X2),
+	}
+}
+
 // ViewFlag is an enum of boolean flags on a terminal
 type ViewFlag int
 

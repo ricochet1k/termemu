@@ -18,7 +18,7 @@ var (
 	debugScroll  = flag.Bool("debugScroll", false, "Print scroll debugging")
 	debugTxt     = flag.Bool("debugTxt", false, "Print all text written to screen")
 	debugCmd     = flag.Bool("debugCmd", false, "Print all commands")
-	debugTodo    = flag.Bool("debugTodo", false, "Print TODO commands")
+	debugTodo    = flag.Bool("debugTodo", true, "Print TODO commands")
 	debugErrors  = flag.Bool("debugErrors", true, "Print Errors")
 
 	debugWait = flag.Bool("debugWait", false, "Pause on every debug command")
