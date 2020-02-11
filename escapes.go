@@ -412,6 +412,9 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 				t.screen().setColors(fc, bc)
 			}
 
+		case 't': // Window manipulation
+			debugPrintln(debugTodo, "TODO: Unhandled window manipulation: ", params)
+
 		case 'K': // Erase
 			// eraseRegion clamps the region to the window, so we don't have to be too careful here
 			// debugPrintln("erase: ", params)
@@ -608,8 +611,11 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 						t.setViewInt(VIMouseEncoding, MEX10)
 					}
 
+				case 1034:
+					debugPrintf(debugTodo, "TODO: Interpret Meta key = %v\n", value)
+
 				case 1049: // Save/Restore cursor and alternate screen
-					debugPrintln(debugTodo, "TODO: Save Cursor and alternate screen =", value) // TODO
+					t.switchScreen()
 
 				case 2004: // Bracketed paste
 					t.setViewFlag(VFBracketedPaste, value)
