@@ -55,20 +55,25 @@ const (
 	viewStringCount
 )
 
+type MouseMode int
+
 // Mouse modes for VI_MouseMode
 const (
-	MMNone int = iota
+	MMNone MouseMode = iota
 	MMPress
 	MMPressRelease
 	MMPressReleaseMove
 	MMPressReleaseMoveAll
 )
 
+type MouseEncoding int32
+
 // Mouse encodings for VI_MouseEncoding
 const (
-	MEX10 int = iota
+	MEX10 MouseEncoding = iota
 	MEUTF8
 	MESGR
+	// MEURXVT // Not supported
 )
 
 // ChangeReason says what kind of change caused the region to change, for optimization etc.

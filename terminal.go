@@ -31,6 +31,7 @@ type Terminal interface {
 	StyledLine(x, w, y int) *Line
 	StyledLines(r Region) []*Line
 	DupTo(*os.File)
+	// SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int)
 
 	PrintTerminal() // for debugging
 }
@@ -206,29 +207,14 @@ func (t *terminal) PrintTerminal() {
 	t.screen().printScreen()
 }
 
-type MouseBtn byte
-type MouseFlag byte
+func (t *terminal) SendMouse(evt *EventMouse) {
 
-const (
-	// low 2 bits
-	MBtn1     MouseBtn = 0
-	MBtn2     MouseBtn = 1
-	MBtn3     MouseBtn = 2
-	MRelease  MouseBtn = 3
-	mWhichBtn byte     = 3
-
-	// flags
-	MShift   MouseFlag = 4
-	MMeta    MouseFlag = 8
-	MControl MouseFlag = 16
-	MMotion  MouseFlag = 32
-	MWheel   MouseFlag = 64
-)
+}
 
 // x and y should start at 1
 // wheel events should use btn1 for wheel up, btn2 for wheel down, true for press, and M_wheel for mods
-func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int) {
-	switch t.viewInts[VIMouseMode] {
+func (t *terminal) SendMouseRaw(btnByte byte, press bool, x, y int) {
+	switch MouseMode(t.viewInts[VIMouseMode]) {
 	case MMNone:
 		return
 	case MMPress:
@@ -236,21 +222,20 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 			return
 		}
 	case MMPressRelease:
-		if mods&MMotion != 0 {
+		if btnByte&byte(mMotion) != 0 {
 			return
 		}
 	case MMPressReleaseMove:
-		if byte(mods)&mWhichBtn == byte(MRelease) {
+		if btnByte&mWhichBtn == byte(mRelease) {
 			return
 		}
 	case MMPressReleaseMoveAll:
 	}
 
-	switch t.viewInts[VIMouseEncoding] {
+	switch MouseEncoding(t.viewInts[VIMouseEncoding]) {
 	case MEX10:
-		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
 		if !press {
-			btnByte |= byte(MRelease)
+			btnByte |= byte(mRelease)
 		}
 
 		if 32+x > 255 {
@@ -263,15 +248,13 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 		t.Write([]byte("\033[M" + string(32+btnByte) + string(byte(32+x)) + string(byte(32+y))))
 
 	case MEUTF8:
-		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
 		if !press {
-			btnByte |= byte(MRelease)
+			btnByte |= byte(mRelease)
 		}
 
 		t.Write([]byte("\033[M" + string(32+btnByte) + string(rune(32+x)) + string(rune(32+y))))
 
 	case MESGR:
-		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
 		pressByte := 'M'
 		if !press {
 			pressByte = 'm'

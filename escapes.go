@@ -3,6 +3,7 @@ package termemu
 import (
 	"bufio"
 	"bytes"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -215,22 +216,16 @@ func (t *terminal) handleCommand(r *dupReader) bool {
 	return true
 }
 
-func (t *terminal) handleCmdCSI(r *dupReader) bool {
-
-	b, _, err := r.ReadRune()
-	if err != nil {
-		debugPrintln(debugErrors, err)
-		return false
+func readCSI(r io.RuneReader) (prefix []byte, params []int, b rune, err error) {
+	if b, _, err = r.ReadRune(); err != nil {
+		return nil, nil, 0, err
 	}
 
-	var prefix = []byte{}
 	if b == '?' || b == '>' {
 		prefix = append(prefix, byte(b))
 
-		b, _, err = r.ReadRune()
-		if err != nil {
-			debugPrintln(debugErrors, err)
-			return false
+		if b, _, err = r.ReadRune(); err != nil {
+			return nil, nil, 0, err
 		}
 	}
 
@@ -238,10 +233,8 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 	for b == ';' || (b >= '0' && b <= '9') {
 		paramBytes = append(paramBytes, byte(b))
 
-		b, _, err = r.ReadRune()
-		if err != nil {
-			debugPrintln(debugErrors, err)
-			return false
+		if b, _, err = r.ReadRune(); err != nil {
+			return nil, nil, 0, err
 		}
 	}
 
@@ -249,9 +242,19 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 	if len(paramParts) == 1 && paramParts[0] == "" {
 		paramParts = []string{}
 	}
-	params := make([]int, len(paramParts))
+	params = make([]int, len(paramParts))
 	for i, p := range paramParts {
 		params[i], _ = strconv.Atoi(p)
+	}
+
+	return prefix, params, b, nil
+}
+
+func (t *terminal) handleCmdCSI(r *dupReader) bool {
+	prefix, params, b, err := readCSI(r)
+	if err != nil {
+		debugPrintln(debugErrors, err)
+		return false
 	}
 
 	if string(prefix) == "" {
@@ -562,9 +565,9 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 				case 9: // Send MouseXY on press
 					debugPrintln(debugTodo, "TODO: Send MouseXY on press =", value) // TODO
 					if value {
-						t.setViewInt(VIMouseMode, MMPress)
+						t.setViewInt(VIMouseMode, int(MMPress))
 					} else {
-						t.setViewInt(VIMouseMode, MMNone)
+						t.setViewInt(VIMouseMode, int(MMNone))
 					}
 
 				case 12: // Blink Cursor
@@ -575,23 +578,23 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
 				case 1000: // Send MouseXY on press/release
 					if value {
-						t.setViewInt(VIMouseMode, MMPressRelease)
+						t.setViewInt(VIMouseMode, int(MMPressRelease))
 					} else {
-						t.setViewInt(VIMouseMode, MMNone)
+						t.setViewInt(VIMouseMode, int(MMNone))
 					}
 
 				case 1002: // Cell Motion Mouse Tracking
 					if value {
-						t.setViewInt(VIMouseMode, MMPressReleaseMove)
+						t.setViewInt(VIMouseMode, int(MMPressReleaseMove))
 					} else {
-						t.setViewInt(VIMouseMode, MMNone)
+						t.setViewInt(VIMouseMode, int(MMNone))
 					}
 
 				case 1003: // All Motion Mouse Tracking
 					if value {
-						t.setViewInt(VIMouseMode, MMPressReleaseMoveAll)
+						t.setViewInt(VIMouseMode, int(MMPressReleaseMoveAll))
 					} else {
-						t.setViewInt(VIMouseMode, MMNone)
+						t.setViewInt(VIMouseMode, int(MMNone))
 					}
 
 				case 1004: // Report focus changed
@@ -599,16 +602,16 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
 				case 1005: // xterm UTF-8 extended mouse reporting
 					if value {
-						t.setViewInt(VIMouseEncoding, MEUTF8)
+						t.setViewInt(VIMouseEncoding, int(MEUTF8))
 					} else {
-						t.setViewInt(VIMouseEncoding, MEX10)
+						t.setViewInt(VIMouseEncoding, int(MEX10))
 					}
 
 				case 1006: // xterm SGR extended mouse reporting
 					if value {
-						t.setViewInt(VIMouseEncoding, MESGR)
+						t.setViewInt(VIMouseEncoding, int(MESGR))
 					} else {
-						t.setViewInt(VIMouseEncoding, MEX10)
+						t.setViewInt(VIMouseEncoding, int(MEX10))
 					}
 
 				case 1034:
