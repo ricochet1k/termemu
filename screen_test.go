@@ -2,6 +2,7 @@ package termemu
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -110,5 +111,125 @@ func TestStyledLine(t *testing.T) {
 	}
 	if diff := cmp.Diff(l, want); diff != "" {
 		t.Errorf("s.StyledLine(1, 2, 0) = %#v, want %#v", l, want)
+	}
+}
+
+func TestSetSize_PreservesContent(t *testing.T) {
+	s := makeScreen(ninePatch)
+
+	// grow width and height
+	old := s.chars
+	s.setSize(8, 8)
+	// original content should be at top-left
+	for y := 0; y < len(ninePatch); y++ {
+		for x := 0; x < len(ninePatch[0]); x++ {
+			if s.chars[y][x] != old[y][x] {
+				t.Fatalf("expected preserved char at %d,%d: got %q want %q", x, y, s.chars[y][x], old[y][x])
+			}
+		}
+	}
+
+	// new areas should be spaces
+	for y := 0; y < s.size.Y; y++ {
+		for x := 6; x < s.size.X; x++ {
+			if s.chars[y][x] != ' ' {
+				t.Fatalf("expected space at new area %d,%d; got %q", x, y, s.chars[y][x])
+			}
+		}
+	}
+}
+
+func TestRawWriteRunes_RegionChanged(t *testing.T) {
+	s, mf := MakeScreenWithMock()
+	s.setSize(6, 2)
+	// write 'hi' at 1,0
+	s.rawWriteRunes(1, 0, []rune("hi"), CRText)
+	if s.chars[0][1] != 'h' || s.chars[0][2] != 'i' {
+		t.Fatalf("rawWriteRunes did not write runes: %q", string(s.chars[0]))
+	}
+	if len(mf.Regions) == 0 {
+		t.Fatalf("expected RegionChanged to be called")
+	}
+	r := mf.Regions[len(mf.Regions)-1]
+	if r.R.X != 1 || r.R.Y != 0 || r.R.X2 != 3 || r.R.Y2 != 1 || r.C != CRText {
+		t.Fatalf("unexpected RegionChanged: %#v", r)
+	}
+}
+
+func TestSetCursorPos_ClampsAndNotifies(t *testing.T) {
+	s, mf := MakeScreenWithMock()
+	s.setSize(5, 4)
+	s.setCursorPos(10, 10)
+	if s.cursorPos.X != 4 || s.cursorPos.Y != 3 {
+		t.Fatalf("expected cursor clamped to (4,3), got (%d,%d)", s.cursorPos.X, s.cursorPos.Y)
+	}
+	if mf.CursorMovedCount == 0 {
+		t.Fatalf("expected CursorMoved to be called")
+	}
+	// negative values clamp to 0
+	s.setCursorPos(-5, -2)
+	if s.cursorPos.X != 0 || s.cursorPos.Y != 0 {
+		t.Fatalf("expected cursor clamped to (0,0), got (%d,%d)", s.cursorPos.X, s.cursorPos.Y)
+	}
+}
+
+func TestMoveCursor_WrapAndScroll(t *testing.T) {
+	s, mf := MakeScreenWithMock()
+	s.setSize(5, 4)
+	// wrapping disabled: move beyond right clamps
+	s.autoWrap = false
+	s.cursorPos = Pos{X: 4, Y: 1}
+	s.moveCursor(2, 0, false, false)
+	if s.cursorPos.X != 4 {
+		t.Fatalf("expected clamp at right edge, got X=%d", s.cursorPos.X)
+	}
+
+	// wrapping enabled: should wrap to next line
+	s.autoWrap = true
+	s.cursorPos = Pos{X: 4, Y: 1}
+	s.moveCursor(1, 0, true, false)
+	if s.cursorPos.X != 0 || s.cursorPos.Y != 2 {
+		t.Fatalf("expected wrap to (0,2), got (%d,%d)", s.cursorPos.X, s.cursorPos.Y)
+	}
+
+	// scrolling: move beyond bottom with scroll true should scroll and clamp
+	s.setScrollMarginTopBottom(0, 2)
+	s.cursorPos = Pos{X: 0, Y: 2}
+	// move down by 2 with scroll true
+	s.moveCursor(0, 2, false, true)
+	// cursor Y should be set to bottomMargin-1 (1)
+	if s.cursorPos.Y != s.bottomMargin-1 {
+		t.Fatalf("expected cursor Y=%d after scroll, got %d", s.bottomMargin-1, s.cursorPos.Y)
+	}
+	if len(mf.Regions) == 0 {
+		// scroll triggers RegionChanged and eraseRegion which calls RegionChanged; ensure some regions recorded
+		t.Fatalf("expected RegionChanged calls during scroll")
+	}
+}
+
+func TestRenderLineANSI(t *testing.T) {
+	s := makeScreen([]string{"abc"})
+	// set different colors per cell
+	s.frontColors[0][0] = ColWhite.SetMode(ModeBold)
+	s.backColors[0][0] = ColBlack
+	s.frontColors[0][1] = ColRed
+	s.backColors[0][1] = ColGreen
+	out := s.renderLineANSI(0)
+	if out == "" {
+		t.Fatalf("renderLineANSI returned empty string")
+	}
+	// should contain ANSI sequences and the text
+	// ANSI codes may separate characters; ensure characters appear in order
+	idx := strings.Index(out, "a")
+	if idx < 0 {
+		t.Fatalf("renderLineANSI missing 'a': %q", out)
+	}
+	idx2 := strings.Index(out[idx+1:], "b")
+	if idx2 < 0 {
+		t.Fatalf("renderLineANSI missing 'b' after 'a': %q", out)
+	}
+	idx3 := strings.Index(out[idx+1+idx2+1:], "c")
+	if idx3 < 0 {
+		t.Fatalf("renderLineANSI missing 'c' after 'b': %q", out)
 	}
 }

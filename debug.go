@@ -12,17 +12,30 @@ var (
 	debugFile                 = flag.String("debugFile", "", "File to send debug info to")
 	debugInitCalled           = false
 
-	debugCursor  = flag.Bool("debugCursor", false, "Print cursor debugging")
-	debugCharSet = flag.Bool("debugCharSet", false, "Print character set debugging")
-	debugErase   = flag.Bool("debugErase", false, "Print erase debugging")
-	debugScroll  = flag.Bool("debugScroll", false, "Print scroll debugging")
-	debugTxt     = flag.Bool("debugTxt", false, "Print all text written to screen")
-	debugCmd     = flag.Bool("debugCmd", false, "Print all commands")
-	debugTodo    = flag.Bool("debugTodo", true, "Print TODO commands")
-	debugErrors  = flag.Bool("debugErrors", true, "Print Errors")
+	debugCursor  = new(bool)
+	debugCharSet = new(bool)
+	debugErase   = new(bool)
+	debugScroll  = new(bool)
+	debugTxt     = new(bool)
+	debugCmd     = new(bool)
+	debugTodo    = new(bool)
+	debugErrors  = new(bool)
 
-	debugWait = flag.Bool("debugWait", false, "Pause on every debug command")
+	debugWait = new(bool)
 )
+
+func DebugFlags() {
+	flag.BoolVar(debugCursor, "debugCursor", false, "Print cursor debugging")
+	flag.BoolVar(debugCharSet, "debugCharSet", false, "Print character set debugging")
+	flag.BoolVar(debugErase, "debugErase", false, "Print erase debugging")
+	flag.BoolVar(debugScroll, "debugScroll", false, "Print scroll debugging")
+	flag.BoolVar(debugTxt, "debugTxt", false, "Print all text written to screen")
+	flag.BoolVar(debugCmd, "debugCmd", false, "Print all commands")
+	flag.BoolVar(debugTodo, "debugTodo", true, "Print TODO commands")
+	flag.BoolVar(debugErrors, "debugErrors", true, "Print Errors")
+
+	flag.BoolVar(debugWait, "debugWait", false, "Pause on every debug command")
+}
 
 func initDebug() {
 	debugInitCalled = true

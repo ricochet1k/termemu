@@ -246,7 +246,7 @@ func (s *screen) insertRunes(b []rune) {
 // If you use this to write beyond the end of the line, it will panic.
 func (s *screen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
 	if y >= s.size.Y || x+len(b) > s.size.X {
-		fmt.Printf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v, %v,%v\n", s.size, x, y, x+len(b), len(b), string(b), len(s.chars), len(s.chars[0]))
+		panic(fmt.Sprintf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v, %v,%v\n", s.size, x, y, x+len(b), len(b), string(b), len(s.chars), len(s.chars[0])))
 	}
 	copy(s.chars[y][x:x+len(b)], b)
 	s.rawWriteColors(y, x, x+len(b))

@@ -31,7 +31,7 @@ func main() {
 		for {
 			n, err := os.Stdin.Read(buf)
 			if err != nil {
-				fmt.Println(err)
+				fmt.Printf("stdin read err: %v", err)
 			}
 
 			if n > 0 {

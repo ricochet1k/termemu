@@ -3,6 +3,7 @@ package termemu
 import (
 	"bufio"
 	"bytes"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -52,7 +53,9 @@ func (t *terminal) ptyReadLoop() {
 	for {
 		b, _, err := r.ReadRune()
 		if err != nil {
-			debugPrintln(debugErrors, err)
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadRune1:", err)
+			}
 			return
 		}
 
@@ -71,7 +74,9 @@ func (t *terminal) ptyReadLoop() {
 
 			b, _, err = r.ReadRune()
 			if err != nil {
-				debugPrintln(debugErrors, err)
+				if err != io.EOF {
+					debugPrintln(debugErrors, "ERR ReadRune2:", err)
+				}
 				return
 			}
 		}
@@ -160,7 +165,9 @@ func (t *terminal) ptyReadLoop() {
 func (t *terminal) handleCommand(r *dupReader) bool {
 	b, _, err := r.ReadRune()
 	if err != nil {
-		debugPrintln(debugErrors, err)
+		if err != io.EOF {
+			debugPrintln(debugErrors, "ERR ReadRune3:", err)
+		}
 		return false
 	}
 
@@ -191,7 +198,9 @@ func (t *terminal) handleCommand(r *dupReader) bool {
 	case '+': // G3
 		C, _, err := r.ReadRune()
 		if err != nil {
-			debugPrintln(debugErrors, err)
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadRune4:", err)
+			}
 			return false
 		}
 
@@ -219,7 +228,9 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
 	b, _, err := r.ReadRune()
 	if err != nil {
-		debugPrintln(debugErrors, err)
+		if err != io.EOF {
+			debugPrintln(debugErrors, "ERR ReadRune5:", err)
+		}
 		return false
 	}
 
@@ -229,7 +240,9 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
 		b, _, err = r.ReadRune()
 		if err != nil {
-			debugPrintln(debugErrors, err)
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadRune6:", err)
+			}
 			return false
 		}
 	}
@@ -240,7 +253,9 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 
 		b, _, err = r.ReadRune()
 		if err != nil {
-			debugPrintln(debugErrors, err)
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadRune7:", err)
+			}
 			return false
 		}
 	}
@@ -655,7 +670,9 @@ func (t *terminal) handleCmdOSC(r *dupReader) bool {
 	for {
 		b, _, err = r.ReadRune()
 		if err != nil {
-			debugPrintln(debugErrors, err)
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadRune8:", err)
+			}
 			return false
 		}
 
@@ -675,7 +692,9 @@ func (t *terminal) handleCmdOSC(r *dupReader) bool {
 		for {
 			b, _, err = r.ReadRune()
 			if err != nil {
-				debugPrintln(debugErrors, err)
+				if err != io.EOF {
+					debugPrintln(debugErrors, "ERR ReadRune9:", err)
+				}
 				return false
 			}
 			if b == 7 || b == 0x9c { // BEL , ST

@@ -7,9 +7,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
-
-	"github.com/creack/pty"
 )
 
 // Terminal is a wrapper around a pty that sends rendering commands
@@ -43,42 +40,41 @@ type terminal struct {
 	mainScreen  *screen
 	altScreen   *screen
 
+	backend Backend
+
 	pty, tty *os.File
 	dup      *os.File
 
 	viewFlags   []bool
 	viewInts    []int
 	viewStrings []string
+
+	readLoopStarted bool
 }
 
 // New makes a new terminal using the provided Frontend
 func New(f Frontend) Terminal {
+	return NewWithBackend(f, PTYBackend{})
+}
 
+// NewWithBackend makes a new terminal using the provided Frontend and Backend.
+func NewWithBackend(f Frontend, backend Backend) Terminal {
 	if f == nil {
 		f = &EmptyFrontend{}
 	}
+	if backend == nil {
+		backend = PTYBackend{}
+	}
 
-	t := &terminal{
+	return &terminal{
 		frontend:    f,
 		mainScreen:  newScreen(f),
 		altScreen:   newScreen(f),
+		backend:     backend,
 		viewFlags:   make([]bool, viewFlagCount),
 		viewInts:    make([]int, viewIntCount),
 		viewStrings: make([]string, viewStringCount),
 	}
-
-	var err error
-
-	t.pty, t.tty, err = pty.Open()
-	if err != nil {
-		return nil
-	}
-
-	t.Resize(t.Size())
-
-	go t.ptyReadLoop()
-
-	return t
 }
 
 func (t *terminal) SetFrontend(f Frontend) {
@@ -99,8 +95,11 @@ func (t *terminal) SetFrontend(f Frontend) {
 const termStr = "TERM=xterm-256color"
 
 func (t *terminal) StartCommand(c *exec.Cmd) error {
-	if t.pty == nil {
-		return errors.New("pty not initialized")
+	if t.backend == nil {
+		t.backend = PTYBackend{}
+	}
+	if t.pty != nil {
+		return errors.New("pty already initialized; start command before writing")
 	}
 
 	if c.Env == nil {
@@ -119,24 +118,23 @@ func (t *terminal) StartCommand(c *exec.Cmd) error {
 		c.Env = append(c.Env, termStr)
 	}
 
-	c.Stdout = t.tty
-	c.Stdin = t.tty
-	c.Stderr = t.tty
-	if c.SysProcAttr == nil {
-		c.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	c.SysProcAttr.Setctty = true
-	c.SysProcAttr.Setsid = true
-	c.SysProcAttr.Ctty = int(t.tty.Fd())
-	err := c.Start()
+	var err error
+	t.pty, t.tty, err = t.backend.Start(c)
 	if err != nil {
 		return err
 	}
+
+	t.startReadLoop()
+	w, h := t.Size()
+	_ = t.backend.Setsize(t.pty, w, h)
 
 	return nil
 }
 
 func (t *terminal) Write(b []byte) (int, error) {
+	if err := t.ensurePTYOpen(); err != nil {
+		return 0, err
+	}
 	return t.pty.Write(b)
 }
 
@@ -152,21 +150,43 @@ type winsize struct {
 }
 
 func (t *terminal) Resize(w, h int) error {
+	t.mainScreen.setSize(w, h)
+	t.altScreen.setSize(w, h)
 
-	err := pty.Setsize(t.pty, &pty.Winsize{
-		Rows: uint16(h),
-		Cols: uint16(w),
-		X:    uint16(w * 8),
-		Y:    uint16(h * 16),
-	})
+	if t.pty == nil {
+		return nil
+	}
+
+	return t.backend.Setsize(t.pty, w, h)
+}
+
+func (t *terminal) ensurePTYOpen() error {
+	if t.pty != nil {
+		return nil
+	}
+	if t.backend == nil {
+		t.backend = PTYBackend{}
+	}
+
+	var err error
+	t.pty, t.tty, err = t.backend.Open()
 	if err != nil {
 		return err
 	}
 
-	t.mainScreen.setSize(w, h)
-	t.altScreen.setSize(w, h)
+	t.startReadLoop()
+	w, h := t.Size()
+	_ = t.backend.Setsize(t.pty, w, h)
 
 	return nil
+}
+
+func (t *terminal) startReadLoop() {
+	if t.readLoopStarted {
+		return
+	}
+	t.readLoopStarted = true
+	go t.ptyReadLoop()
 }
 
 func (t *terminal) Line(y int) []rune {

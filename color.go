@@ -74,8 +74,12 @@ func (c Color) SetColorRGB(r int, g int, b int) Color {
 	r &= 0xff
 	g &= 0xff
 	b &= 0xff
+	// clear any previous RGB/256 color bits
 	c &= ^maskRGBcolor
-	return (c | Color(r<<16|g<<8|b)) & Color(colorTypeMask)
+	c &= ^mask256color
+	// set RGB color bits and mark the color type as RGB
+	c = (c | Color(r<<16|g<<8|b)) | Color(colorTypeMask)
+	return c
 }
 
 func (c Color) Color() int {
@@ -153,7 +157,7 @@ func ansiEscapeColor(c Color, ctype byte) []byte {
 	case ColorTypeRGB:
 		seq = append(seq, ESC, '[', ctype, '8', ';', '2', ';')
 		r, g, b := c.ColorRGB()
-		seq = append(seq, []byte(fmt.Sprint(r, ';', g, ';', b, 'm'))...)
+		seq = append(seq, []byte(fmt.Sprintf("%d;%d;%dm", r, g, b))...)
 	}
 	return seq
 }
