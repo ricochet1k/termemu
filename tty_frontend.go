@@ -14,6 +14,8 @@ const (
 	ansiReset         = "\x1b[0m"
 	ansiCursorShow    = "\x1b[?25h"
 	ansiCursorHide    = "\x1b[?25l"
+	ansiWrapDisable   = "\x1b[?7l"
+	ansiWrapEnable    = "\x1b[?7h"
 )
 
 // TTYFrontend renders changed regions to a terminal (tty) output.
@@ -195,12 +197,14 @@ func (t *TTYFrontend) renderRegionLocked(term Terminal, out io.Writer, r Region)
 
 	var buf bytes.Buffer
 	buf.WriteString(ansiSaveCursor)
+	buf.WriteString(ansiWrapDisable)
 	for y := r.Y; y < r.Y2; y++ {
 		buf.WriteString(ansiMoveCursor(r.X, y))
 		line := term.StyledLine(r.X, r.X2-r.X, y)
 		buf.Write(renderStyledLineANSI(line))
 	}
 	buf.WriteString(ansiReset)
+	buf.WriteString(ansiWrapEnable)
 	buf.WriteString(ansiRestoreCursor)
 
 	_, _ = out.Write(buf.Bytes())

@@ -87,6 +87,45 @@ func TestHandleCmdCSI_SetColors(t *testing.T) {
 	}
 }
 
+func TestHandleCmdCSI_DefaultColors(t *testing.T) {
+	t1, mf := MakeTerminalWithMock()
+
+	// Set non-default colors first.
+	if !t1.handleCommand(newDupReader("[31;42m", t1)) {
+		t.Fatalf("handleCommand failed for [31;42m")
+	}
+
+	// Reset all attributes/colors.
+	if !t1.handleCommand(newDupReader("[0m", t1)) {
+		t.Fatalf("handleCommand failed for [0m")
+	}
+
+	last := mf.Colors[len(mf.Colors)-1]
+	if last.F != ColDefault {
+		t.Fatalf("expected FG default after reset, got %v", last.F)
+	}
+	if last.B != ColDefault {
+		t.Fatalf("expected BG default after reset, got %v", last.B)
+	}
+
+	// Explicit default foreground/background.
+	if !t1.handleCommand(newDupReader("[39m", t1)) {
+		t.Fatalf("handleCommand failed for [39m")
+	}
+	last = mf.Colors[len(mf.Colors)-1]
+	if last.F != ColDefault {
+		t.Fatalf("expected FG default after 39m, got %v", last.F)
+	}
+
+	if !t1.handleCommand(newDupReader("[49m", t1)) {
+		t.Fatalf("handleCommand failed for [49m")
+	}
+	last = mf.Colors[len(mf.Colors)-1]
+	if last.B != ColDefault {
+		t.Fatalf("expected BG default after 49m, got %v", last.B)
+	}
+}
+
 func TestHandleCmdCSI_SetModesAndFlags(t *testing.T) {
 	// test ?25l and ?25h toggles show-cursor flag
 	t1, mf := MakeTerminalWithMock()

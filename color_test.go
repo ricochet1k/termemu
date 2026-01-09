@@ -84,3 +84,11 @@ func TestANSIEscape_Sequences(t *testing.T) {
 		t.Fatalf("ANSIEscape missing bg RGB seq: %q", string(seq2))
 	}
 }
+
+func TestANSIEscape_DefaultColors(t *testing.T) {
+	seq := ANSIEscape(ColDefault, ColDefault)
+	s := string(seq)
+	if strings.Contains(s, "\x1b[3") || strings.Contains(s, "\x1b[4") {
+		t.Fatalf("ANSIEscape should not force fg/bg for defaults: %q", s)
+	}
+}

@@ -146,10 +146,10 @@ func ansiEscapeColor(c Color, ctype byte) []byte {
 	// fmt.Printf("%v: %x %d %#v\n", t, c, color, colorStr)
 	switch t {
 	case ColorType256:
-		if color < 8 {
+		if c == ColDefault {
+			// ANSIEscape already reset colors, so leave defaults untouched
+		} else if color < 8 {
 			seq = append(seq, ESC, '[', ctype, byte(colorStr[0]), 'm')
-		} else if c == ColDefault {
-			// ANSIEscape below already resets colors, so we don't have to do anything here
 		} else {
 			seq = append(seq, ESC, '[', ctype, '8', ';', '5', ';')
 			seq = append(seq, []byte(colorStr+"m")...)

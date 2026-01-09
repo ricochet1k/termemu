@@ -259,6 +259,38 @@ func (s *screen) rawWriteColors(y int, x1 int, x2 int) {
 	copy(s.backColors[y][x1:x2], s.backColorBuf[x1:x2])
 }
 
+// deleteChars removes n characters from (x,y), shifts the remainder left,
+// and fills the tail with spaces using current colors.
+func (s *screen) deleteChars(x int, y int, n int, cr ChangeReason) {
+	if y < 0 || y >= s.size.Y || n <= 0 {
+		return
+	}
+	if x < 0 {
+		n += x
+		x = 0
+	}
+	if x >= s.size.X || n <= 0 {
+		return
+	}
+	if x+n > s.size.X {
+		n = s.size.X - x
+	}
+
+	line := s.chars[y]
+	copy(line[x:], line[x+n:])
+	for i := s.size.X - n; i < s.size.X; i++ {
+		line[i] = ' '
+	}
+
+	fg := s.frontColors[y]
+	bg := s.backColors[y]
+	copy(fg[x:], fg[x+n:])
+	copy(bg[x:], bg[x+n:])
+	s.rawWriteColors(y, s.size.X-n, s.size.X)
+
+	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
+}
+
 // func (s *screen) advanceLine(auto bool) {
 // 	s.cursorPos.X = 0
 // 	s.cursorPos.Y += 1
@@ -360,7 +392,7 @@ func (s *screen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 		}
 		if s.cursorPos.Y > s.bottomMargin {
 			s.scroll(s.topMargin, s.bottomMargin, s.bottomMargin-s.cursorPos.Y)
-			s.cursorPos.Y = s.bottomMargin - 1
+			s.cursorPos.Y = s.bottomMargin
 		}
 	} else {
 		/*for s.cursorPos.Y < 0 {

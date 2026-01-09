@@ -197,9 +197,9 @@ func TestMoveCursor_WrapAndScroll(t *testing.T) {
 	s.cursorPos = Pos{X: 0, Y: 2}
 	// move down by 2 with scroll true
 	s.moveCursor(0, 2, false, true)
-	// cursor Y should be set to bottomMargin-1 (1)
-	if s.cursorPos.Y != s.bottomMargin-1 {
-		t.Fatalf("expected cursor Y=%d after scroll, got %d", s.bottomMargin-1, s.cursorPos.Y)
+	// cursor Y should be set to bottomMargin
+	if s.cursorPos.Y != s.bottomMargin {
+		t.Fatalf("expected cursor Y=%d after scroll, got %d", s.bottomMargin, s.cursorPos.Y)
 	}
 	if len(mf.Regions) == 0 {
 		// scroll triggers RegionChanged and eraseRegion which calls RegionChanged; ensure some regions recorded
@@ -231,5 +231,21 @@ func TestRenderLineANSI(t *testing.T) {
 	idx3 := strings.Index(out[idx+1+idx2+1:], "c")
 	if idx3 < 0 {
 		t.Fatalf("renderLineANSI missing 'c' after 'b': %q", out)
+	}
+}
+
+func TestDeleteChars_ShiftsLeft(t *testing.T) {
+	s, mf := MakeScreenWithMock()
+	s.setSize(6, 1)
+	s.rawWriteRunes(0, 0, []rune("abcdef"), CRText)
+	s.setCursorPos(2, 0)
+
+	s.deleteChars(2, 0, 2, CRClear)
+
+	if got := string(s.chars[0]); got != "abef  " {
+		t.Fatalf("deleteChars result = %q; want %q", got, "abef  ")
+	}
+	if len(mf.Regions) == 0 {
+		t.Fatalf("expected RegionChanged to be called")
 	}
 }

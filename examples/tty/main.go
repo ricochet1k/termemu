@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,9 @@ import (
 )
 
 func main() {
+	termemu.DebugFlags()
+	flag.Parse()
+
 	args := os.Args[1:]
 	if len(args) == 0 {
 		args = []string{"sh"}

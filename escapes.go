@@ -153,8 +153,10 @@ func (t *terminal) ptyReadLoop() {
 			})
 			continue
 
-		case 127: // DEL  Delete Character
-			debugPrintln(debugTodo, "TODO: delete character")
+		case 127: // DEL  Delete Character (treat as backspace)
+			t.WithLock(func() {
+				t.screen().moveCursor(-1, 0, false, false)
+			})
 		default:
 			debugPrintf(debugTodo, "TODO: unhandled char %v %#v\n", b, string(b))
 			continue
@@ -356,8 +358,8 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 				p := params[i]
 				switch {
 				case p == 0: // reset mode
-					fc = ColWhite
-					bc = ColBlack
+					fc = ColDefault
+					bc = ColDefault
 
 				case p >= 1 && p <= 8:
 					fc = fc.SetMode(ColorModes[p-1])
@@ -378,13 +380,13 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 					fc = fc.SetColor(Colors8[p-30])
 
 				case p == 39: // default color
-					fc = fc.SetColor(ColWhite)
+					fc = ColDefault
 
 				case p >= 40 && p <= 47:
 					bc = bc.SetColor(Colors8[p-40])
 
 				case p == 49: // default color
-					bc = bc.SetColor(ColBlack)
+					bc = ColDefault
 
 				case p == 38 || p == 48: // extended set color
 					if i+2 < len(params) {
@@ -521,13 +523,7 @@ func (t *terminal) handleCmdCSI(r *dupReader) bool {
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen().eraseRegion(Region{
-				X:  t.screen().cursorPos.X,
-				Y:  t.screen().cursorPos.Y,
-				X2: t.screen().cursorPos.X + params[0],
-				Y2: t.screen().cursorPos.Y + 1,
-			}, CRClear)
-			debugPrintln(debugTodo, "TODO: Delete", params[0], "chars")
+			t.screen().deleteChars(t.screen().cursorPos.X, t.screen().cursorPos.Y, params[0], CRClear)
 
 		case 'X': // Erase from cursor pos to the right
 			if len(params) == 0 {
