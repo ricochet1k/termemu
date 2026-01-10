@@ -53,6 +53,9 @@ type terminal struct {
 
 	readLoopStarted bool
 	textReadMode    TextReadMode
+
+	keyboardMain keyboardMode
+	keyboardAlt  keyboardMode
 }
 
 // New makes a new terminal using the provided Frontend

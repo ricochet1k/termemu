@@ -253,7 +253,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 	}
 
 	var prefix = []byte{}
-	if b == '?' || b == '>' || b == '<' {
+	if b == '?' || b == '>' || b == '<' || b == '=' {
 		prefix = append(prefix, byte(b))
 
 		b, err = r.ReadByte()
@@ -608,6 +608,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		}
 	} else if string(prefix) == "?" {
 		switch b {
+		case 'u': // Query keyboard mode
+			flags := t.keyboardFlags()
+			_, _ = t.Write([]byte(fmt.Sprintf("\033[?%du", flags)))
+			return true
 		case 'm': // Private SGR (ignored)
 			if *debugCmd {
 				debugPrintf(debugCmd, "CSI ? m params: %v\n", params)
@@ -731,9 +735,11 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 
 		case 'u': // key encoding mode (ignored)
-			if *debugCmd {
-				debugPrintf(debugCmd, "CSI > u params: %v\n", params)
+			flags := 0
+			if len(params) > 0 {
+				flags = params[0]
 			}
+			t.pushKeyboardFlags(flags)
 
 		default:
 			debugPrintf(debugTodo, "TODO: Unhandled > command: %#v %v, %#v\n", string(prefix), params, string(b))
@@ -741,6 +747,13 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		}
 	} else if string(prefix) == "<" {
 		switch b {
+		case 'u': // key encoding mode pop
+			count := 1
+			if len(params) > 0 {
+				count = params[0]
+			}
+			t.popKeyboardFlags(count)
+			return true
 		case 'M', 'm': // SGR mouse report (ignored)
 			if *debugCmd {
 				debugPrintf(debugCmd, "CSI < mouse params: %v %c\n", params, b)
@@ -748,6 +761,23 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			return true
 		default:
 			debugPrintf(debugTodo, "TODO: Unhandled < command: %#v %v, %#v\n", string(prefix), params, string(b))
+			return true
+		}
+	} else if string(prefix) == "=" {
+		switch b {
+		case 'u': // key encoding mode set
+			flags := 0
+			mode := 1
+			if len(params) > 0 {
+				flags = params[0]
+			}
+			if len(params) > 1 {
+				mode = params[1]
+			}
+			t.updateKeyboardFlags(flags, mode)
+			return true
+		default:
+			debugPrintf(debugTodo, "TODO: Unhandled = command: %#v %v, %#v\n", string(prefix), params, string(b))
 			return true
 		}
 	} else {

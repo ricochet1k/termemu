@@ -20,3 +20,23 @@ func TestEncodeKey_CtrlRuneDefault(t *testing.T) {
 		t.Fatalf("expected ctrl-a, got %q", string(out))
 	}
 }
+
+func TestEncodeKey_KittyDisambiguateAlt(t *testing.T) {
+	t1, _ := MakeTerminalWithMock()
+	t1.keyboardMain.flags = int(KbdDisambiguate)
+
+	out := string(t1.encodeKey(KeyEvent{Code: KeyRune, Rune: 'a', Mod: ModAlt}))
+	if out != "\x1b[97;3u" {
+		t.Fatalf("expected kitty disambiguate alt sequence, got %q", out)
+	}
+}
+
+func TestEncodeKey_KittyReportEventsRepeat(t *testing.T) {
+	t1, _ := MakeTerminalWithMock()
+	t1.keyboardMain.flags = int(KbdReportAllKeys | KbdReportEvents)
+
+	out := string(t1.encodeKey(KeyEvent{Code: KeyUp, Event: KeyRepeat}))
+	if out != "\x1b[1;1:2A" {
+		t.Fatalf("expected kitty repeat sequence, got %q", out)
+	}
+}
