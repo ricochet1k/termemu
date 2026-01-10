@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -15,9 +16,10 @@ import (
 
 func main() {
 	termemu.DebugFlags()
+	textMode := flag.String("text_mode", "rune", "text read mode: rune or grapheme")
 	flag.Parse()
 
-	args := os.Args[1:]
+	args := flag.Args()
 	if len(args) == 0 {
 		args = []string{"sh"}
 	}
@@ -32,7 +34,17 @@ func main() {
 	}()
 
 	tty := termemu.NewTTYFrontend(nil, os.Stdout)
-	term := termemu.New(tty)
+	mode := termemu.TextReadModeRune
+	switch strings.ToLower(*textMode) {
+	case "rune":
+		mode = termemu.TextReadModeRune
+	case "grapheme":
+		mode = termemu.TextReadModeGrapheme
+	default:
+		fmt.Fprintln(os.Stderr, "text_mode must be rune or grapheme")
+		return
+	}
+	term := termemu.NewWithMode(tty, mode)
 	tty.SetTerminal(term)
 
 	resize := func() {

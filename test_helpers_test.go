@@ -120,7 +120,6 @@ func MakeTerminalWithMock() (*terminal, *MockFrontend) {
 func newDupReader(input string, t *terminal) *dupReader {
 	return &dupReader{
 		reader: bufio.NewReader(strings.NewReader(input)),
-		buf:    nil,
 		t:      t,
 	}
 }

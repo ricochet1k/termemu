@@ -147,6 +147,24 @@ func TestHandleCmdCSI_SetModesAndFlags(t *testing.T) {
 	}
 }
 
+func TestHandleCmdCSI_ModifyOtherKeys(t *testing.T) {
+	t1, mf := MakeTerminalWithMock()
+
+	if !t1.handleCommand(newDupReader("[>4;2m", t1)) {
+		t.Fatalf("handleCommand failed for >4;2m")
+	}
+	if v := mf.ViewInts[VIModifyOtherKeys]; v != 2 {
+		t.Fatalf("expected modifyOtherKeys 2, got %v", v)
+	}
+
+	if !t1.handleCommand(newDupReader("[>4;0m", t1)) {
+		t.Fatalf("handleCommand failed for >4;0m")
+	}
+	if v := mf.ViewInts[VIModifyOtherKeys]; v != 0 {
+		t.Fatalf("expected modifyOtherKeys 0, got %v", v)
+	}
+}
+
 func TestHandleCmdOSC_WindowTitleAndStrings(t *testing.T) {
 	t1, mf := MakeTerminalWithMock()
 

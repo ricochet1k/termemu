@@ -12,7 +12,7 @@ func makeScreen(chars []string) *screen {
 	s := newScreen(&EmptyFrontend{})
 	s.setSize(len(chars[0]), len(chars))
 	for i := range chars {
-		copy(s.chars[i], []rune(chars[i]))
+		s.rawWriteRunes(0, i, []rune(chars[i]), CRText)
 	}
 	if s.size.X != len(chars[0]) || s.size.Y != len(chars) {
 		panic(fmt.Sprintf("Bad size: %+v", s.size))

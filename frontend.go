@@ -33,6 +33,8 @@ const (
 	VFShowCursor
 	VFReportFocus
 	VFBracketedPaste
+	VFAppCursorKeys
+	VFAppKeypad
 	viewFlagCount
 )
 
@@ -42,6 +44,7 @@ type ViewInt int
 const (
 	VIMouseMode ViewInt = iota
 	VIMouseEncoding
+	VIModifyOtherKeys
 	viewIntCount
 )
 

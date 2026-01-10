@@ -10,4 +10,7 @@ require (
 	github.com/google/go-cmp v0.4.0
 )
 
-require github.com/kr/pty v1.1.8 // indirect
+require (
+	github.com/kr/pty v1.1.8 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+)

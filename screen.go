@@ -9,6 +9,9 @@ import (
 
 type screen struct {
 	chars       [][]rune
+	cellText    [][]string
+	cellWidth   [][]uint8
+	cellCont    [][]bool
 	backColors  [][]Color
 	frontColors [][]Color
 	frontend    Frontend
@@ -107,7 +110,7 @@ func (s *screen) renderLineANSI(y int) string {
 			x++
 		}
 	}
-	return string(buf.Bytes())
+	return buf.String()
 }
 
 func (s *screen) setColors(front Color, back Color) {
@@ -131,16 +134,23 @@ func (s *screen) setSize(w, h int) {
 
 	// resize screen. copy current screen to upper-left corner of new screen
 
+	prevW := s.size.X
+	prevH := s.size.Y
+
 	minW := w
-	if w > s.size.X {
-		minW = s.size.X
+	if w > prevW {
+		minW = prevW
+	}
+	minH := h
+	if h > prevH {
+		minH = prevH
 	}
 
 	rect := make([][]rune, h)
 	raw := make([]rune, w*h)
 	for i := range rect {
 		rect[i], raw = raw[:w], raw[w:]
-		if i < s.size.Y {
+		if i < prevH {
 			copy(rect[i][:minW], s.chars[i][:minW])
 
 			for x := minW; x < w; x++ {
@@ -155,6 +165,30 @@ func (s *screen) setSize(w, h int) {
 	s.chars = rect
 	// fmt.Println("setSize", w, h, s.chars, s.chars[0], len(s.chars[0]))
 
+	cellText := makeStringGrid(w, h, " ")
+	cellWidth := makeUint8Grid(w, h, 1)
+	cellCont := makeBoolGrid(w, h, false)
+
+	if len(s.cellText) > 0 {
+		for y := 0; y < minH; y++ {
+			copy(cellText[y][:minW], s.cellText[y][:minW])
+		}
+	}
+	if len(s.cellWidth) > 0 {
+		for y := 0; y < minH; y++ {
+			copy(cellWidth[y][:minW], s.cellWidth[y][:minW])
+		}
+	}
+	if len(s.cellCont) > 0 {
+		for y := 0; y < minH; y++ {
+			copy(cellCont[y][:minW], s.cellCont[y][:minW])
+		}
+	}
+
+	s.cellText = cellText
+	s.cellWidth = cellWidth
+	s.cellCont = cellCont
+
 	for pi, p := range []*[][]Color{&s.backColors, &s.frontColors} {
 		col := s.backColor
 		if pi == 1 {
@@ -165,7 +199,7 @@ func (s *screen) setSize(w, h int) {
 		raw := make([]Color, w*h)
 		for i := range rect {
 			rect[i], raw = raw[:w], raw[w:]
-			if i < s.size.Y {
+			if i < prevH {
 				copy(rect[i][:minW], (*p)[i][:minW])
 
 				for x := minW; x < w; x++ {
@@ -235,6 +269,9 @@ func (s *screen) insertRunes(b []rune) {
 
 	// first: move everything over
 	copy(s.chars[y][tsx:tex], s.chars[y][fsx:fex])
+	copy(s.cellText[y][tsx:tex], s.cellText[y][fsx:fex])
+	copy(s.cellWidth[y][tsx:tex], s.cellWidth[y][fsx:fex])
+	copy(s.cellCont[y][tsx:tex], s.cellCont[y][fsx:fex])
 	copy(s.frontColors[y][tsx:tex], s.frontColors[y][fsx:fex])
 	copy(s.backColors[y][tsx:tex], s.backColors[y][fsx:fex])
 	// TODO! RegionChanged!
@@ -249,6 +286,15 @@ func (s *screen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
 		panic(fmt.Sprintf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v, %v,%v\n", s.size, x, y, x+len(b), len(b), string(b), len(s.chars), len(s.chars[0])))
 	}
 	copy(s.chars[y][x:x+len(b)], b)
+	textRow := s.cellText[y]
+	widthRow := s.cellWidth[y]
+	contRow := s.cellCont[y]
+	for i, r := range b {
+		idx := x + i
+		textRow[idx] = string(r)
+		widthRow[idx] = 1
+		contRow[idx] = false
+	}
 	s.rawWriteColors(y, x, x+len(b))
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + len(b)}, cr)
 }
@@ -280,6 +326,24 @@ func (s *screen) deleteChars(x int, y int, n int, cr ChangeReason) {
 	copy(line[x:], line[x+n:])
 	for i := s.size.X - n; i < s.size.X; i++ {
 		line[i] = ' '
+	}
+
+	textLine := s.cellText[y]
+	copy(textLine[x:], textLine[x+n:])
+	for i := s.size.X - n; i < s.size.X; i++ {
+		textLine[i] = " "
+	}
+
+	widthLine := s.cellWidth[y]
+	copy(widthLine[x:], widthLine[x+n:])
+	for i := s.size.X - n; i < s.size.X; i++ {
+		widthLine[i] = 1
+	}
+
+	contLine := s.cellCont[y]
+	copy(contLine[x:], contLine[x+n:])
+	for i := s.size.X - n; i < s.size.X; i++ {
+		contLine[i] = false
 	}
 
 	fg := s.frontColors[y]
@@ -330,6 +394,9 @@ func (s *screen) scroll(y1 int, y2 int, dy int) {
 		for y := y2; y >= y1+dy; y-- {
 			// fmt.Println("   2: ", y, y2, y1+dy)
 			copy(s.chars[y], s.chars[y-dy])
+			copy(s.cellText[y], s.cellText[y-dy])
+			copy(s.cellWidth[y], s.cellWidth[y-dy])
+			copy(s.cellCont[y], s.cellCont[y-dy])
 			copy(s.frontColors[y], s.frontColors[y-dy])
 			copy(s.backColors[y], s.backColors[y-dy])
 		}
@@ -341,6 +408,9 @@ func (s *screen) scroll(y1 int, y2 int, dy int) {
 		for y := y1; y <= y2+dy; y++ {
 			// fmt.Println("   3: ", y, y1, y2+dy)
 			copy(s.chars[y], s.chars[y-dy])
+			copy(s.cellText[y], s.cellText[y-dy])
+			copy(s.cellWidth[y], s.cellWidth[y-dy])
+			copy(s.cellCont[y], s.cellCont[y-dy])
 			copy(s.frontColors[y], s.frontColors[y-dy])
 			copy(s.backColors[y], s.backColors[y-dy])
 		}
@@ -427,4 +497,40 @@ func (s *screen) printScreen() {
 		fmt.Print("-")
 	}
 	fmt.Println("+")
+}
+
+func makeStringGrid(w, h int, fill string) [][]string {
+	grid := make([][]string, h)
+	raw := make([]string, w*h)
+	for i := range grid {
+		grid[i], raw = raw[:w], raw[w:]
+		for x := 0; x < w; x++ {
+			grid[i][x] = fill
+		}
+	}
+	return grid
+}
+
+func makeUint8Grid(w, h int, fill uint8) [][]uint8 {
+	grid := make([][]uint8, h)
+	raw := make([]uint8, w*h)
+	for i := range grid {
+		grid[i], raw = raw[:w], raw[w:]
+		for x := 0; x < w; x++ {
+			grid[i][x] = fill
+		}
+	}
+	return grid
+}
+
+func makeBoolGrid(w, h int, fill bool) [][]bool {
+	grid := make([][]bool, h)
+	raw := make([]bool, w*h)
+	for i := range grid {
+		grid[i], raw = raw[:w], raw[w:]
+		for x := 0; x < w; x++ {
+			grid[i][x] = fill
+		}
+	}
+	return grid
 }

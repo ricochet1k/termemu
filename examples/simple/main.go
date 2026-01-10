@@ -15,13 +15,28 @@ import (
 func main() {
 	termemu.DebugFlags()
 	delay := flag.Int("delay", 0, "wait for n milliseconds instead of waiting for cmd to exit")
+	inputDelay := flag.Int("input_delay", 0, "wait for n milliseconds before sending input")
+	inputInterval := flag.Int("input_interval", 0, "wait for n milliseconds between input bytes")
 	input := flag.String("input", "", "bytes to write to stdin after starting the command")
 	size := flag.String("size", "", "terminal size as WxH (example: 80x24)")
+	textMode := flag.String("text_mode", "rune", "text read mode: rune or grapheme")
 	flag.Parse()
+
+	fmt.Printf("input %q\n", *input)
 
 	// Simple example: create a terminal, run printf, and print the screen
 	mf := &termemu.EmptyFrontend{}
-	t := termemu.New(mf)
+	mode := termemu.TextReadModeRune
+	switch strings.ToLower(*textMode) {
+	case "rune":
+		mode = termemu.TextReadModeRune
+	case "grapheme":
+		mode = termemu.TextReadModeGrapheme
+	default:
+		fmt.Fprintln(os.Stderr, "text_mode must be rune or grapheme")
+		return
+	}
+	t := termemu.NewWithMode(mf, mode)
 	if t == nil {
 		fmt.Println("failed to create terminal")
 		return
@@ -54,9 +69,22 @@ func main() {
 		return
 	}
 	if *input != "" {
-		if _, err := t.Write([]byte(*input)); err != nil {
-			fmt.Fprintln(os.Stderr, "Write input error:", err)
-			return
+		if *inputDelay > 0 {
+			<-time.After(time.Duration(*inputDelay) * time.Millisecond)
+		}
+		if *inputInterval > 0 {
+			for i := 0; i < len(*input); i++ {
+				if _, err := t.Write([]byte{(*input)[i]}); err != nil {
+					fmt.Fprintln(os.Stderr, "Write input error:", err)
+					return
+				}
+				time.Sleep(time.Duration(*inputInterval) * time.Millisecond)
+			}
+		} else {
+			if _, err := t.Write([]byte(*input)); err != nil {
+				fmt.Fprintln(os.Stderr, "Write input error:", err)
+				return
+			}
 		}
 	}
 	if *delay > 0 {

@@ -3,6 +3,7 @@ package termemu
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -20,6 +21,7 @@ type Terminal interface {
 
 	StartCommand(c *exec.Cmd) error
 	Write(b []byte) (int, error)
+	SendKey(KeyEvent) (int, error)
 	Size() (int, int)
 	Resize(int, int) error
 	Line(int) []rune
@@ -50,15 +52,26 @@ type terminal struct {
 	viewStrings []string
 
 	readLoopStarted bool
+	textReadMode    TextReadMode
 }
 
 // New makes a new terminal using the provided Frontend
 func New(f Frontend) Terminal {
-	return NewWithBackend(f, PTYBackend{})
+	return NewWithBackendMode(f, PTYBackend{}, TextReadModeRune)
 }
 
 // NewWithBackend makes a new terminal using the provided Frontend and Backend.
 func NewWithBackend(f Frontend, backend Backend) Terminal {
+	return NewWithBackendMode(f, backend, TextReadModeRune)
+}
+
+// NewWithMode makes a new terminal using the provided Frontend and text read mode.
+func NewWithMode(f Frontend, mode TextReadMode) Terminal {
+	return NewWithBackendMode(f, PTYBackend{}, mode)
+}
+
+// NewWithBackendMode makes a new terminal using the provided Frontend, Backend, and text read mode.
+func NewWithBackendMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
 	if f == nil {
 		f = &EmptyFrontend{}
 	}
@@ -67,13 +80,14 @@ func NewWithBackend(f Frontend, backend Backend) Terminal {
 	}
 
 	return &terminal{
-		frontend:    f,
-		mainScreen:  newScreen(f),
-		altScreen:   newScreen(f),
-		backend:     backend,
-		viewFlags:   make([]bool, viewFlagCount),
-		viewInts:    make([]int, viewIntCount),
-		viewStrings: make([]string, viewStringCount),
+		frontend:     f,
+		mainScreen:   newScreen(f),
+		altScreen:    newScreen(f),
+		backend:      backend,
+		viewFlags:    make([]bool, viewFlagCount),
+		viewInts:     make([]int, viewIntCount),
+		viewStrings:  make([]string, viewStringCount),
+		textReadMode: mode,
 	}
 }
 
@@ -135,7 +149,19 @@ func (t *terminal) Write(b []byte) (int, error) {
 	if err := t.ensurePTYOpen(); err != nil {
 		return 0, err
 	}
-	return t.pty.Write(b)
+	total := 0
+	for len(b) > 0 {
+		n, err := t.pty.Write(b)
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+		b = b[n:]
+	}
+	return total, nil
 }
 
 func (t *terminal) Size() (w, h int) {

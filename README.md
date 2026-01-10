@@ -99,6 +99,8 @@ func main() {
 
 - `termemu.New(frontend)` creates a terminal with a PTY backend.
 - `termemu.NewWithBackend(frontend, backend)` allows swapping in `NoPTYBackend`.
+- `termemu.NewWithMode(frontend, mode)` selects rune-per-cell or grapheme-cluster reading.
+- `termemu.NewWithBackendMode(frontend, backend, mode)` combines backend swap with mode selection.
 - `Terminal.StartCommand(*exec.Cmd)` runs a command within the PTY.
 - `Terminal.Line(y)` and `Terminal.ANSILine(y)` read screen contents.
 - `Terminal.Resize(w, h)` updates the PTY and internal screen size.
