@@ -45,9 +45,40 @@ func newGridScreen(f Frontend) *gridScreen {
 	return s
 }
 
-type Pos struct {
-	X int
-	Y int
+func (s *gridScreen) Size() Pos {
+	return s.size
+}
+
+func (s *gridScreen) CursorPos() Pos {
+	return s.cursorPos
+}
+
+func (s *gridScreen) FrontColor() Color {
+	return s.frontColor
+}
+
+func (s *gridScreen) BackColor() Color {
+	return s.backColor
+}
+
+func (s *gridScreen) AutoWrap() bool {
+	return s.autoWrap
+}
+
+func (s *gridScreen) SetAutoWrap(value bool) {
+	s.autoWrap = value
+}
+
+func (s *gridScreen) TopMargin() int {
+	return s.topMargin
+}
+
+func (s *gridScreen) BottomMargin() int {
+	return s.bottomMargin
+}
+
+func (s *gridScreen) SetFrontend(f Frontend) {
+	s.frontend = f
 }
 
 func (s *gridScreen) getLine(y int) []rune {

@@ -32,8 +32,8 @@ type terminal struct {
 
 	frontend    Frontend
 	onAltScreen bool
-	mainScreen  *screen
-	altScreen   *screen
+	mainScreen  screen
+	altScreen   screen
 
 	backend Backend
 
@@ -83,8 +83,8 @@ func NewWithMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
 
 func (t *terminal) SetFrontend(f Frontend) {
 	t.frontend = f
-	t.mainScreen.frontend = f
-	t.altScreen.frontend = f
+	t.mainScreen.SetFrontend(f)
+	t.altScreen.SetFrontend(f)
 }
 
 // func NewNoPTY(f Frontend) Terminal {
@@ -118,7 +118,8 @@ func (t *terminal) Write(b []byte) (int, error) {
 }
 
 func (t *terminal) Size() (w, h int) {
-	return t.screen().size.X, t.screen().size.Y
+	size := t.screen().Size()
+	return size.X, size.Y
 }
 
 type winsize struct {
@@ -151,21 +152,21 @@ func (t *terminal) startReadLoop() {
 }
 
 func (t *terminal) Line(y int) []rune {
-	if y >= t.screen().size.Y {
+	if y >= t.screen().Size().Y {
 		return nil
 	}
 	return t.screen().getLine(y)
 }
 
 func (t *terminal) ANSILine(y int) string {
-	if y >= t.screen().size.Y {
+	if y >= t.screen().Size().Y {
 		return ""
 	}
 	return t.screen().renderLineANSI(y)
 }
 
 func (t *terminal) LineColors(y int) (fg []Color, bg []Color) {
-	if y >= t.screen().size.Y {
+	if y >= t.screen().Size().Y {
 		return nil, nil
 	}
 	return t.screen().getLineColors(y)
@@ -280,7 +281,7 @@ func (t *terminal) GetViewString(flag ViewString) string {
 }
 
 // returns screen and unlock fn, must defer the unlock fn
-func (t *terminal) screen() *screen {
+func (t *terminal) screen() screen {
 	if t.onAltScreen {
 		return t.altScreen
 	}
@@ -296,5 +297,6 @@ func (t *terminal) WithLock(f func()) {
 
 func (t *terminal) switchScreen() {
 	t.onAltScreen = !t.onAltScreen
-	t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: t.screen().size.X, Y2: t.screen().size.Y}, CRScreenSwitch)
+	size := t.screen().Size()
+	t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRScreenSwitch)
 }

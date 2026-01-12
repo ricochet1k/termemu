@@ -5,25 +5,51 @@ import (
 	"fmt"
 	"os"
 	"strings"
-
-	"github.com/rivo/uniseg"
 )
 
-type screen struct {
-	chars       [][]rune
-	cellText    [][]string
-	cellWidth   [][]uint8
-	cellCont    [][]bool
-	backColors  [][]Color
-	frontColors [][]Color
-	frontend    Frontend
+type screen interface {
+	Size() Pos
+	CursorPos() Pos
+	FrontColor() Color
+	BackColor() Color
+	AutoWrap() bool
+	SetAutoWrap(value bool)
+	TopMargin() int
+	BottomMargin() int
+	SetFrontend(f Frontend)
+
+	getLine(y int) []rune
+	getLineColors(y int) ([]Color, []Color)
+	StyledLine(x, w, y int) *Line
+	StyledLines(r Region) []*Line
+	renderLineANSI(y int) string
+	setColors(front Color, back Color)
+	setSize(w, h int)
+	eraseRegion(r Region, cr ChangeReason)
+	writeRunes(b []rune)
+	insertRunes(b []rune)
+	rawWriteRunes(x int, y int, b []rune, cr ChangeReason)
+	rawWriteRune(x int, y int, r rune, width int, cr ChangeReason)
+	deleteChars(x int, y int, n int, cr ChangeReason)
+	setCursorPos(x, y int)
+	setScrollMarginTopBottom(top, bottom int)
+	scroll(y1 int, y2 int, dy int)
+	moveCursor(dx, dy int, wrap bool, scroll bool)
+	printScreen()
+}
+
+// Pos holds X/Y coordinates.
+type Pos struct {
+	X int
+	Y int
+}
+
+type spanScreen struct {
+	lines    []spanLine
+	frontend Frontend
 
 	frontColor Color
 	backColor  Color
-
-	// prealocated for fast copying
-	frontColorBuf []Color
-	backColorBuf  []Color
 
 	size Pos
 
@@ -34,8 +60,32 @@ type screen struct {
 	autoWrap bool
 }
 
-func newScreen(f Frontend) *screen {
-	s := &screen{
+type spanLine struct {
+	spans []span
+}
+
+type span struct {
+	fg, bg Color
+	cells  []spanCell
+}
+
+type spanCell struct {
+	r     rune
+	width uint8
+	cont  bool
+}
+
+type styledCell struct {
+	spanCell
+	fg, bg Color
+}
+
+func newScreen(f Frontend) screen {
+	return newSpanScreen(f)
+}
+
+func newSpanScreen(f Frontend) *spanScreen {
+	s := &spanScreen{
 		frontend: f,
 	}
 	s.setSize(80, 14)
@@ -45,50 +95,98 @@ func newScreen(f Frontend) *screen {
 	return s
 }
 
-type Pos struct {
-	X int
-	Y int
+func (s *spanScreen) Size() Pos {
+	return s.size
 }
 
-func (s *screen) getLine(y int) []rune {
-	return s.chars[y]
+func (s *spanScreen) CursorPos() Pos {
+	return s.cursorPos
 }
 
-func (s *screen) getLineColors(y int) ([]Color, []Color) {
-	return s.frontColors[y], s.backColors[y]
+func (s *spanScreen) FrontColor() Color {
+	return s.frontColor
 }
 
-func (s *screen) StyledLine(x, w, y int) *Line {
-	text := s.getLine(y)
-	fgs := s.frontColors[y]
-	bgs := s.backColors[y]
+func (s *spanScreen) BackColor() Color {
+	return s.backColor
+}
 
-	var spans []StyledSpan
+func (s *spanScreen) AutoWrap() bool {
+	return s.autoWrap
+}
 
-	if w < 0 || x+w > len(fgs) {
-		w = len(fgs) - x
+func (s *spanScreen) SetAutoWrap(value bool) {
+	s.autoWrap = value
+}
+
+func (s *spanScreen) TopMargin() int {
+	return s.topMargin
+}
+
+func (s *spanScreen) BottomMargin() int {
+	return s.bottomMargin
+}
+
+func (s *spanScreen) SetFrontend(f Frontend) {
+	s.frontend = f
+}
+
+func (s *spanScreen) getLine(y int) []rune {
+	cells := s.lineCells(y)
+	line := make([]rune, len(cells))
+	for i, c := range cells {
+		line[i] = c.r
+	}
+	return line
+}
+
+func (s *spanScreen) getLineColors(y int) ([]Color, []Color) {
+	cells := s.lineCells(y)
+	fg := make([]Color, len(cells))
+	bg := make([]Color, len(cells))
+	for i, c := range cells {
+		fg[i] = c.fg
+		bg[i] = c.bg
+	}
+	return fg, bg
+}
+
+func (s *spanScreen) StyledLine(x, w, y int) *Line {
+	cells := s.lineCells(y)
+	if w < 0 || x+w > len(cells) {
+		w = len(cells) - x
+	}
+	if w < 0 {
+		w = 0
 	}
 
-	for i := x; i < x+w; {
-		fg := fgs[i]
-		bg := bgs[i]
-		width := uint32(1)
-		i++
-
-		for i < x+w && fg == fgs[i] && bg == bgs[i] {
+	text := make([]rune, w)
+	spans := make([]StyledSpan, 0)
+	for i := 0; i < w; {
+		cell := cells[x+i]
+		fg := cell.fg
+		bg := cell.bg
+		width := uint32(0)
+		for i < w {
+			cell = cells[x+i]
+			if cell.fg != fg || cell.bg != bg {
+				break
+			}
+			text[i] = cell.r
 			i++
 			width++
 		}
-		spans = append(spans, StyledSpan{fg, bg, width})
+		spans = append(spans, StyledSpan{FG: fg, BG: bg, Width: width})
 	}
+
 	return &Line{
 		Spans: spans,
-		Text:  append([]rune(nil), text[x:x+w]...), // copy
+		Text:  text,
 		Width: uint32(w),
 	}
 }
 
-func (s *screen) StyledLines(r Region) []*Line {
+func (s *spanScreen) StyledLines(r Region) []*Line {
 	var lines []*Line
 	for y := r.Y; y < r.Y2; y++ {
 		lines = append(lines, s.StyledLine(r.X, r.X2-r.X, y))
@@ -96,133 +194,63 @@ func (s *screen) StyledLines(r Region) []*Line {
 	return lines
 }
 
-func (s *screen) renderLineANSI(y int) string {
-	line := s.getLine(y)
-	fg := s.frontColors[y][0]
-	bg := s.backColors[y][0]
-	buf := bytes.NewBuffer(make([]byte, 0, len(line)+10))
-	x := 0
-	for x < len(line) {
-		fg = s.frontColors[y][x]
-		bg = s.backColors[y][x]
+func (s *spanScreen) renderLineANSI(y int) string {
+	cells := s.lineCells(y)
+	if len(cells) == 0 {
+		return ""
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, len(cells)+10))
+	idx := 0
+	for idx < len(cells) {
+		fg := cells[idx].fg
+		bg := cells[idx].bg
 		buf.Write(ANSIEscape(fg, bg))
-
-		for x < len(line) && fg == s.frontColors[y][x] && bg == s.backColors[y][x] {
-			if line[x] != 0 {
-				buf.WriteRune(line[x])
+		for idx < len(cells) && fg == cells[idx].fg && bg == cells[idx].bg {
+			if cells[idx].r != 0 {
+				buf.WriteRune(cells[idx].r)
 			}
-			x++
+			idx++
 		}
 	}
 	return buf.String()
 }
 
-func (s *screen) setColors(front Color, back Color) {
+func (s *spanScreen) setColors(front Color, back Color) {
 	s.frontColor = front
 	s.backColor = back
-
-	for i := range s.frontColorBuf {
-		s.frontColorBuf[i] = front
-	}
-	for i := range s.backColorBuf {
-		s.backColorBuf[i] = back
-	}
 
 	s.frontend.ColorsChanged(front, back)
 }
 
-func (s *screen) setSize(w, h int) {
+func (s *spanScreen) setSize(w, h int) {
 	if w <= 0 || h <= 0 {
 		panic("Size must be > 0")
 	}
 
-	// resize screen. copy current screen to upper-left corner of new screen
-
-	prevW := s.size.X
 	prevH := s.size.Y
 
-	minW := w
-	if w > prevW {
-		minW = prevW
-	}
-	minH := h
-	if h > prevH {
-		minH = prevH
-	}
-
-	rect := make([][]rune, h)
-	raw := make([]rune, w*h)
-	for i := range rect {
-		rect[i], raw = raw[:w], raw[w:]
-		if i < prevH {
-			copy(rect[i][:minW], s.chars[i][:minW])
-
-			for x := minW; x < w; x++ {
-				rect[i][x] = ' '
+	newLines := make([]spanLine, h)
+	for y := 0; y < h; y++ {
+		switch {
+		case y < prevH && len(s.lines) > 0:
+			cells := s.lineCells(y)
+			if len(cells) > w {
+				cells = cells[:w]
+			} else if len(cells) < w {
+				cells = append(cells, makeSpaceCells(w-len(cells), s.frontColor, s.backColor)...)
 			}
-		} else {
-			for x := 0; x < w; x++ {
-				rect[i][x] = ' '
-			}
-		}
-	}
-	s.chars = rect
-	// fmt.Println("setSize", w, h, s.chars, s.chars[0], len(s.chars[0]))
-
-	cellText := makeStringGrid(w, h, " ")
-	cellWidth := makeUint8Grid(w, h, 1)
-	cellCont := makeBoolGrid(w, h, false)
-
-	if len(s.cellText) > 0 {
-		for y := 0; y < minH; y++ {
-			copy(cellText[y][:minW], s.cellText[y][:minW])
-		}
-	}
-	if len(s.cellWidth) > 0 {
-		for y := 0; y < minH; y++ {
-			copy(cellWidth[y][:minW], s.cellWidth[y][:minW])
-		}
-	}
-	if len(s.cellCont) > 0 {
-		for y := 0; y < minH; y++ {
-			copy(cellCont[y][:minW], s.cellCont[y][:minW])
+			newLines[y] = lineFromCells(cells)
+		default:
+			newLines[y] = blankSpanLine(w, s.frontColor, s.backColor)
 		}
 	}
 
-	s.cellText = cellText
-	s.cellWidth = cellWidth
-	s.cellCont = cellCont
-
-	for pi, p := range []*[][]Color{&s.backColors, &s.frontColors} {
-		col := s.backColor
-		if pi == 1 {
-			col = s.frontColor
-		}
-
-		rect := make([][]Color, h)
-		raw := make([]Color, w*h)
-		for i := range rect {
-			rect[i], raw = raw[:w], raw[w:]
-			if i < prevH {
-				copy(rect[i][:minW], (*p)[i][:minW])
-
-				for x := minW; x < w; x++ {
-					rect[i][x] = col
-				}
-			} else {
-				for x := 0; x < w; x++ {
-					rect[i][x] = col
-				}
-			}
-		}
-		*p = rect
-	}
+	s.lines = newLines
 
 	s.bottomMargin = h - (s.size.Y - s.bottomMargin)
 
 	s.size = Pos{X: w, Y: h}
 
-	// TODO: Logic for cursor position on resize?
 	if s.cursorPos.X > w {
 		s.cursorPos.X = 0
 	}
@@ -230,14 +258,11 @@ func (s *screen) setSize(w, h int) {
 		s.cursorPos.Y = 0
 	}
 
-	s.frontColorBuf = make([]Color, w)
-	s.backColorBuf = make([]Color, w)
 	s.setColors(s.frontColor, s.backColor)
 }
 
-func (s *screen) eraseRegion(r Region, cr ChangeReason) {
+func (s *spanScreen) eraseRegion(r Region, cr ChangeReason) {
 	r = s.clampRegion(r)
-	// fmt.Printf("eraseRegion: %#v\n", r)
 	bytes := make([]rune, r.X2-r.X)
 	for i := range bytes {
 		bytes[i] = ' '
@@ -248,9 +273,7 @@ func (s *screen) eraseRegion(r Region, cr ChangeReason) {
 	}
 }
 
-// This is a very raw write function. It wraps as necessary, but assumes all
-// the bytes are printable bytes
-func (s *screen) writeRunes(b []rune) {
+func (s *spanScreen) writeRunes(b []rune) {
 	for _, r := range b {
 		width := runeCellWidth(r)
 		if width > s.size.X {
@@ -268,85 +291,80 @@ func (s *screen) writeRunes(b []rune) {
 	}
 }
 
-// This is like writeRunes, but it moves existing runes to the right
-func (s *screen) insertRunes(b []rune) {
+func (s *spanScreen) insertRunes(b []rune) {
 	y := s.cursorPos.Y
 	fsx := s.cursorPos.X
 	fex := fsx + len(b)
 	tsx := s.size.X - len(b)
 	tex := s.size.X
 
-	// first: move everything over
-	copy(s.chars[y][tsx:tex], s.chars[y][fsx:fex])
-	copy(s.cellText[y][tsx:tex], s.cellText[y][fsx:fex])
-	copy(s.cellWidth[y][tsx:tex], s.cellWidth[y][fsx:fex])
-	copy(s.cellCont[y][tsx:tex], s.cellCont[y][fsx:fex])
-	copy(s.frontColors[y][tsx:tex], s.frontColors[y][fsx:fex])
-	copy(s.backColors[y][tsx:tex], s.backColors[y][fsx:fex])
-	// TODO! RegionChanged!
+	cells := s.lineCells(y)
+	copy(cells[tsx:tex], cells[fsx:fex])
+	s.setLineFromCells(y, cells)
 
 	s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b, CRText)
 }
 
-// This is a very raw write function. It assumes all the bytes are printable bytes
-// If you use this to write beyond the end of the line, it will panic.
-func (s *screen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
+func (s *spanScreen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
 	if y >= s.size.Y || x+len(b) > s.size.X {
-		panic(fmt.Sprintf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v, %v,%v\n", s.size, x, y, x+len(b), len(b), string(b), len(s.chars), len(s.chars[0])))
+		panic(fmt.Sprintf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v\n", s.size, x, y, x+len(b), len(b), string(b)))
 	}
-	textRow := s.cellText[y]
-	widthRow := s.cellWidth[y]
-	contRow := s.cellCont[y]
+	cells := s.lineCells(y)
 	for i, r := range b {
 		idx := x + i
-		if contRow[idx] {
-			s.clearWideAt(y, idx)
+		if cells[idx].cont {
+			s.clearWideAt(cells, idx)
 		}
-		s.chars[y][idx] = r
-		textRow[idx] = string(r)
-		widthRow[idx] = 1
-		contRow[idx] = false
+		cells[idx] = styledCell{
+			spanCell: spanCell{r: r, width: 1, cont: false},
+			fg:       s.frontColor,
+			bg:       s.backColor,
+		}
 	}
-	s.rawWriteColors(y, x, x+len(b))
+	s.setLineFromCells(y, cells)
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + len(b)}, cr)
 }
 
-func (s *screen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) {
+func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) {
 	if width < 1 {
 		width = 1
 	}
 	if y >= s.size.Y || x+width > s.size.X {
 		panic(fmt.Sprintf("rawWriteRune out of range: %v  %v,%v,%v %v %#v\n", s.size, x, y, x+width, width, string(r)))
 	}
-	if s.cellCont[y][x] {
-		s.clearWideAt(y, x)
+	cells := s.lineCells(y)
+	if cells[x].cont {
+		s.clearWideAt(cells, x)
 	}
 
-	prevWidth := int(s.cellWidth[y][x])
+	prevWidth := int(cells[x].width)
 	if prevWidth < 1 {
 		prevWidth = 1
 	}
 
-	s.chars[y][x] = r
-	s.cellText[y][x] = string(r)
-	s.cellWidth[y][x] = uint8(width)
-	s.cellCont[y][x] = false
+	cells[x] = styledCell{
+		spanCell: spanCell{r: r, width: uint8(width), cont: false},
+		fg:       s.frontColor,
+		bg:       s.backColor,
+	}
 	for i := 1; i < width; i++ {
 		idx := x + i
-		s.chars[y][idx] = 0
-		s.cellText[y][idx] = ""
-		s.cellWidth[y][idx] = 0
-		s.cellCont[y][idx] = true
+		cells[idx] = styledCell{
+			spanCell: spanCell{r: 0, width: 0, cont: true},
+			fg:       s.frontColor,
+			bg:       s.backColor,
+		}
 	}
 	for i := width; i < prevWidth; i++ {
 		idx := x + i
 		if idx >= s.size.X {
 			break
 		}
-		s.chars[y][idx] = ' '
-		s.cellText[y][idx] = " "
-		s.cellWidth[y][idx] = 1
-		s.cellCont[y][idx] = false
+		cells[idx] = styledCell{
+			spanCell: spanCell{r: ' ', width: 1, cont: false},
+			fg:       s.frontColor,
+			bg:       s.backColor,
+		}
 	}
 	end := x + width
 	if prevWidth > width {
@@ -355,50 +373,30 @@ func (s *screen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) 
 	if end > s.size.X {
 		end = s.size.X
 	}
-	s.rawWriteColors(y, x, end)
+	s.setLineFromCells(y, cells)
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: end}, cr)
 }
 
-func (s *screen) clearWideAt(y int, x int) {
+func (s *spanScreen) clearWideAt(cells []styledCell, x int) {
 	base := x
-	for base > 0 && s.cellCont[y][base] {
+	for base > 0 && cells[base].cont {
 		base--
 	}
-	width := int(s.cellWidth[y][base])
+	width := int(cells[base].width)
 	if width <= 1 {
 		return
 	}
-	end := min(base+width, s.size.X)
+	end := min(base+width, len(cells))
 	for i := base; i < end; i++ {
-		s.chars[y][i] = ' '
-		s.cellText[y][i] = " "
-		s.cellWidth[y][i] = 1
-		s.cellCont[y][i] = false
+		cells[i] = styledCell{
+			spanCell: spanCell{r: ' ', width: 1, cont: false},
+			fg:       s.frontColor,
+			bg:       s.backColor,
+		}
 	}
-	s.rawWriteColors(y, base, end)
-	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: base, X2: end}, CRClear)
 }
 
-func runeCellWidth(r rune) int {
-	if r == 0 {
-		return 1
-	}
-	width := uniseg.StringWidth(string(r))
-	if width <= 0 {
-		return 1
-	}
-	return width
-}
-
-// rawWriteColors copies one line of current colors to the screen, from x1 to x2
-func (s *screen) rawWriteColors(y int, x1 int, x2 int) {
-	copy(s.frontColors[y][x1:x2], s.frontColorBuf[x1:x2])
-	copy(s.backColors[y][x1:x2], s.backColorBuf[x1:x2])
-}
-
-// deleteChars removes n characters from (x,y), shifts the remainder left,
-// and fills the tail with spaces using current colors.
-func (s *screen) deleteChars(x int, y int, n int, cr ChangeReason) {
+func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 	if y < 0 || y >= s.size.Y || n <= 0 {
 		return
 	}
@@ -413,106 +411,58 @@ func (s *screen) deleteChars(x int, y int, n int, cr ChangeReason) {
 		n = s.size.X - x
 	}
 
-	line := s.chars[y]
-	copy(line[x:], line[x+n:])
-	textLine := s.cellText[y]
-	copy(textLine[x:], textLine[x+n:])
-	widthLine := s.cellWidth[y]
-	copy(widthLine[x:], widthLine[x+n:])
-	contLine := s.cellCont[y]
-	copy(contLine[x:], contLine[x+n:])
+	cells := s.lineCells(y)
+	copy(cells[x:], cells[x+n:])
 	for i := s.size.X - n; i < s.size.X; i++ {
-		line[i] = ' '
-		textLine[i] = " "
-		widthLine[i] = 1
-		contLine[i] = false
+		cells[i] = styledCell{
+			spanCell: spanCell{r: ' ', width: 1, cont: false},
+			fg:       s.frontColor,
+			bg:       s.backColor,
+		}
 	}
-
-	fg := s.frontColors[y]
-	bg := s.backColors[y]
-	copy(fg[x:], fg[x+n:])
-	copy(bg[x:], bg[x+n:])
-	s.rawWriteColors(y, s.size.X-n, s.size.X)
+	s.setLineFromCells(y, cells)
 
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
 }
 
-// func (s *screen) advanceLine(auto bool) {
-// 	s.cursorPos.X = 0
-// 	s.cursorPos.Y += 1
-// 	if s.cursorPos.Y >= s.size.Y {
-// 		// s.cursorPos.Y = 0 // TODO: scroll?
-// 		s.cursorPos.Y = s.size.Y - 1
-// 		s.scroll(s.topMargin, s.bottomMargin, -1)
-// 	}
-// 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
-// }
-
-func (s *screen) setCursorPos(x, y int) {
+func (s *spanScreen) setCursorPos(x, y int) {
 	s.cursorPos.X = clamp(x, 0, s.size.X-1)
 	s.cursorPos.Y = clamp(y, 0, s.size.Y-1)
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
 	debugPrintln(debugCursor, "cursor set: ", x, y, s.cursorPos, s.size)
 }
 
-func (s *screen) setScrollMarginTopBottom(top, bottom int) {
+func (s *spanScreen) setScrollMarginTopBottom(top, bottom int) {
 	debugPrintln(debugScroll, "scroll margins:", top, bottom)
 	s.topMargin = clamp(top, 0, s.size.Y-1)
 	s.bottomMargin = clamp(bottom, 0, s.size.Y-1)
 }
 
-func (s *screen) scroll(y1 int, y2 int, dy int) {
+func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 	debugPrintln(debugScroll, "scroll:", y1, y2, dy)
 	y1 = clamp(y1, 0, s.size.Y-1)
 	y2 = clamp(y2, 0, s.size.Y-1)
-	// if y < s.topMargin || y > s.bottomMargin {
-	// 	fmt.Println("scroll outside margin", y, s.topMargin, s.bottomMargin)
-	// }
 	if y1 > y2 {
 		fmt.Fprintln(os.Stderr, "scroll ys out of order", y1, y2, dy)
 	}
 
 	if dy > 0 {
 		for y := y2; y >= y1+dy; y-- {
-			// fmt.Println("   2: ", y, y2, y1+dy)
-			copy(s.chars[y], s.chars[y-dy])
-			copy(s.cellText[y], s.cellText[y-dy])
-			copy(s.cellWidth[y], s.cellWidth[y-dy])
-			copy(s.cellCont[y], s.cellCont[y-dy])
-			copy(s.frontColors[y], s.frontColors[y-dy])
-			copy(s.backColors[y], s.backColors[y-dy])
+			s.lines[y] = cloneSpanLine(s.lines[y-dy])
 		}
-		// these are non-inclusive, so need +1
 		s.frontend.RegionChanged(Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 		debugPrintln(debugScroll, "scroll changed region:", Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
 		s.eraseRegion(Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X}, CRScroll)
 	} else {
 		for y := y1; y <= y2+dy; y++ {
-			// fmt.Println("   3: ", y, y1, y2+dy)
-			copy(s.chars[y], s.chars[y-dy])
-			copy(s.cellText[y], s.cellText[y-dy])
-			copy(s.cellWidth[y], s.cellWidth[y-dy])
-			copy(s.cellCont[y], s.cellCont[y-dy])
-			copy(s.frontColors[y], s.frontColors[y-dy])
-			copy(s.backColors[y], s.backColors[y-dy])
+			s.lines[y] = cloneSpanLine(s.lines[y-dy])
 		}
-		// these are non-inclusive, so need +1
 		s.frontend.RegionChanged(Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X}, CRScroll)
 		s.eraseRegion(Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 	}
 }
 
-func clamp(v int, low, high int) int {
-	if v < low {
-		v = low
-	}
-	if v > high {
-		v = high
-	}
-	return v
-}
-
-func (s *screen) clampRegion(r Region) Region {
+func (s *spanScreen) clampRegion(r Region) Region {
 	r.X = clamp(r.X, 0, s.size.X)
 	r.Y = clamp(r.Y, 0, s.size.Y)
 	r.X2 = clamp(r.X2, 0, s.size.X)
@@ -520,7 +470,7 @@ func (s *screen) clampRegion(r Region) Region {
 	return r
 }
 
-func (s *screen) moveCursor(dx, dy int, wrap bool, scroll bool) {
+func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 	if wrap && s.autoWrap {
 		s.cursorPos.X += dx
 		for s.cursorPos.X < 0 {
@@ -547,22 +497,15 @@ func (s *screen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 			s.cursorPos.Y = s.bottomMargin
 		}
 	} else {
-		/*for s.cursorPos.Y < 0 {
-			s.cursorPos.Y += s.size.Y
-		}
-		for s.cursorPos.Y >= s.size.Y {
-			s.cursorPos.Y -= s.size.Y
-		}*/
 		s.cursorPos.Y = clamp(s.cursorPos.Y, 0, s.size.Y-1)
 	}
 	if s.cursorPos.Y >= s.size.Y {
 		panic(fmt.Sprintf("moveCursor outside, %v %v  %v, %v, %v, %v", s.cursorPos, s.size, dx, dy, wrap, scroll))
 	}
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
-	//debugPrintf(debugCursor, "cursor move: %v, %v  %v, %v: %v %v\n", s.cursorPos.X, s.cursorPos.Y, dx, dy, wrap, scroll)
 }
 
-func (s *screen) printScreen() {
+func (s *spanScreen) printScreen() {
 	w, h := s.size.X, s.size.Y
 	fmt.Print("+")
 	for i := 0; i < w; i++ {
@@ -581,38 +524,69 @@ func (s *screen) printScreen() {
 	fmt.Println("+")
 }
 
-func makeStringGrid(w, h int, fill string) [][]string {
-	grid := make([][]string, h)
-	raw := make([]string, w*h)
-	for i := range grid {
-		grid[i], raw = raw[:w], raw[w:]
-		for x := 0; x < w; x++ {
-			grid[i][x] = fill
+func (s *spanScreen) lineCells(y int) []styledCell {
+	line := s.lines[y]
+	cells := make([]styledCell, 0, s.size.X)
+	for _, sp := range line.spans {
+		for _, c := range sp.cells {
+			cells = append(cells, styledCell{spanCell: c, fg: sp.fg, bg: sp.bg})
 		}
 	}
-	return grid
+	if len(cells) < s.size.X {
+		cells = append(cells, makeSpaceCells(s.size.X-len(cells), s.frontColor, s.backColor)...)
+	} else if len(cells) > s.size.X {
+		cells = cells[:s.size.X]
+	}
+	return cells
 }
 
-func makeUint8Grid(w, h int, fill uint8) [][]uint8 {
-	grid := make([][]uint8, h)
-	raw := make([]uint8, w*h)
-	for i := range grid {
-		grid[i], raw = raw[:w], raw[w:]
-		for x := 0; x < w; x++ {
-			grid[i][x] = fill
-		}
-	}
-	return grid
+func (s *spanScreen) setLineFromCells(y int, cells []styledCell) {
+	s.lines[y] = lineFromCells(cells)
 }
 
-func makeBoolGrid(w, h int, fill bool) [][]bool {
-	grid := make([][]bool, h)
-	raw := make([]bool, w*h)
-	for i := range grid {
-		grid[i], raw = raw[:w], raw[w:]
-		for x := 0; x < w; x++ {
-			grid[i][x] = fill
+func blankSpanLine(width int, fg Color, bg Color) spanLine {
+	cells := make([]spanCell, width)
+	for i := range cells {
+		cells[i] = spanCell{r: ' ', width: 1, cont: false}
+	}
+	return spanLine{spans: []span{{fg: fg, bg: bg, cells: cells}}}
+}
+
+func makeSpaceCells(n int, fg Color, bg Color) []styledCell {
+	cells := make([]styledCell, n)
+	for i := range cells {
+		cells[i] = styledCell{
+			spanCell: spanCell{r: ' ', width: 1, cont: false},
+			fg:       fg,
+			bg:       bg,
 		}
 	}
-	return grid
+	return cells
+}
+
+func lineFromCells(cells []styledCell) spanLine {
+	if len(cells) == 0 {
+		return spanLine{}
+	}
+	spans := make([]span, 0, 4)
+	cur := span{fg: cells[0].fg, bg: cells[0].bg}
+	for _, c := range cells {
+		if c.fg != cur.fg || c.bg != cur.bg {
+			spans = append(spans, cur)
+			cur = span{fg: c.fg, bg: c.bg}
+		}
+		cur.cells = append(cur.cells, spanCell{r: c.r, width: c.width, cont: c.cont})
+	}
+	spans = append(spans, cur)
+	return spanLine{spans: spans}
+}
+
+func cloneSpanLine(line spanLine) spanLine {
+	spans := make([]span, len(line.spans))
+	for i, sp := range line.spans {
+		cells := make([]spanCell, len(sp.cells))
+		copy(cells, sp.cells)
+		spans[i] = span{fg: sp.fg, bg: sp.bg, cells: cells}
+	}
+	return spanLine{spans: spans}
 }

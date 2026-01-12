@@ -78,7 +78,7 @@ func (t *terminal) ptyReadLoop() {
 
 		case 13: // CR ^M Carriage Return
 			t.WithLock(func() {
-				t.screen().moveCursor(-t.screen().cursorPos.X, 0, true, true)
+				t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
 			})
 
 		case 27: // ESC ^[ Escape Character
@@ -91,7 +91,7 @@ func (t *terminal) ptyReadLoop() {
 				cmd := cmdBytes.Bytes()
 
 				if success {
-					debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().cursorPos, string(cmd))
+					debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
 				} else {
 					debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
 				}
@@ -271,7 +271,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen().setCursorPos(params[0]-1, t.screen().cursorPos.Y)
+			t.screen().setCursorPos(params[0]-1, t.screen().CursorPos().Y)
 
 		case 'c': // Send Device Attributes
 			if len(params) == 0 {
@@ -286,7 +286,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen().setCursorPos(t.screen().cursorPos.X, params[0]-1)
+			t.screen().setCursorPos(t.screen().CursorPos().X, params[0]-1)
 
 		case 'f', 'H': // Cursor Home
 			x := 1
@@ -324,8 +324,8 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				params = []int{0}
 			}
 
-			fc := t.screen().frontColor
-			bc := t.screen().backColor
+			fc := t.screen().FrontColor()
+			bc := t.screen().BackColor()
 
 			for i := 0; i < len(params); i++ {
 				p := params[i]
@@ -427,24 +427,24 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			switch {
 			case len(params) == 0 || params[0] == 0: // Erase to end of line
 				t.screen().eraseRegion(Region{
-					X:  t.screen().cursorPos.X,
-					Y:  t.screen().cursorPos.Y,
-					X2: t.screen().size.X,
-					Y2: t.screen().cursorPos.Y + 1,
+					X:  t.screen().CursorPos().X,
+					Y:  t.screen().CursorPos().Y,
+					X2: t.screen().Size().X,
+					Y2: t.screen().CursorPos().Y + 1,
 				}, CRClear)
 			case params[0] == 1: // Erase to start of line
 				t.screen().eraseRegion(Region{
 					X:  0,
-					Y:  t.screen().cursorPos.Y,
-					X2: t.screen().cursorPos.X,
-					Y2: t.screen().cursorPos.Y + 1,
+					Y:  t.screen().CursorPos().Y,
+					X2: t.screen().CursorPos().X,
+					Y2: t.screen().CursorPos().Y + 1,
 				}, CRClear)
 			case params[0] == 2: // Erase entire line
 				t.screen().eraseRegion(Region{
 					X:  0,
-					Y:  t.screen().cursorPos.Y,
-					X2: t.screen().size.X,
-					Y2: t.screen().cursorPos.Y + 1,
+					Y:  t.screen().CursorPos().Y,
+					X2: t.screen().Size().X,
+					Y2: t.screen().CursorPos().Y + 1,
 				}, CRClear)
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled K params: ", params)
@@ -459,23 +459,23 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			case len(params) == 0 || params[0] == 0: // Erase to bottom of screen
 				t.screen().eraseRegion(Region{
 					X:  0,
-					Y:  t.screen().cursorPos.Y,
-					X2: t.screen().size.X,
-					Y2: t.screen().size.Y,
+					Y:  t.screen().CursorPos().Y,
+					X2: t.screen().Size().X,
+					Y2: t.screen().Size().Y,
 				}, CRClear)
 			case params[0] == 1: // Erase to top of screen
 				t.screen().eraseRegion(Region{
 					X:  0,
 					Y:  0,
-					X2: t.screen().size.X,
-					Y2: t.screen().cursorPos.Y,
+					X2: t.screen().Size().X,
+					Y2: t.screen().CursorPos().Y,
 				}, CRClear)
 			case params[0] == 2: // Erase screen and home cursor
 				t.screen().eraseRegion(Region{
 					X:  0,
 					Y:  0,
-					X2: t.screen().size.X,
-					Y2: t.screen().size.Y,
+					X2: t.screen().Size().X,
+					Y2: t.screen().Size().Y,
 				}, CRClear)
 				t.screen().setCursorPos(0, 0)
 			default:
@@ -487,46 +487,46 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen().scroll(t.screen().cursorPos.Y, t.screen().bottomMargin, params[0])
+			t.screen().scroll(t.screen().CursorPos().Y, t.screen().BottomMargin(), params[0])
 
 		case 'M': // Delete lines, scroll up
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen().scroll(t.screen().cursorPos.Y, t.screen().bottomMargin, -params[0])
+			t.screen().scroll(t.screen().CursorPos().Y, t.screen().BottomMargin(), -params[0])
 
 		case 'S': // Scroll up
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen().scroll(t.screen().topMargin, t.screen().bottomMargin, -params[0])
+			t.screen().scroll(t.screen().TopMargin(), t.screen().BottomMargin(), -params[0])
 
 		case 'T': // Scroll down
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen().scroll(t.screen().topMargin, t.screen().bottomMargin, params[0])
+			t.screen().scroll(t.screen().TopMargin(), t.screen().BottomMargin(), params[0])
 
 		case 'P': // Delete n characters
 			if len(params) == 0 {
 				params = []int{1}
 			}
-			t.screen().deleteChars(t.screen().cursorPos.X, t.screen().cursorPos.Y, params[0], CRClear)
+			t.screen().deleteChars(t.screen().CursorPos().X, t.screen().CursorPos().Y, params[0], CRClear)
 
 		case 'X': // Erase from cursor pos to the right
 			if len(params) == 0 {
 				params = []int{1}
 			}
 			t.screen().eraseRegion(Region{
-				X:  t.screen().cursorPos.X,
-				Y:  t.screen().cursorPos.Y,
-				X2: t.screen().cursorPos.X + params[0],
-				Y2: t.screen().cursorPos.Y + 1,
+				X:  t.screen().CursorPos().X,
+				Y:  t.screen().CursorPos().Y,
+				X2: t.screen().CursorPos().X + params[0],
+				Y2: t.screen().CursorPos().Y + 1,
 			}, CRClear)
 
 		case 'r': // Set Scroll margins
 			top := 1
-			bottom := t.screen().size.Y
+			bottom := t.screen().Size().Y
 			if len(params) >= 1 {
 				top = params[0]
 			}
@@ -544,8 +544,8 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			case 5:
 				_, _ = t.Write([]byte("\033[0n"))
 			case 6:
-				row := t.screen().cursorPos.Y + 1
-				col := t.screen().cursorPos.X + 1
+				row := t.screen().CursorPos().Y + 1
+				col := t.screen().CursorPos().X + 1
 				_, _ = t.Write([]byte(fmt.Sprintf("\033[%d;%dR", row, col)))
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled DSR params: ", params)
@@ -586,7 +586,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					t.setViewFlag(VFAppCursorKeys, value)
 
 				case 7: // Wraparound
-					t.screen().autoWrap = value
+					t.screen().SetAutoWrap(value)
 
 				case 9: // Send MouseXY on press
 					debugPrintln(debugTodo, "TODO: Send MouseXY on press =", value) // TODO

@@ -16,50 +16,50 @@ func TestHandleCmdCSI_CursorMovement(t *testing.T) {
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[A"))) {
 		t.Fatalf("handleCommand failed for [A")
 	}
-	if t1.screen().cursorPos.X != 5 || t1.screen().cursorPos.Y != 4 {
-		t.Fatalf("expected cursor (5,4), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
+	if pos := t1.screen().CursorPos(); pos.X != 5 || pos.Y != 4 {
+		t.Fatalf("expected cursor (5,4), got (%d,%d)", pos.X, pos.Y)
 	}
 
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[2B"))) {
 		t.Fatalf("handleCommand failed for [2B")
 	}
-	if t1.screen().cursorPos.X != 5 || t1.screen().cursorPos.Y != 6 {
-		t.Fatalf("expected cursor (5,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
+	if pos := t1.screen().CursorPos(); pos.X != 5 || pos.Y != 6 {
+		t.Fatalf("expected cursor (5,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[3C"))) {
 		t.Fatalf("handleCommand failed for [3C")
 	}
-	if t1.screen().cursorPos.X != 8 || t1.screen().cursorPos.Y != 6 {
-		t.Fatalf("expected cursor (8,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
+	if pos := t1.screen().CursorPos(); pos.X != 8 || pos.Y != 6 {
+		t.Fatalf("expected cursor (8,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[4D"))) {
 		t.Fatalf("handleCommand failed for [4D")
 	}
-	if t1.screen().cursorPos.X != 4 || t1.screen().cursorPos.Y != 6 {
-		t.Fatalf("expected cursor (4,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
+	if pos := t1.screen().CursorPos(); pos.X != 4 || pos.Y != 6 {
+		t.Fatalf("expected cursor (4,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[10G"))) {
 		t.Fatalf("handleCommand failed for [10G")
 	}
-	if t1.screen().cursorPos.X != 9 || t1.screen().cursorPos.Y != 6 {
-		t.Fatalf("expected cursor (9,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
+	if pos := t1.screen().CursorPos(); pos.X != 9 || pos.Y != 6 {
+		t.Fatalf("expected cursor (9,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[7;12H"))) {
 		t.Fatalf("handleCommand failed for [7;12H")
 	}
-	if t1.screen().cursorPos.X != 11 || t1.screen().cursorPos.Y != 6 {
-		t.Fatalf("expected cursor (11,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
+	if pos := t1.screen().CursorPos(); pos.X != 11 || pos.Y != 6 {
+		t.Fatalf("expected cursor (11,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[9;2f"))) {
 		t.Fatalf("handleCommand failed for [9;2f")
 	}
-	if t1.screen().cursorPos.X != 1 || t1.screen().cursorPos.Y != 8 {
-		t.Fatalf("expected cursor (1,8), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
+	if pos := t1.screen().CursorPos(); pos.X != 1 || pos.Y != 8 {
+		t.Fatalf("expected cursor (1,8), got (%d,%d)", pos.X, pos.Y)
 	}
 }
 

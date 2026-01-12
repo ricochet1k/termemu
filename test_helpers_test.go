@@ -94,7 +94,7 @@ func (m *MockFrontend) ViewStringChanged(vs ViewString, value string) {
 }
 
 // helper to create a screen with a MockFrontend and return both
-func MakeScreenWithMock() (*screen, *MockFrontend) {
+func MakeScreenWithMock() (screen, *MockFrontend) {
 	mf := NewMockFrontend()
 	s := newScreen(mf)
 	return s, mf
