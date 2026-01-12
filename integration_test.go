@@ -9,7 +9,13 @@ import (
 // and ensures the terminal's frontend receives output regions.
 func TestIntegration_RunPrintf(t *testing.T) {
 	// create terminal with mock frontend
-	tt := New(NewMockFrontend())
+	backend := &PTYBackend{}
+	slave, err := backend.Open()
+	if err != nil {
+		t.Fatalf("pty open failed: %v", err)
+	}
+
+	tt := New(NewMockFrontend(), backend)
 	if tt == nil {
 		t.Fatal("New returned nil terminal")
 	}
@@ -18,13 +24,10 @@ func TestIntegration_RunPrintf(t *testing.T) {
 
 	// Instead of starting a child process (which may fail in some CI environments),
 	// write to the slave end to simulate program output arriving at the master.
-	if err := tln.ensurePTYOpen(); err != nil {
-		t.Fatalf("pty open failed: %v", err)
+	if slave == nil {
+		t.Fatalf("pty slave not initialized on backend")
 	}
-	if tln.tty == nil {
-		t.Fatalf("tty not initialized on terminal")
-	}
-	if _, err := tln.tty.Write([]byte("hello_integration")); err != nil {
+	if _, err := slave.Write([]byte("hello_integration")); err != nil {
 		t.Fatalf("writing to tty failed: %v", err)
 	}
 

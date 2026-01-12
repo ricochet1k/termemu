@@ -9,7 +9,7 @@ import (
 	"github.com/rivo/uniseg"
 )
 
-type screen struct {
+type gridScreen struct {
 	chars       [][]rune
 	cellText    [][]string
 	cellWidth   [][]uint8
@@ -34,8 +34,8 @@ type screen struct {
 	autoWrap bool
 }
 
-func newScreen(f Frontend) *screen {
-	s := &screen{
+func newGridScreen(f Frontend) *gridScreen {
+	s := &gridScreen{
 		frontend: f,
 	}
 	s.setSize(80, 14)
@@ -50,15 +50,15 @@ type Pos struct {
 	Y int
 }
 
-func (s *screen) getLine(y int) []rune {
+func (s *gridScreen) getLine(y int) []rune {
 	return s.chars[y]
 }
 
-func (s *screen) getLineColors(y int) ([]Color, []Color) {
+func (s *gridScreen) getLineColors(y int) ([]Color, []Color) {
 	return s.frontColors[y], s.backColors[y]
 }
 
-func (s *screen) StyledLine(x, w, y int) *Line {
+func (s *gridScreen) StyledLine(x, w, y int) *Line {
 	text := s.getLine(y)
 	fgs := s.frontColors[y]
 	bgs := s.backColors[y]
@@ -88,7 +88,7 @@ func (s *screen) StyledLine(x, w, y int) *Line {
 	}
 }
 
-func (s *screen) StyledLines(r Region) []*Line {
+func (s *gridScreen) StyledLines(r Region) []*Line {
 	var lines []*Line
 	for y := r.Y; y < r.Y2; y++ {
 		lines = append(lines, s.StyledLine(r.X, r.X2-r.X, y))
@@ -96,7 +96,7 @@ func (s *screen) StyledLines(r Region) []*Line {
 	return lines
 }
 
-func (s *screen) renderLineANSI(y int) string {
+func (s *gridScreen) renderLineANSI(y int) string {
 	line := s.getLine(y)
 	fg := s.frontColors[y][0]
 	bg := s.backColors[y][0]
@@ -117,7 +117,7 @@ func (s *screen) renderLineANSI(y int) string {
 	return buf.String()
 }
 
-func (s *screen) setColors(front Color, back Color) {
+func (s *gridScreen) setColors(front Color, back Color) {
 	s.frontColor = front
 	s.backColor = back
 
@@ -131,7 +131,7 @@ func (s *screen) setColors(front Color, back Color) {
 	s.frontend.ColorsChanged(front, back)
 }
 
-func (s *screen) setSize(w, h int) {
+func (s *gridScreen) setSize(w, h int) {
 	if w <= 0 || h <= 0 {
 		panic("Size must be > 0")
 	}
@@ -235,7 +235,7 @@ func (s *screen) setSize(w, h int) {
 	s.setColors(s.frontColor, s.backColor)
 }
 
-func (s *screen) eraseRegion(r Region, cr ChangeReason) {
+func (s *gridScreen) eraseRegion(r Region, cr ChangeReason) {
 	r = s.clampRegion(r)
 	// fmt.Printf("eraseRegion: %#v\n", r)
 	bytes := make([]rune, r.X2-r.X)
@@ -250,7 +250,7 @@ func (s *screen) eraseRegion(r Region, cr ChangeReason) {
 
 // This is a very raw write function. It wraps as necessary, but assumes all
 // the bytes are printable bytes
-func (s *screen) writeRunes(b []rune) {
+func (s *gridScreen) writeRunes(b []rune) {
 	for _, r := range b {
 		width := runeCellWidth(r)
 		if width > s.size.X {
@@ -269,7 +269,7 @@ func (s *screen) writeRunes(b []rune) {
 }
 
 // This is like writeRunes, but it moves existing runes to the right
-func (s *screen) insertRunes(b []rune) {
+func (s *gridScreen) insertRunes(b []rune) {
 	y := s.cursorPos.Y
 	fsx := s.cursorPos.X
 	fex := fsx + len(b)
@@ -290,7 +290,7 @@ func (s *screen) insertRunes(b []rune) {
 
 // This is a very raw write function. It assumes all the bytes are printable bytes
 // If you use this to write beyond the end of the line, it will panic.
-func (s *screen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
+func (s *gridScreen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
 	if y >= s.size.Y || x+len(b) > s.size.X {
 		panic(fmt.Sprintf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v, %v,%v\n", s.size, x, y, x+len(b), len(b), string(b), len(s.chars), len(s.chars[0])))
 	}
@@ -311,7 +311,7 @@ func (s *screen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + len(b)}, cr)
 }
 
-func (s *screen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) {
+func (s *gridScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) {
 	if width < 1 {
 		width = 1
 	}
@@ -359,7 +359,7 @@ func (s *screen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) 
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: end}, cr)
 }
 
-func (s *screen) clearWideAt(y int, x int) {
+func (s *gridScreen) clearWideAt(y int, x int) {
 	base := x
 	for base > 0 && s.cellCont[y][base] {
 		base--
@@ -391,14 +391,14 @@ func runeCellWidth(r rune) int {
 }
 
 // rawWriteColors copies one line of current colors to the screen, from x1 to x2
-func (s *screen) rawWriteColors(y int, x1 int, x2 int) {
+func (s *gridScreen) rawWriteColors(y int, x1 int, x2 int) {
 	copy(s.frontColors[y][x1:x2], s.frontColorBuf[x1:x2])
 	copy(s.backColors[y][x1:x2], s.backColorBuf[x1:x2])
 }
 
 // deleteChars removes n characters from (x,y), shifts the remainder left,
 // and fills the tail with spaces using current colors.
-func (s *screen) deleteChars(x int, y int, n int, cr ChangeReason) {
+func (s *gridScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 	if y < 0 || y >= s.size.Y || n <= 0 {
 		return
 	}
@@ -437,7 +437,7 @@ func (s *screen) deleteChars(x int, y int, n int, cr ChangeReason) {
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
 }
 
-// func (s *screen) advanceLine(auto bool) {
+// func (s *gridScreen) advanceLine(auto bool) {
 // 	s.cursorPos.X = 0
 // 	s.cursorPos.Y += 1
 // 	if s.cursorPos.Y >= s.size.Y {
@@ -448,20 +448,20 @@ func (s *screen) deleteChars(x int, y int, n int, cr ChangeReason) {
 // 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
 // }
 
-func (s *screen) setCursorPos(x, y int) {
+func (s *gridScreen) setCursorPos(x, y int) {
 	s.cursorPos.X = clamp(x, 0, s.size.X-1)
 	s.cursorPos.Y = clamp(y, 0, s.size.Y-1)
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
 	debugPrintln(debugCursor, "cursor set: ", x, y, s.cursorPos, s.size)
 }
 
-func (s *screen) setScrollMarginTopBottom(top, bottom int) {
+func (s *gridScreen) setScrollMarginTopBottom(top, bottom int) {
 	debugPrintln(debugScroll, "scroll margins:", top, bottom)
 	s.topMargin = clamp(top, 0, s.size.Y-1)
 	s.bottomMargin = clamp(bottom, 0, s.size.Y-1)
 }
 
-func (s *screen) scroll(y1 int, y2 int, dy int) {
+func (s *gridScreen) scroll(y1 int, y2 int, dy int) {
 	debugPrintln(debugScroll, "scroll:", y1, y2, dy)
 	y1 = clamp(y1, 0, s.size.Y-1)
 	y2 = clamp(y2, 0, s.size.Y-1)
@@ -512,7 +512,7 @@ func clamp(v int, low, high int) int {
 	return v
 }
 
-func (s *screen) clampRegion(r Region) Region {
+func (s *gridScreen) clampRegion(r Region) Region {
 	r.X = clamp(r.X, 0, s.size.X)
 	r.Y = clamp(r.Y, 0, s.size.Y)
 	r.X2 = clamp(r.X2, 0, s.size.X)
@@ -520,7 +520,7 @@ func (s *screen) clampRegion(r Region) Region {
 	return r
 }
 
-func (s *screen) moveCursor(dx, dy int, wrap bool, scroll bool) {
+func (s *gridScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 	if wrap && s.autoWrap {
 		s.cursorPos.X += dx
 		for s.cursorPos.X < 0 {
@@ -562,7 +562,7 @@ func (s *screen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 	//debugPrintf(debugCursor, "cursor move: %v, %v  %v, %v: %v %v\n", s.cursorPos.X, s.cursorPos.Y, dx, dy, wrap, scroll)
 }
 
-func (s *screen) printScreen() {
+func (s *gridScreen) printScreen() {
 	w, h := s.size.X, s.size.Y
 	fmt.Print("+")
 	for i := 0; i < w; i++ {

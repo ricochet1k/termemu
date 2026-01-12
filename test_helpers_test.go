@@ -1,8 +1,6 @@
 package termemu
 
 import (
-	"bufio"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -114,14 +112,6 @@ func MakeTerminalWithMock() (*terminal, *MockFrontend) {
 		viewStrings: make([]string, viewStringCount),
 	}
 	return t, mf
-}
-
-// newDupReader creates a dupReader reading from the provided string for the given terminal.
-func newDupReader(input string, t *terminal) *dupReader {
-	return &dupReader{
-		reader: bufio.NewReader(strings.NewReader(input)),
-		t:      t,
-	}
 }
 
 // small helper to fail test with recorded state for easier debugging

@@ -44,7 +44,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "text_mode must be rune or grapheme")
 		return
 	}
-	term := termemu.NewWithMode(tty, mode)
+	cmd := exec.Command(args[0], args[1:]...)
+	backend := &termemu.PTYBackend{}
+	if err := backend.StartCommand(cmd); err != nil {
+		fmt.Fprintln(os.Stderr, "StartCommand error:", err)
+		return
+	}
+	term := termemu.NewWithMode(tty, backend, mode)
 	tty.SetTerminal(term)
 
 	resize := func() {
@@ -60,12 +66,6 @@ func main() {
 		tty.Attach(termemu.Region{X: 0, Y: 0, X2: w, Y2: h})
 	}
 	resize()
-
-	cmd := exec.Command(args[0], args[1:]...)
-	if err := term.StartCommand(cmd); err != nil {
-		fmt.Fprintln(os.Stderr, "StartCommand error:", err)
-		return
-	}
 
 	inputCh := make(chan []byte, 8)
 	go func() {

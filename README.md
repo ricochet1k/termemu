@@ -8,6 +8,9 @@ A small Go library for emulating a terminal and rendering output through a plugg
 - Pluggable `Frontend` interface for rendering or collecting output
 - Screen accessors for plain text, ANSI output, and styled lines
 - Minimal backend abstraction for PTY or no-PTY environments
+- Rune-per-cell or grapheme-cluster text tokenization
+- Mouse reporting (X10/UTF-8/SGR encodings)
+- Kitty keyboard protocol mode parsing and key encoding support
 
 ## Requirements
 
@@ -36,17 +39,19 @@ import (
 
 func main() {
 	// Use the EmptyFrontend if you don't need UI callbacks.
-	term := termemu.New(&termemu.EmptyFrontend{})
+	backend := &termemu.PTYBackend{}
+	cmd := exec.Command("sh", "-c", "printf 'Hello World'")
+	if err := backend.StartCommand(cmd); err != nil {
+		fmt.Fprintln(os.Stderr, "StartCommand error:", err)
+		return
+	}
+
+	term := termemu.NewWithMode(&termemu.EmptyFrontend{}, backend, termemu.TextReadModeRune)
 	if term == nil {
 		fmt.Println("failed to create terminal")
 		return
 	}
 
-	cmd := exec.Command("sh", "-c", "printf 'Hello World'")
-	if err := term.StartCommand(cmd); err != nil {
-		fmt.Fprintln(os.Stderr, "StartCommand error:", err)
-		return
-	}
 	_ = cmd.Wait()
 
 	// Dump the screen contents to stdout.
@@ -81,12 +86,13 @@ func (loggingFrontend) ViewIntChanged(v termemu.ViewInt, v2 int)   {}
 func (loggingFrontend) ViewStringChanged(v termemu.ViewString, v2 string) {}
 
 func main() {
-	term := termemu.New(loggingFrontend{})
+	backend := &termemu.PTYBackend{}
 	cmd := exec.Command("sh", "-c", "printf '\\e[31mred\\e[0m' && echo")
-	if err := term.StartCommand(cmd); err != nil {
+	if err := backend.StartCommand(cmd); err != nil {
 		fmt.Fprintln(os.Stderr, "StartCommand error:", err)
 		return
 	}
+	term := termemu.NewWithMode(loggingFrontend{}, backend, termemu.TextReadModeRune)
 	_ = cmd.Wait()
 
 	for y := 0; y < 1; y++ {
@@ -97,11 +103,9 @@ func main() {
 
 ## API highlights
 
-- `termemu.New(frontend)` creates a terminal with a PTY backend.
-- `termemu.NewWithBackend(frontend, backend)` allows swapping in `NoPTYBackend`.
-- `termemu.NewWithMode(frontend, mode)` selects rune-per-cell or grapheme-cluster reading.
-- `termemu.NewWithBackendMode(frontend, backend, mode)` combines backend swap with mode selection.
-- `Terminal.StartCommand(*exec.Cmd)` runs a command within the PTY.
+- `termemu.NewWithMode(frontend, backend, mode)` creates a terminal with the provided backend.
+- `termemu.NewNoPTYBackend(reader, writer)` creates a backend from provided pipes.
+- `PTYBackend.StartCommand(*exec.Cmd)` runs a command within a PTY backend.
 - `Terminal.Line(y)` and `Terminal.ANSILine(y)` read screen contents.
 - `Terminal.Resize(w, h)` updates the PTY and internal screen size.
 

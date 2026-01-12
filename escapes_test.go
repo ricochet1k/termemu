@@ -1,6 +1,8 @@
 package termemu
 
 import (
+	"bufio"
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -11,49 +13,49 @@ func TestHandleCmdCSI_CursorMovement(t *testing.T) {
 
 	t1.screen().setCursorPos(5, 5)
 
-	if !t1.handleCommand(newDupReader("[A", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[A"))) {
 		t.Fatalf("handleCommand failed for [A")
 	}
 	if t1.screen().cursorPos.X != 5 || t1.screen().cursorPos.Y != 4 {
 		t.Fatalf("expected cursor (5,4), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
 	}
 
-	if !t1.handleCommand(newDupReader("[2B", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[2B"))) {
 		t.Fatalf("handleCommand failed for [2B")
 	}
 	if t1.screen().cursorPos.X != 5 || t1.screen().cursorPos.Y != 6 {
 		t.Fatalf("expected cursor (5,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
 	}
 
-	if !t1.handleCommand(newDupReader("[3C", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[3C"))) {
 		t.Fatalf("handleCommand failed for [3C")
 	}
 	if t1.screen().cursorPos.X != 8 || t1.screen().cursorPos.Y != 6 {
 		t.Fatalf("expected cursor (8,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
 	}
 
-	if !t1.handleCommand(newDupReader("[4D", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[4D"))) {
 		t.Fatalf("handleCommand failed for [4D")
 	}
 	if t1.screen().cursorPos.X != 4 || t1.screen().cursorPos.Y != 6 {
 		t.Fatalf("expected cursor (4,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
 	}
 
-	if !t1.handleCommand(newDupReader("[10G", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[10G"))) {
 		t.Fatalf("handleCommand failed for [10G")
 	}
 	if t1.screen().cursorPos.X != 9 || t1.screen().cursorPos.Y != 6 {
 		t.Fatalf("expected cursor (9,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
 	}
 
-	if !t1.handleCommand(newDupReader("[7;12H", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[7;12H"))) {
 		t.Fatalf("handleCommand failed for [7;12H")
 	}
 	if t1.screen().cursorPos.X != 11 || t1.screen().cursorPos.Y != 6 {
 		t.Fatalf("expected cursor (11,6), got (%d,%d)", t1.screen().cursorPos.X, t1.screen().cursorPos.Y)
 	}
 
-	if !t1.handleCommand(newDupReader("[9;2f", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[9;2f"))) {
 		t.Fatalf("handleCommand failed for [9;2f")
 	}
 	if t1.screen().cursorPos.X != 1 || t1.screen().cursorPos.Y != 8 {
@@ -66,7 +68,7 @@ func TestHandleCmdCSI_SetColors(t *testing.T) {
 	t1, mf := MakeTerminalWithMock()
 
 	// send ESC [1;31;42m  (bold, fg=red, bg=green)
-	r := newDupReader("[1;31;42m", t1)
+	r := bufio.NewReader(strings.NewReader("[1;31;42m"))
 	ok := t1.handleCommand(r)
 	if !ok {
 		t.Fatalf("handleCommand returned false for CSI m sequence")
@@ -91,12 +93,12 @@ func TestHandleCmdCSI_DefaultColors(t *testing.T) {
 	t1, mf := MakeTerminalWithMock()
 
 	// Set non-default colors first.
-	if !t1.handleCommand(newDupReader("[31;42m", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[31;42m"))) {
 		t.Fatalf("handleCommand failed for [31;42m")
 	}
 
 	// Reset all attributes/colors.
-	if !t1.handleCommand(newDupReader("[0m", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[0m"))) {
 		t.Fatalf("handleCommand failed for [0m")
 	}
 
@@ -109,7 +111,7 @@ func TestHandleCmdCSI_DefaultColors(t *testing.T) {
 	}
 
 	// Explicit default foreground/background.
-	if !t1.handleCommand(newDupReader("[39m", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[39m"))) {
 		t.Fatalf("handleCommand failed for [39m")
 	}
 	last = mf.Colors[len(mf.Colors)-1]
@@ -117,7 +119,7 @@ func TestHandleCmdCSI_DefaultColors(t *testing.T) {
 		t.Fatalf("expected FG default after 39m, got %v", last.F)
 	}
 
-	if !t1.handleCommand(newDupReader("[49m", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[49m"))) {
 		t.Fatalf("handleCommand failed for [49m")
 	}
 	last = mf.Colors[len(mf.Colors)-1]
@@ -130,7 +132,7 @@ func TestHandleCmdCSI_SetModesAndFlags(t *testing.T) {
 	// test ?25l and ?25h toggles show-cursor flag
 	t1, mf := MakeTerminalWithMock()
 
-	r1 := newDupReader("[?25l", t1)
+	r1 := bufio.NewReader(strings.NewReader("[?25l"))
 	if !t1.handleCommand(r1) {
 		t.Fatalf("handleCommand failed for ?25l")
 	}
@@ -138,7 +140,7 @@ func TestHandleCmdCSI_SetModesAndFlags(t *testing.T) {
 		t.Fatalf("expected VFShowCursor false after ?25l, got %v", v)
 	}
 
-	r2 := newDupReader("[?25h", t1)
+	r2 := bufio.NewReader(strings.NewReader("[?25h"))
 	if !t1.handleCommand(r2) {
 		t.Fatalf("handleCommand failed for ?25h")
 	}
@@ -150,14 +152,14 @@ func TestHandleCmdCSI_SetModesAndFlags(t *testing.T) {
 func TestHandleCmdCSI_ModifyOtherKeys(t *testing.T) {
 	t1, mf := MakeTerminalWithMock()
 
-	if !t1.handleCommand(newDupReader("[>4;2m", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[>4;2m"))) {
 		t.Fatalf("handleCommand failed for >4;2m")
 	}
 	if v := mf.ViewInts[VIModifyOtherKeys]; v != 2 {
 		t.Fatalf("expected modifyOtherKeys 2, got %v", v)
 	}
 
-	if !t1.handleCommand(newDupReader("[>4;0m", t1)) {
+	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[>4;0m"))) {
 		t.Fatalf("handleCommand failed for >4;0m")
 	}
 	if v := mf.ViewInts[VIModifyOtherKeys]; v != 0 {
@@ -169,7 +171,7 @@ func TestHandleCmdOSC_WindowTitleAndStrings(t *testing.T) {
 	t1, mf := MakeTerminalWithMock()
 
 	// OSC sequence: ]0;title BEL
-	r := newDupReader("]0;mytitle", t1)
+	r := bufio.NewReader(strings.NewReader("]0;mytitle"))
 	// handleCommand expects to see ']' as the first rune
 	ok := t1.handleCommand(r)
 	if !ok {
@@ -193,7 +195,7 @@ func TestSendMouseRaw_Encodings(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
-	t1.pty = w
+	t1.backend = NewNoPTYBackend(bytes.NewReader(nil), w)
 
 	// X10 encoding
 	t1.viewInts[VIMouseEncoding] = MEX10
@@ -236,9 +238,9 @@ func TestHandleCmdCSI_DeviceAttrsAndAlternateScreen(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
-	t1.pty = w
+	t1.backend = NewNoPTYBackend(bytes.NewReader(nil), w)
 
-	ok := t1.handleCommand(newDupReader("[>c", t1))
+	ok := t1.handleCommand(bufio.NewReader(strings.NewReader("[>c")))
 	if !ok {
 		t.Fatalf("handleCommand failed for >c")
 	}
@@ -252,7 +254,7 @@ func TestHandleCmdCSI_DeviceAttrsAndAlternateScreen(t *testing.T) {
 	// Test alternate screen switch ?1049h
 	// Reset regions
 	mf.Regions = nil
-	ok = t1.handleCommand(newDupReader("[?1049h", t1))
+	ok = t1.handleCommand(bufio.NewReader(strings.NewReader("[?1049h")))
 	if !ok {
 		t.Fatalf("handleCommand failed for ?1049h")
 	}

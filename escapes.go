@@ -9,46 +9,9 @@ import (
 	"strings"
 )
 
-type dupReader struct {
-	reader *bufio.Reader
-	t      *terminal
-}
-
-func (r *dupReader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	if n > 0 {
-		r.teeBytes(p[:n])
-	}
-	return n, err
-}
-
-func (r *dupReader) ReadByte() (byte, error) {
-	b, err := r.reader.ReadByte()
-	if err == nil {
-		r.teeBytes([]byte{b})
-	}
-	return b, err
-}
-func (r *dupReader) Buffered() int {
-	return r.reader.Buffered()
-}
-
-func (r *dupReader) teeBytes(b []byte) {
-	if len(b) == 0 {
-		return
-	}
-	if r.t.dup != nil {
-		r.t.dup.Write(b)
-	}
-}
-
 func (t *terminal) ptyReadLoop() {
-
-	r := &dupReader{
-		reader: bufio.NewReader(t.pty),
-		t:      t,
-	}
-	gr := NewGraphemeReaderWithMode(r, t.textReadMode)
+	reader := bufio.NewReader(t.backend)
+	gr := NewGraphemeReaderWithMode(reader, t.textReadMode)
 
 	for {
 		tokens, err := gr.ReadPrintableTokens()
@@ -129,12 +92,6 @@ func (t *terminal) ptyReadLoop() {
 
 				if success {
 					debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().cursorPos, string(cmd))
-					if string(cmd) == "[?25l" {
-						// hide cursor
-						if t.dup != nil {
-							t.dup.Write([]byte(string("\033[?25h")))
-						}
-					}
 				} else {
 					debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
 				}
@@ -154,7 +111,7 @@ func (t *terminal) ptyReadLoop() {
 
 type escapeReader interface {
 	ReadByte() (byte, error)
-	Buffered() int
+	// Buffered() int
 }
 
 type captureReader struct {
@@ -170,9 +127,9 @@ func (c *captureReader) ReadByte() (byte, error) {
 	return b, err
 }
 
-func (c *captureReader) Buffered() int {
-	return c.r.Buffered()
-}
+// func (c *captureReader) Buffered() int {
+// 	return c.r.Buffered()
+// }
 
 func (t *terminal) handleCommand(r escapeReader) bool {
 	b, err := r.ReadByte()
@@ -322,7 +279,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 			switch params[0] {
 			case 0:
-				t.pty.Write([]byte("\033[?1;2c"))
+				_, _ = t.Write([]byte("\033[?1;2c"))
 			}
 
 		case 'd': // Line Position Absolute
@@ -711,8 +668,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		switch b {
 		case 'c': // Send Device Attributes
 			attrs := "\x1b[>1;4402;0c"
-			n, err := t.pty.WriteString(attrs)
-			if err != nil || n != len(attrs) {
+			if _, err := t.Write([]byte(attrs)); err != nil {
 				debugPrintln(debugErrors, "Error sending device attrs:", err)
 			}
 

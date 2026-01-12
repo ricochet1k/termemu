@@ -106,7 +106,7 @@ func TestStyledLine(t *testing.T) {
 	l := s.StyledLine(1, 2, 0)
 	want := &Line{
 		Text:  []rune{'1', '2'},
-		Spans: []StyledSpan{StyledSpan{FG: ColDefault, BG: ColDefault, Width: 2}},
+		Spans: []StyledSpan{{FG: ColDefault, BG: ColDefault, Width: 2}},
 		Width: 2,
 	}
 	if diff := cmp.Diff(l, want); diff != "" {

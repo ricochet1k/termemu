@@ -4,14 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"strings"
 	"sync"
 )
 
-// Terminal is a wrapper around a pty that sends rendering commands
-// to a provided Frontend.
 type Terminal interface {
 	SetFrontend(f Frontend)
 
@@ -19,7 +14,6 @@ type Terminal interface {
 	Unlock()
 	WithLock(func())
 
-	StartCommand(c *exec.Cmd) error
 	Write(b []byte) (int, error)
 	SendKey(KeyEvent) (int, error)
 	Size() (int, int)
@@ -29,7 +23,6 @@ type Terminal interface {
 	LineColors(int) ([]Color, []Color)
 	StyledLine(x, w, y int) *Line
 	StyledLines(r Region) []*Line
-	DupTo(*os.File)
 
 	PrintTerminal() // for debugging
 }
@@ -44,9 +37,6 @@ type terminal struct {
 
 	backend Backend
 
-	pty, tty *os.File
-	dup      *os.File
-
 	viewFlags   []bool
 	viewInts    []int
 	viewStrings []string
@@ -58,31 +48,26 @@ type terminal struct {
 	keyboardAlt  keyboardMode
 }
 
-// New makes a new terminal using the provided Frontend
-func New(f Frontend) Terminal {
-	return NewWithBackendMode(f, PTYBackend{}, TextReadModeRune)
+// New makes a new terminal using the provided Frontend, Backend, and default text read mode.
+func New(f Frontend, backend Backend) Terminal {
+	return NewWithMode(f, backend, TextReadModeRune)
 }
 
 // NewWithBackend makes a new terminal using the provided Frontend and Backend.
 func NewWithBackend(f Frontend, backend Backend) Terminal {
-	return NewWithBackendMode(f, backend, TextReadModeRune)
+	return NewWithMode(f, backend, TextReadModeRune)
 }
 
-// NewWithMode makes a new terminal using the provided Frontend and text read mode.
-func NewWithMode(f Frontend, mode TextReadMode) Terminal {
-	return NewWithBackendMode(f, PTYBackend{}, mode)
-}
-
-// NewWithBackendMode makes a new terminal using the provided Frontend, Backend, and text read mode.
-func NewWithBackendMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
+// NewWithMode makes a new terminal using the provided Frontend, Backend, and text read mode.
+func NewWithMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
 	if f == nil {
 		f = &EmptyFrontend{}
 	}
 	if backend == nil {
-		backend = PTYBackend{}
+		return nil
 	}
 
-	return &terminal{
+	t := &terminal{
 		frontend:     f,
 		mainScreen:   newScreen(f),
 		altScreen:    newScreen(f),
@@ -92,6 +77,8 @@ func NewWithBackendMode(f Frontend, backend Backend, mode TextReadMode) Terminal
 		viewStrings:  make([]string, viewStringCount),
 		textReadMode: mode,
 	}
+	t.startReadLoop()
+	return t
 }
 
 func (t *terminal) SetFrontend(f Frontend) {
@@ -111,50 +98,13 @@ func (t *terminal) SetFrontend(f Frontend) {
 
 const termStr = "TERM=xterm-256color"
 
-func (t *terminal) StartCommand(c *exec.Cmd) error {
-	if t.backend == nil {
-		t.backend = PTYBackend{}
-	}
-	if t.pty != nil {
-		return errors.New("pty already initialized; start command before writing")
-	}
-
-	if c.Env == nil {
-		c.Env = os.Environ()
-	}
-
-	found := false
-	for i, v := range c.Env {
-		if strings.HasPrefix(v, "TERM=") {
-			found = true
-			c.Env[i] = termStr
-			break
-		}
-	}
-	if !found {
-		c.Env = append(c.Env, termStr)
-	}
-
-	var err error
-	t.pty, t.tty, err = t.backend.Start(c)
-	if err != nil {
-		return err
-	}
-
-	t.startReadLoop()
-	w, h := t.Size()
-	_ = t.backend.Setsize(t.pty, w, h)
-
-	return nil
-}
-
 func (t *terminal) Write(b []byte) (int, error) {
-	if err := t.ensurePTYOpen(); err != nil {
-		return 0, err
+	if t.backend == nil {
+		return 0, errors.New("backend is nil")
 	}
 	total := 0
 	for len(b) > 0 {
-		n, err := t.pty.Write(b)
+		n, err := t.backend.Write(b)
 		total += n
 		if err != nil {
 			return total, err
@@ -182,36 +132,18 @@ func (t *terminal) Resize(w, h int) error {
 	t.mainScreen.setSize(w, h)
 	t.altScreen.setSize(w, h)
 
-	if t.pty == nil {
-		return nil
-	}
-
-	return t.backend.Setsize(t.pty, w, h)
-}
-
-func (t *terminal) ensurePTYOpen() error {
-	if t.pty != nil {
-		return nil
-	}
 	if t.backend == nil {
-		t.backend = PTYBackend{}
+		return nil
 	}
 
-	var err error
-	t.pty, t.tty, err = t.backend.Open()
-	if err != nil {
-		return err
-	}
-
-	t.startReadLoop()
-	w, h := t.Size()
-	_ = t.backend.Setsize(t.pty, w, h)
-
-	return nil
+	return t.backend.SetSize(w, h)
 }
 
 func (t *terminal) startReadLoop() {
 	if t.readLoopStarted {
+		return
+	}
+	if t.backend == nil {
 		return
 	}
 	t.readLoopStarted = true
@@ -245,10 +177,6 @@ func (t *terminal) StyledLine(x, w, y int) *Line {
 
 func (t *terminal) StyledLines(r Region) []*Line {
 	return t.screen().StyledLines(r)
-}
-
-func (t *terminal) DupTo(f *os.File) {
-	t.dup = f
 }
 
 func (t *terminal) PrintTerminal() {

@@ -36,11 +36,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "text_mode must be rune or grapheme")
 		return
 	}
-	t := termemu.NewWithMode(mf, mode)
-	if t == nil {
-		fmt.Println("failed to create terminal")
-		return
-	}
+	var width, height int
 	if *size != "" {
 		parts := strings.SplitN(*size, "x", 2)
 		if len(parts) != 2 {
@@ -53,10 +49,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "size must be in WxH format with positive integers")
 			return
 		}
-		if err := t.Resize(w, h); err != nil {
-			fmt.Fprintln(os.Stderr, "Resize error:", err)
-			return
-		}
+		width, height = w, h
 	}
 
 	args := flag.Args()
@@ -64,9 +57,21 @@ func main() {
 		args = []string{"sh", "-c", "printf 'Hello World'"}
 	}
 	cmd := exec.Command(args[0], args[1:]...)
-	if err := t.StartCommand(cmd); err != nil {
+	backend := &termemu.PTYBackend{}
+	if err := backend.StartCommand(cmd); err != nil {
 		fmt.Fprintln(os.Stderr, "StartCommand error; falling back:", err)
 		return
+	}
+	t := termemu.NewWithMode(mf, backend, mode)
+	if t == nil {
+		fmt.Println("failed to create terminal")
+		return
+	}
+	if width > 0 && height > 0 {
+		if err := t.Resize(width, height); err != nil {
+			fmt.Fprintln(os.Stderr, "Resize error:", err)
+			return
+		}
 	}
 	if *input != "" {
 		if *inputDelay > 0 {
