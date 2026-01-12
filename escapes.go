@@ -22,15 +22,15 @@ func (t *terminal) ptyReadLoop() {
 			return
 		}
 		if len(tokens) > 0 {
-			runes := make([]rune, 0, len(tokens))
-			for _, tok := range tokens {
-				runes = append(runes, []rune(tok.Text)...)
-			}
-			if len(runes) > 0 {
-				t.WithLock(func() {
-					t.screen().writeRunes(runes)
-				})
-				debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", string(runes), len(runes))
+			t.WithLock(func() {
+				t.screen().writeTokens(tokens)
+			})
+			if *debugTxt {
+				var buf bytes.Buffer
+				for _, tok := range tokens {
+					buf.WriteString(tok.Text)
+				}
+				debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", buf.String(), buf.Len())
 			}
 			continue
 		}

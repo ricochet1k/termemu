@@ -27,6 +27,7 @@ type screen interface {
 	setSize(w, h int)
 	eraseRegion(r Region, cr ChangeReason)
 	writeRunes(b []rune)
+	writeTokens(tokens []GraphemeToken)
 	insertRunes(b []rune)
 	rawWriteRunes(x int, y int, b []rune, cr ChangeReason)
 	rawWriteRune(x int, y int, r rune, width int, cr ChangeReason)
@@ -65,19 +66,14 @@ type spanLine struct {
 }
 
 type span struct {
-	fg, bg Color
-	cells  []spanCell
+	fg, bg    Color
+	tokens    []spanToken
+	cellWidth int
 }
 
-type spanCell struct {
-	r     rune
+type spanToken struct {
+	text  string
 	width uint8
-	cont  bool
-}
-
-type styledCell struct {
-	spanCell
-	fg, bg Color
 }
 
 func newScreen(f Frontend) screen {
@@ -132,29 +128,59 @@ func (s *spanScreen) SetFrontend(f Frontend) {
 }
 
 func (s *spanScreen) getLine(y int) []rune {
-	cells := s.lineCells(y)
-	line := make([]rune, len(cells))
-	for i, c := range cells {
-		line[i] = c.r
+	line := make([]rune, s.size.X)
+	pos := 0
+	for _, sp := range s.lines[y].spans {
+		for _, tok := range sp.tokens {
+			width := tokenWidth(tok)
+			if pos >= len(line) {
+				return line
+			}
+			line[pos] = tokenRune(tok)
+			for i := 1; i < width && pos+i < len(line); i++ {
+				line[pos+i] = 0
+			}
+			pos += width
+			if pos >= len(line) {
+				return line
+			}
+		}
+	}
+	for pos < len(line) {
+		line[pos] = ' '
+		pos++
 	}
 	return line
 }
 
 func (s *spanScreen) getLineColors(y int) ([]Color, []Color) {
-	cells := s.lineCells(y)
-	fg := make([]Color, len(cells))
-	bg := make([]Color, len(cells))
-	for i, c := range cells {
-		fg[i] = c.fg
-		bg[i] = c.bg
+	fg := make([]Color, s.size.X)
+	bg := make([]Color, s.size.X)
+	pos := 0
+	for _, sp := range s.lines[y].spans {
+		for _, tok := range sp.tokens {
+			width := tokenWidth(tok)
+			for i := 0; i < width && pos < s.size.X; i++ {
+				fg[pos] = sp.fg
+				bg[pos] = sp.bg
+				pos++
+			}
+			if pos >= s.size.X {
+				return fg, bg
+			}
+		}
+	}
+	for pos < s.size.X {
+		fg[pos] = s.frontColor
+		bg[pos] = s.backColor
+		pos++
 	}
 	return fg, bg
 }
 
 func (s *spanScreen) StyledLine(x, w, y int) *Line {
-	cells := s.lineCells(y)
-	if w < 0 || x+w > len(cells) {
-		w = len(cells) - x
+	if w < 0 || x+w > s.size.X {
+		w = s.size.X - x
 	}
 	if w < 0 {
 		w = 0
@@ -162,21 +188,48 @@ func (s *spanScreen) StyledLine(x, w, y int) *Line {
 
 	text := make([]rune, w)
 	spans := make([]StyledSpan, 0)
-	for i := 0; i < w; {
-		cell := cells[x+i]
-		fg := cell.fg
-		bg := cell.bg
-		width := uint32(0)
-		for i < w {
-			cell = cells[x+i]
-			if cell.fg != fg || cell.bg != bg {
+	pos := 0
+	out := 0
+	for _, sp := range s.lines[y].spans {
+		for _, tok := range sp.tokens {
+			width := tokenWidth(tok)
+			r := tokenRune(tok)
+			for i := 0; i < width; i++ {
+				if pos >= x && pos < x+w {
+					if i == 0 {
+						text[out] = r
+					} else {
+						text[out] = 0
+					}
+					if len(spans) == 0 || spans[len(spans)-1].FG != sp.fg || spans[len(spans)-1].BG != sp.bg {
+						spans = append(spans, StyledSpan{FG: sp.fg, BG: sp.bg, Width: 1})
+					} else {
+						spans[len(spans)-1].Width++
+					}
+					out++
+				}
+				pos++
+				if pos >= x+w {
+					break
+				}
+			}
+			if pos >= x+w {
 				break
 			}
-			text[i] = cell.r
-			i++
-			width++
 		}
-		spans = append(spans, StyledSpan{FG: fg, BG: bg, Width: width})
+		if pos >= x+w {
+			break
+		}
+	}
+
+	for out < w {
+		text[out] = ' '
+		if len(spans) == 0 || spans[len(spans)-1].FG != s.frontColor || spans[len(spans)-1].BG != s.backColor {
+			spans = append(spans, StyledSpan{FG: s.frontColor, BG: s.backColor, Width: 1})
+		} else {
+			spans[len(spans)-1].Width++
+		}
+		out++
 	}
 
 	return &Line{
@@ -195,21 +248,19 @@ func (s *spanScreen) StyledLines(r Region) []*Line {
 }
 
 func (s *spanScreen) renderLineANSI(y int) string {
-	cells := s.lineCells(y)
-	if len(cells) == 0 {
+	if s.size.X == 0 {
 		return ""
 	}
-	buf := bytes.NewBuffer(make([]byte, 0, len(cells)+10))
-	idx := 0
-	for idx < len(cells) {
-		fg := cells[idx].fg
-		bg := cells[idx].bg
-		buf.Write(ANSIEscape(fg, bg))
-		for idx < len(cells) && fg == cells[idx].fg && bg == cells[idx].bg {
-			if cells[idx].r != 0 {
-				buf.WriteRune(cells[idx].r)
+	buf := bytes.NewBuffer(make([]byte, 0, s.size.X+10))
+	for _, sp := range s.lines[y].spans {
+		if len(sp.tokens) == 0 {
+			continue
+		}
+		buf.Write(ANSIEscape(sp.fg, sp.bg))
+		for _, tok := range sp.tokens {
+			if tok.text != "" {
+				buf.WriteString(tok.text)
 			}
-			idx++
 		}
 	}
 	return buf.String()
@@ -228,18 +279,13 @@ func (s *spanScreen) setSize(w, h int) {
 	}
 
 	prevH := s.size.Y
-
 	newLines := make([]spanLine, h)
 	for y := 0; y < h; y++ {
 		switch {
 		case y < prevH && len(s.lines) > 0:
-			cells := s.lineCells(y)
-			if len(cells) > w {
-				cells = cells[:w]
-			} else if len(cells) < w {
-				cells = append(cells, makeSpaceCells(w-len(cells), s.frontColor, s.backColor)...)
-			}
-			newLines[y] = lineFromCells(cells)
+			line := cloneSpanLine(s.lines[y])
+			resizeLine(&line, w, s.frontColor, s.backColor)
+			newLines[y] = line
 		default:
 			newLines[y] = blankSpanLine(w, s.frontColor, s.backColor)
 		}
@@ -291,38 +337,83 @@ func (s *spanScreen) writeRunes(b []rune) {
 	}
 }
 
+func (s *spanScreen) writeTokens(tokens []GraphemeToken) {
+	if len(tokens) == 0 {
+		return
+	}
+	batch := make([]spanToken, 0, len(tokens))
+	batchWidth := 0
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		s.rawWriteTokens(s.cursorPos.X, s.cursorPos.Y, batch, CRText)
+		s.moveCursor(batchWidth, 0, true, true)
+		batch = batch[:0]
+		batchWidth = 0
+	}
+
+	for _, tok := range tokens {
+		if tok.Merge {
+			if len(batch) > 0 {
+				batch[len(batch)-1].text += tok.Text
+			} else {
+				s.mergeIntoPreviousCell(tok.Text)
+			}
+			continue
+		}
+		width := tok.Width
+		if width < 1 {
+			width = 1
+		}
+		if width > s.size.X {
+			width = s.size.X
+		}
+
+		if s.cursorPos.X+batchWidth+width > s.size.X {
+			flush()
+			if s.autoWrap {
+				s.moveCursor(-s.cursorPos.X, 1, false, true)
+			} else {
+				s.cursorPos.X = s.size.X - width
+			}
+		}
+
+		batch = append(batch, spanToken{text: tok.Text, width: uint8(width)})
+		batchWidth += width
+	}
+
+	flush()
+}
+
 func (s *spanScreen) insertRunes(b []rune) {
 	y := s.cursorPos.Y
-	fsx := s.cursorPos.X
-	fex := fsx + len(b)
-	tsx := s.size.X - len(b)
-	tex := s.size.X
+	n := len(b)
+	if n <= 0 {
+		return
+	}
+	if n > s.size.X {
+		n = s.size.X
+	}
 
-	cells := s.lineCells(y)
-	copy(cells[tsx:tex], cells[fsx:fex])
-	s.setLineFromCells(y, cells)
+	s.clearWideOverlaps(y, s.cursorPos.X, 1)
 
-	s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b, CRText)
+	line := &s.lines[y]
+	truncateLine(line, s.size.X-n)
+	insertSpan(line, s.cursorPos.X, s.frontColor, s.backColor, makeSpaceTokens(n))
+
+	s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b[:n], CRText)
 }
 
 func (s *spanScreen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
 	if y >= s.size.Y || x+len(b) > s.size.X {
 		panic(fmt.Sprintf("rawWriteBytes out of range: %v  %v,%v,%v %v %#v\n", s.size, x, y, x+len(b), len(b), string(b)))
 	}
-	cells := s.lineCells(y)
-	for i, r := range b {
-		idx := x + i
-		if cells[idx].cont {
-			s.clearWideAt(cells, idx)
-		}
-		cells[idx] = styledCell{
-			spanCell: spanCell{r: r, width: 1, cont: false},
-			fg:       s.frontColor,
-			bg:       s.backColor,
-		}
-	}
-	s.setLineFromCells(y, cells)
-	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + len(b)}, cr)
+	width := len(b)
+	s.clearWideOverlaps(y, x, width)
+	tokens := makeTokensFromRunes(b)
+	replaceRange(&s.lines[y], x, width, s.frontColor, s.backColor, tokens)
+	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + width}, cr)
 }
 
 func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) {
@@ -332,40 +423,15 @@ func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReas
 	if y >= s.size.Y || x+width > s.size.X {
 		panic(fmt.Sprintf("rawWriteRune out of range: %v  %v,%v,%v %v %#v\n", s.size, x, y, x+width, width, string(r)))
 	}
-	cells := s.lineCells(y)
-	if cells[x].cont {
-		s.clearWideAt(cells, x)
+	prevWidth := 1
+	if tok, ok := tokenAt(s.lines[y], x); ok {
+		prevWidth = tokenWidth(tok)
 	}
 
-	prevWidth := int(cells[x].width)
-	if prevWidth < 1 {
-		prevWidth = 1
-	}
+	s.clearWideOverlaps(y, x, width)
+	tokens := makeTokenFromRune(r, width)
+	replaceRange(&s.lines[y], x, width, s.frontColor, s.backColor, tokens)
 
-	cells[x] = styledCell{
-		spanCell: spanCell{r: r, width: uint8(width), cont: false},
-		fg:       s.frontColor,
-		bg:       s.backColor,
-	}
-	for i := 1; i < width; i++ {
-		idx := x + i
-		cells[idx] = styledCell{
-			spanCell: spanCell{r: 0, width: 0, cont: true},
-			fg:       s.frontColor,
-			bg:       s.backColor,
-		}
-	}
-	for i := width; i < prevWidth; i++ {
-		idx := x + i
-		if idx >= s.size.X {
-			break
-		}
-		cells[idx] = styledCell{
-			spanCell: spanCell{r: ' ', width: 1, cont: false},
-			fg:       s.frontColor,
-			bg:       s.backColor,
-		}
-	}
 	end := x + width
 	if prevWidth > width {
 		end = x + prevWidth
@@ -373,27 +439,7 @@ func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReas
 	if end > s.size.X {
 		end = s.size.X
 	}
-	s.setLineFromCells(y, cells)
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: end}, cr)
-}
-
-func (s *spanScreen) clearWideAt(cells []styledCell, x int) {
-	base := x
-	for base > 0 && cells[base].cont {
-		base--
-	}
-	width := int(cells[base].width)
-	if width <= 1 {
-		return
-	}
-	end := min(base+width, len(cells))
-	for i := base; i < end; i++ {
-		cells[i] = styledCell{
-			spanCell: spanCell{r: ' ', width: 1, cont: false},
-			fg:       s.frontColor,
-			bg:       s.backColor,
-		}
-	}
 }
 
 func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
@@ -411,16 +457,14 @@ func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 		n = s.size.X - x
 	}
 
-	cells := s.lineCells(y)
-	copy(cells[x:], cells[x+n:])
-	for i := s.size.X - n; i < s.size.X; i++ {
-		cells[i] = styledCell{
-			spanCell: spanCell{r: ' ', width: 1, cont: false},
-			fg:       s.frontColor,
-			bg:       s.backColor,
-		}
-	}
-	s.setLineFromCells(y, cells)
+	s.clearWideOverlaps(y, x, n)
+
+	line := &s.lines[y]
+	start := splitAt(line, x)
+	end := splitAt(line, x+n)
+	line.spans = append(line.spans[:start], line.spans[end:]...)
+	line.spans = append(line.spans, span{fg: s.frontColor, bg: s.backColor, tokens: makeSpaceTokens(n), cellWidth: n})
+	mergeAdjacent(line)
 
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
 }
@@ -524,69 +568,258 @@ func (s *spanScreen) printScreen() {
 	fmt.Println("+")
 }
 
-func (s *spanScreen) lineCells(y int) []styledCell {
-	line := s.lines[y]
-	cells := make([]styledCell, 0, s.size.X)
-	for _, sp := range line.spans {
-		for _, c := range sp.cells {
-			cells = append(cells, styledCell{spanCell: c, fg: sp.fg, bg: sp.bg})
-		}
+func tokenRune(tok spanToken) rune {
+	for _, r := range tok.text {
+		return r
 	}
-	if len(cells) < s.size.X {
-		cells = append(cells, makeSpaceCells(s.size.X-len(cells), s.frontColor, s.backColor)...)
-	} else if len(cells) > s.size.X {
-		cells = cells[:s.size.X]
-	}
-	return cells
+	return ' '
 }
 
-func (s *spanScreen) setLineFromCells(y int, cells []styledCell) {
-	s.lines[y] = lineFromCells(cells)
+func tokenWidth(tok spanToken) int {
+	if tok.width < 1 {
+		return 1
+	}
+	return int(tok.width)
+}
+
+func tokensCellWidth(tokens []spanToken) int {
+	width := 0
+	for _, tok := range tokens {
+		width += tokenWidth(tok)
+	}
+	return width
+}
+
+func makeSpaceTokens(n int) []spanToken {
+	if n <= 0 {
+		return nil
+	}
+	tokens := make([]spanToken, n)
+	for i := range tokens {
+		tokens[i] = spanToken{text: " ", width: 1}
+	}
+	return tokens
+}
+
+func makeTokensFromRunes(runes []rune) []spanToken {
+	if len(runes) == 0 {
+		return nil
+	}
+	tokens := make([]spanToken, len(runes))
+	for i, r := range runes {
+		tokens[i] = spanToken{text: string(r), width: 1}
+	}
+	return tokens
+}
+
+func makeTokenFromRune(r rune, width int) []spanToken {
+	if width < 1 {
+		width = 1
+	}
+	if width > 255 {
+		width = 255
+	}
+	return []spanToken{{text: string(r), width: uint8(width)}}
 }
 
 func blankSpanLine(width int, fg Color, bg Color) spanLine {
-	cells := make([]spanCell, width)
-	for i := range cells {
-		cells[i] = spanCell{r: ' ', width: 1, cont: false}
-	}
-	return spanLine{spans: []span{{fg: fg, bg: bg, cells: cells}}}
-}
-
-func makeSpaceCells(n int, fg Color, bg Color) []styledCell {
-	cells := make([]styledCell, n)
-	for i := range cells {
-		cells[i] = styledCell{
-			spanCell: spanCell{r: ' ', width: 1, cont: false},
-			fg:       fg,
-			bg:       bg,
-		}
-	}
-	return cells
-}
-
-func lineFromCells(cells []styledCell) spanLine {
-	if len(cells) == 0 {
-		return spanLine{}
-	}
-	spans := make([]span, 0, 4)
-	cur := span{fg: cells[0].fg, bg: cells[0].bg}
-	for _, c := range cells {
-		if c.fg != cur.fg || c.bg != cur.bg {
-			spans = append(spans, cur)
-			cur = span{fg: c.fg, bg: c.bg}
-		}
-		cur.cells = append(cur.cells, spanCell{r: c.r, width: c.width, cont: c.cont})
-	}
-	spans = append(spans, cur)
-	return spanLine{spans: spans}
+	return spanLine{spans: []span{{fg: fg, bg: bg, tokens: makeSpaceTokens(width), cellWidth: width}}}
 }
 
 func cloneSpanLine(line spanLine) spanLine {
 	spans := make([]span, len(line.spans))
 	for i, sp := range line.spans {
-		cells := make([]spanCell, len(sp.cells))
-		copy(cells, sp.cells)
-		spans[i] = span{fg: sp.fg, bg: sp.bg, cells: cells}
+		tokens := make([]spanToken, len(sp.tokens))
+		copy(tokens, sp.tokens)
+		spans[i] = span{fg: sp.fg, bg: sp.bg, tokens: tokens, cellWidth: sp.cellWidth}
 	}
 	return spanLine{spans: spans}
+}
+
+func resizeLine(line *spanLine, width int, fg Color, bg Color) {
+	cur := lineCellWidth(*line)
+	if cur > width {
+		truncateLine(line, width)
+		return
+	}
+	if cur < width {
+		line.spans = append(line.spans, span{fg: fg, bg: bg, tokens: makeSpaceTokens(width - cur), cellWidth: width - cur})
+		mergeAdjacent(line)
+	}
+}
+
+func lineCellWidth(line spanLine) int {
+	width := 0
+	for _, sp := range line.spans {
+		width += sp.cellWidth
+	}
+	return width
+}
+
+func splitTokens(tokens []spanToken, cellOffset int) ([]spanToken, []spanToken) {
+	if cellOffset <= 0 {
+		return nil, tokens
+	}
+	pos := 0
+	for i, tok := range tokens {
+		pos += tokenWidth(tok)
+		if pos == cellOffset {
+			return tokens[:i+1], tokens[i+1:]
+		}
+		if pos > cellOffset {
+			return tokens[:i], tokens[i:]
+		}
+	}
+	return tokens, nil
+}
+
+func splitAt(line *spanLine, x int) int {
+	if x <= 0 {
+		return 0
+	}
+	pos := 0
+	for i := 0; i < len(line.spans); i++ {
+		sp := line.spans[i]
+		next := pos + sp.cellWidth
+		if x == next {
+			return i + 1
+		}
+		if x < next {
+			offset := x - pos
+			leftTokens, rightTokens := splitTokens(sp.tokens, offset)
+			left := span{fg: sp.fg, bg: sp.bg, tokens: leftTokens, cellWidth: tokensCellWidth(leftTokens)}
+			right := span{fg: sp.fg, bg: sp.bg, tokens: rightTokens, cellWidth: tokensCellWidth(rightTokens)}
+			line.spans = append(line.spans[:i], append([]span{left, right}, line.spans[i+1:]...)...)
+			return i + 1
+		}
+		pos = next
+	}
+	return len(line.spans)
+}
+
+func mergeAdjacent(line *spanLine) {
+	if len(line.spans) < 2 {
+		return
+	}
+	out := make([]span, 0, len(line.spans))
+	cur := line.spans[0]
+	for i := 1; i < len(line.spans); i++ {
+		sp := line.spans[i]
+		if sp.fg == cur.fg && sp.bg == cur.bg {
+			cur.tokens = append(cur.tokens, sp.tokens...)
+			cur.cellWidth += sp.cellWidth
+			continue
+		}
+		out = append(out, cur)
+		cur = sp
+	}
+	out = append(out, cur)
+	line.spans = out
+}
+
+func replaceRange(line *spanLine, x int, n int, fg Color, bg Color, tokens []spanToken) {
+	start := splitAt(line, x)
+	end := splitAt(line, x+n)
+	spanWidth := tokensCellWidth(tokens)
+	line.spans = append(line.spans[:start], append([]span{{fg: fg, bg: bg, tokens: tokens, cellWidth: spanWidth}}, line.spans[end:]...)...)
+	mergeAdjacent(line)
+}
+
+func insertSpan(line *spanLine, x int, fg Color, bg Color, tokens []spanToken) {
+	idx := splitAt(line, x)
+	spanWidth := tokensCellWidth(tokens)
+	line.spans = append(line.spans[:idx], append([]span{{fg: fg, bg: bg, tokens: tokens, cellWidth: spanWidth}}, line.spans[idx:]...)...)
+	mergeAdjacent(line)
+}
+
+func truncateLine(line *spanLine, width int) {
+	if width <= 0 {
+		line.spans = nil
+		return
+	}
+	idx := splitAt(line, width)
+	line.spans = line.spans[:idx]
+}
+
+func tokenAt(line spanLine, x int) (spanToken, bool) {
+	pos := 0
+	for _, sp := range line.spans {
+		for _, tok := range sp.tokens {
+			width := tokenWidth(tok)
+			if x < pos+width {
+				return tok, true
+			}
+			pos += width
+		}
+	}
+	return spanToken{}, false
+}
+
+func (s *spanScreen) mergeIntoPreviousCell(text string) {
+	if s.cursorPos.X <= 0 {
+		return
+	}
+	pos := 0
+	y := s.cursorPos.Y
+	for si := range s.lines[y].spans {
+		sp := &s.lines[y].spans[si]
+		for ti := range sp.tokens {
+			width := tokenWidth(sp.tokens[ti])
+			if s.cursorPos.X-1 < pos+width {
+				sp.tokens[ti].text += text
+				return
+			}
+			pos += width
+		}
+	}
+}
+
+func (s *spanScreen) clearWideOverlaps(y int, x int, n int) {
+	if n <= 0 {
+		return
+	}
+	end := x + n
+	line := &s.lines[y]
+	pos := 0
+	type rng struct {
+		start int
+		width int
+	}
+	var ranges []rng
+	for _, sp := range line.spans {
+		for _, tok := range sp.tokens {
+			width := tokenWidth(tok)
+			next := pos + width
+			if width > 1 && next > x && pos < end {
+				ranges = append(ranges, rng{start: pos, width: width})
+			}
+			pos = next
+			if pos >= end && width == 1 {
+				// no more overlaps if we are beyond the range and widths are single-cell
+				break
+			}
+		}
+		if pos >= end {
+			break
+		}
+	}
+
+	for i := len(ranges) - 1; i >= 0; i-- {
+		r := ranges[i]
+		replaceRange(line, r.start, r.width, s.frontColor, s.backColor, makeSpaceTokens(r.width))
+		s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: r.start, X2: r.start + r.width}, CRClear)
+	}
+}
+
+func (s *spanScreen) rawWriteTokens(x int, y int, tokens []spanToken, cr ChangeReason) {
+	width := tokensCellWidth(tokens)
+	if width <= 0 {
+		return
+	}
+	if y >= s.size.Y || x+width > s.size.X {
+		panic(fmt.Sprintf("rawWriteTokens out of range: %v  %v,%v,%v %v\n", s.size, x, y, x+width, width))
+	}
+	s.clearWideOverlaps(y, x, width)
+	replaceRange(&s.lines[y], x, width, s.frontColor, s.backColor, tokens)
+	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + width}, cr)
 }

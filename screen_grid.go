@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/rivo/uniseg"
 )
@@ -296,6 +297,48 @@ func (s *gridScreen) writeRunes(b []rune) {
 		}
 		s.rawWriteRune(s.cursorPos.X, s.cursorPos.Y, r, width, CRText)
 		s.moveCursor(width, 0, true, true)
+	}
+}
+
+func (s *gridScreen) writeTokens(tokens []GraphemeToken) {
+	for _, tok := range tokens {
+		if tok.Text == "" {
+			continue
+		}
+		if r, size := utf8.DecodeRuneInString(tok.Text); size == len(tok.Text) && !tok.Merge {
+			width := tok.Width
+			if width < 1 {
+				width = 1
+			}
+			if width > s.size.X {
+				width = s.size.X
+			}
+			if s.cursorPos.X+width > s.size.X {
+				if s.autoWrap {
+					s.moveCursor(-s.cursorPos.X, 1, false, true)
+				} else {
+					s.cursorPos.X = s.size.X - width
+				}
+			}
+			s.rawWriteRune(s.cursorPos.X, s.cursorPos.Y, r, width, CRText)
+			s.moveCursor(width, 0, true, true)
+			continue
+		}
+		for _, r := range tok.Text {
+			width := runeCellWidth(r)
+			if width > s.size.X {
+				width = s.size.X
+			}
+			if s.cursorPos.X+width > s.size.X {
+				if s.autoWrap {
+					s.moveCursor(-s.cursorPos.X, 1, false, true)
+				} else {
+					s.cursorPos.X = s.size.X - width
+				}
+			}
+			s.rawWriteRune(s.cursorPos.X, s.cursorPos.Y, r, width, CRText)
+			s.moveCursor(width, 0, true, true)
+		}
 	}
 }
 
