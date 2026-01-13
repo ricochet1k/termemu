@@ -404,8 +404,23 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					fc = ColDefault
 					bc = ColDefault
 
-				case p >= 1 && p <= 8:
+				case p >= 1 && p <= 5:
 					fc = fc.SetMode(ColorModes[p-1])
+
+				case p == 6: // rapid blink
+					bc = bc.SetMode(ModeRapidBlink)
+
+				case p == 7:
+					fc = fc.SetMode(ModeReverse)
+
+				case p == 8:
+					fc = fc.SetMode(ModeInvisible)
+
+				case p == 9: // strikethrough / crossed-out
+					bc = bc.SetMode(ModeStrike)
+
+				case p == 21: // double underline
+					bc = bc.SetMode(ModeDoubleUnderline)
 
 				case p == 22:
 					fc = fc.ResetMode(ModeBold).ResetMode(ModeDim)
@@ -415,11 +430,35 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 				case p == 24:
 					fc = fc.ResetMode(ModeUnderline)
+					bc = bc.ResetMode(ModeDoubleUnderline)
+
+				case p == 25:
+					fc = fc.ResetMode(ModeBlink)
+					bc = bc.ResetMode(ModeRapidBlink)
 
 				case p == 27:
 					fc = fc.ResetMode(ModeReverse)
 
-				case p == 29: // not crossed-out (ignored)
+				case p == 28:
+					fc = fc.ResetMode(ModeInvisible)
+
+				case p == 29: // not crossed-out
+					bc = bc.ResetMode(ModeStrike)
+
+				case p == 51: // framed
+					bc = bc.SetMode(ModeFramed)
+
+				case p == 52: // encircled
+					bc = bc.SetMode(ModeEncircled)
+
+				case p == 53: // overline
+					bc = bc.SetMode(ModeOverline)
+
+				case p == 54: // not framed, not encircled
+					bc = bc.ResetMode(ModeFramed).ResetMode(ModeEncircled)
+
+				case p == 55: // not overline
+					bc = bc.ResetMode(ModeOverline)
 
 				case p >= 30 && p <= 37:
 					fc = fc.SetColor(Colors8[p-30])

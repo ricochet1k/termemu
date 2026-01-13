@@ -5,6 +5,11 @@ import "unicode/utf8"
 // Span represents a run of text with consistent styling.
 // If Text is not empty, it contains the text content.
 // If Text is empty, it represents Rune repeated Width times.
+//
+// Note: FG and BG colors now store both color data and text modes.
+// Text modes for FG are in FG.Bits[24-30].
+// Text modes for BG (Strike, Overline, etc.) are in BG.Bits[24-30].
+// Additional mode bits are available through the Style type.
 type Span struct {
 	FG, BG Color
 	Text   string

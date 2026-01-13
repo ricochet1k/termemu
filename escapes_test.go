@@ -269,3 +269,99 @@ func TestHandleCmdCSI_DeviceAttrsAndAlternateScreen(t *testing.T) {
 		t.Fatalf("expected CRScreenSwitch RegionChanged for ?1049h")
 	}
 }
+
+func TestHandleCmdCSI_NewSGRModes(t *testing.T) {
+	// Test new SGR modes: 6 (rapid blink), 9 (strikethrough), 21 (double underline),
+	// 51 (framed), 52 (encircled), 53 (overline)
+	tests := []struct {
+		name    string
+		sgr     string
+		checkFG func(Color) bool
+		checkBG func(Color) bool
+	}{
+		{
+			name:    "SGR 6 - rapid blink",
+			sgr:     "[6m",
+			checkBG: func(c Color) bool { return c.TestMode(ModeRapidBlink) },
+		},
+		{
+			name:    "SGR 9 - strikethrough",
+			sgr:     "[9m",
+			checkBG: func(c Color) bool { return c.TestMode(ModeStrike) },
+		},
+		{
+			name:    "SGR 21 - double underline",
+			sgr:     "[21m",
+			checkBG: func(c Color) bool { return c.TestMode(ModeDoubleUnderline) },
+		},
+		{
+			name:    "SGR 51 - framed",
+			sgr:     "[51m",
+			checkBG: func(c Color) bool { return c.TestMode(ModeFramed) },
+		},
+		{
+			name:    "SGR 52 - encircled",
+			sgr:     "[52m",
+			checkBG: func(c Color) bool { return c.TestMode(ModeEncircled) },
+		},
+		{
+			name:    "SGR 53 - overline",
+			sgr:     "[53m",
+			checkBG: func(c Color) bool { return c.TestMode(ModeOverline) },
+		},
+		{
+			name:    "SGR 25 - reset rapid blink",
+			sgr:     "[6;25m",
+			checkBG: func(c Color) bool { return !c.TestMode(ModeRapidBlink) },
+		},
+		{
+			name:    "SGR 29 - reset strikethrough",
+			sgr:     "[9;29m",
+			checkBG: func(c Color) bool { return !c.TestMode(ModeStrike) },
+		},
+		{
+			name:    "SGR 24 - reset underline and double underline",
+			sgr:     "[4;21;24m",
+			checkFG: func(c Color) bool { return !c.TestMode(ModeUnderline) },
+			checkBG: func(c Color) bool { return !c.TestMode(ModeDoubleUnderline) },
+		},
+		{
+			name: "SGR 54 - reset framed and encircled",
+			sgr:  "[51;52;54m",
+			checkBG: func(c Color) bool {
+				return !c.TestMode(ModeFramed) && !c.TestMode(ModeEncircled)
+			},
+		},
+		{
+			name:    "SGR 55 - reset overline",
+			sgr:     "[53;55m",
+			checkBG: func(c Color) bool { return !c.TestMode(ModeOverline) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			term, mf := MakeTerminalWithMock()
+
+			// Send the SGR sequence
+			ok := term.handleCommand(bufio.NewReader(strings.NewReader(tt.sgr)))
+			if !ok {
+				t.Fatalf("handleCommand returned false for SGR sequence %s", tt.sgr)
+			}
+
+			if len(mf.Colors) == 0 {
+				t.Fatalf("ColorsChanged not called for SGR %s", tt.sgr)
+			}
+
+			last := mf.Colors[len(mf.Colors)-1]
+
+			if tt.checkFG != nil && !tt.checkFG(last.F) {
+				t.Errorf("FG check failed for SGR %s (FG=%#x)", tt.sgr, last.F)
+			}
+
+			if tt.checkBG != nil && !tt.checkBG(last.B) {
+				t.Errorf("BG check failed for SGR %s (BG=%#x)", tt.sgr, last.B)
+			}
+		})
+	}
+}
