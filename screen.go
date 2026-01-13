@@ -37,6 +37,8 @@ type screen interface {
 	setScrollMarginTopBottom(top, bottom int)
 	scroll(y1 int, y2 int, dy int)
 	moveCursor(dx, dy int, wrap bool, scroll bool)
+	saveCursorPos()
+	restoreCursorPos()
 	printScreen()
 }
 
@@ -55,7 +57,8 @@ type spanScreen struct {
 
 	size Pos
 
-	cursorPos Pos
+	cursorPos      Pos
+	savedCursorPos Pos
 
 	topMargin, bottomMargin int
 
@@ -213,10 +216,10 @@ func (s *spanScreen) StyledLine(x, w, y int) *Line {
 				spans = append(spans, sp)
 			} else {
 				// We need a sub-span
-				_, sub := splitSpan(sp, offset, s.textMode) // skip left part
+				_, sub, _ := splitSpan(sp, offset, s.textMode) // skip left part
 				// now sub is from offset to end. we might need to truncate it if it's too long
 				if sub.Width > width {
-					keep, _ := splitSpan(sub, width, s.textMode)
+					keep, _, _ := splitSpan(sub, width, s.textMode)
 					spans = append(spans, keep)
 				} else {
 					spans = append(spans, sub)
@@ -526,6 +529,15 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
 }
 
+func (s *spanScreen) saveCursorPos() {
+	s.savedCursorPos = s.cursorPos
+}
+
+func (s *spanScreen) restoreCursorPos() {
+	s.cursorPos = s.savedCursorPos
+	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
+}
+
 func (s *spanScreen) printScreen() {
 	w, h := s.size.X, s.size.Y
 	fmt.Print("+")
@@ -616,24 +628,28 @@ func lineCellWidth(line *spanLine) int {
 	return width
 }
 
-func splitSpan(sp Span, cellOffset int, mode TextReadMode) (Span, Span) {
+// splitSpan splits a span at cellOffset. Returns (left, right, brokeWideCluster).
+// brokeWideCluster is true if the split point falls within a wide grapheme cluster.
+// When brokeWideCluster is true, neither left nor right contains the broken cluster.
+func splitSpan(sp Span, cellOffset int, mode TextReadMode) (Span, Span, bool) {
 	if cellOffset <= 0 {
-		return Span{}, sp
+		return Span{}, sp, false
 	}
 	if cellOffset >= sp.Width {
-		return sp, Span{}
+		return sp, Span{}, false
 	}
 
 	if sp.Text == "" {
-		// Repeat mode
+		// Repeat mode - can't break a wide cluster
 		left := sp
 		left.Width = cellOffset
 		right := sp
 		right.Width = sp.Width - cellOffset
-		return left, right
+		return left, right, false
 	}
 
 	if mode == TextReadModeRune && sp.Width == len(sp.Text) {
+		// Simple mode where each rune is one cell - can't have wide clusters
 		leftText := sp.Text[:cellOffset]
 		rightText := sp.Text[cellOffset:]
 		left := sp
@@ -642,13 +658,57 @@ func splitSpan(sp Span, cellOffset int, mode TextReadMode) (Span, Span) {
 		right := sp
 		right.Text = rightText
 		right.Width = sp.Width - cellOffset
-		return left, right
+		return left, right, false
 	}
 
-	// Text mode
-	idx, leftWidth := byteIndexForCell([]byte(sp.Text), cellOffset, mode)
-	leftText := sp.Text[:idx]
-	rightText := sp.Text[idx:]
+	// Text mode - check if we're breaking a wide grapheme cluster
+	idx := 0
+	state := -1
+	cellPos := 0
+	textBytes := []byte(sp.Text)
+	brokeWide := false
+
+	for idx < len(textBytes) {
+		_, consumed, width, newState, ok := stepTextCluster(textBytes[idx:], state, mode)
+		if !ok || consumed <= 0 {
+			break
+		}
+		if width < 1 {
+			width = 0
+		}
+
+		clusterEnd := cellPos + width
+		if cellOffset >= cellPos && cellOffset < clusterEnd {
+			// Split point is within this cluster
+			if width > 1 {
+				// We're breaking a wide cluster
+				brokeWide = true
+				// Don't include the broken cluster in either span
+				leftText := sp.Text[:idx]
+				rightText := sp.Text[idx+consumed:]
+
+				left := sp
+				left.Text = leftText
+				left.Width = cellPos
+
+				right := sp
+				right.Text = rightText
+				right.Width = sp.Width - clusterEnd
+
+				return left, right, true
+			}
+			break
+		}
+
+		cellPos = clusterEnd
+		idx += consumed
+		state = newState
+	}
+
+	// Normal split that doesn't break a wide cluster
+	byteIdx, leftWidth := byteIndexForCell(textBytes, cellOffset, mode)
+	leftText := sp.Text[:byteIdx]
+	rightText := sp.Text[byteIdx:]
 
 	left := sp
 	left.Text = leftText
@@ -658,7 +718,7 @@ func splitSpan(sp Span, cellOffset int, mode TextReadMode) (Span, Span) {
 	right.Text = rightText
 	right.Width = sp.Width - leftWidth
 
-	return left, right
+	return left, right, brokeWide
 }
 
 func byteIndexForCell(text []byte, cellOffset int, mode TextReadMode) (int, int) {
@@ -832,11 +892,6 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 			line.width = totalWidth - n + insert.Width
 			return
 		}
-		if n == 1 && insert.Width == 1 && startOffset == 0 && endOffset == 1 && sp.Width == 1 {
-			spans[startIdx] = insert
-			line.width = totalWidth
-			return
-		}
 		if insert.Width == n && sp.FG == insert.FG && sp.BG == insert.BG {
 			if sp.Text == "" && insert.Text == "" && sp.Rune == insert.Rune {
 				return
@@ -854,7 +909,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	var left Span
 	hasLeft := false
 	if startIdx < len(spans) && startOffset > 0 {
-		left, _ = splitSpan(spans[startIdx], startOffset, mode)
+		left, _, _ = splitSpan(spans[startIdx], startOffset, mode)
 		hasLeft = left.Width > 0
 	}
 
@@ -862,7 +917,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	hasRight := false
 	if endIdx >= 0 && endIdx < len(spans) {
 		if endOffset < spans[endIdx].Width {
-			_, right = splitSpan(spans[endIdx], endOffset, mode)
+			_, right, _ = splitSpan(spans[endIdx], endOffset, mode)
 			hasRight = right.Width > 0
 		}
 	}
@@ -973,7 +1028,7 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 
 	// If we're at an offset within the span, we need to split it first
 	if offset > 0 {
-		left, right := splitSpan(*sp, offset, s.textMode)
+		left, right, _ := splitSpan(*sp, offset, s.textMode)
 
 		// Update spans: replace current span with left and right
 		newSpans := make([]Span, 0, len(line.spans)+1)

@@ -306,3 +306,144 @@ func TestClearWideOverlaps_EdgeCase_SplitInMiddle(t *testing.T) {
 		t.Errorf("Expected 'Y' at position 1, got %q", line[1])
 	}
 }
+
+func TestSplitSpan_RepeatMode(t *testing.T) {
+	// Repeat mode spans (no wide clusters)
+	sp := Span{Rune: ' ', Width: 5, FG: ColDefault, BG: ColDefault}
+
+	left, right, brokeWide := splitSpan(sp, 2, TextReadModeGrapheme)
+
+	if brokeWide {
+		t.Errorf("Expected brokeWide=false for repeat mode")
+	}
+	if left.Width != 2 {
+		t.Errorf("Expected left.Width=2, got %d", left.Width)
+	}
+	if right.Width != 3 {
+		t.Errorf("Expected right.Width=3, got %d", right.Width)
+	}
+	if left.Rune != ' ' || right.Rune != ' ' {
+		t.Errorf("Expected rune ' ' preserved in both, got left=%q right=%q", left.Rune, right.Rune)
+	}
+}
+
+func TestSplitSpan_SimpleText(t *testing.T) {
+	// Simple ASCII text (no wide characters)
+	sp := Span{Text: "hello", Width: 5, FG: ColDefault, BG: ColDefault}
+
+	left, right, brokeWide := splitSpan(sp, 2, TextReadModeRune)
+
+	if brokeWide {
+		t.Errorf("Expected brokeWide=false for simple ASCII")
+	}
+	if left.Text != "he" {
+		t.Errorf("Expected left.Text='he', got %q", left.Text)
+	}
+	if right.Text != "llo" {
+		t.Errorf("Expected right.Text='llo', got %q", right.Text)
+	}
+	if left.Width != 2 || right.Width != 3 {
+		t.Errorf("Expected widths 2,3 got %d,%d", left.Width, right.Width)
+	}
+}
+
+func TestSplitSpan_WideCharacterBeforeSplit(t *testing.T) {
+	// Wide character before the split point - should split normally
+	sp := Span{Text: "🎉hello", Width: 7, FG: ColDefault, BG: ColDefault} // emoji=2 cells, hello=5 cells
+
+	left, right, brokeWide := splitSpan(sp, 3, TextReadModeGrapheme)
+
+	if brokeWide {
+		t.Errorf("Expected brokeWide=false, split is after the emoji")
+	}
+	if left.Width != 3 {
+		t.Errorf("Expected left.Width=3, got %d", left.Width)
+	}
+	if right.Width != 4 {
+		t.Errorf("Expected right.Width=4, got %d", right.Width)
+	}
+}
+
+func TestSplitSpan_SplitInWideCharacter(t *testing.T) {
+	// Split point falls within a wide emoji (width 2)
+	sp := Span{Text: "🎉", Width: 2, FG: ColDefault, BG: ColDefault}
+
+	left, right, brokeWide := splitSpan(sp, 1, TextReadModeGrapheme)
+
+	if !brokeWide {
+		t.Errorf("Expected brokeWide=true when splitting within wide char")
+	}
+	// Neither span should contain the broken wide character
+	if left.Text != "" {
+		t.Errorf("Expected left.Text='', got %q (should not include broken emoji)", left.Text)
+	}
+	if right.Text != "" {
+		t.Errorf("Expected right.Text='', got %q (should not include broken emoji)", right.Text)
+	}
+	if left.Width != 0 || right.Width != 0 {
+		t.Errorf("Expected both widths=0, got left=%d right=%d", left.Width, right.Width)
+	}
+}
+
+func TestSplitSpan_WideCharAtEndOfSpan(t *testing.T) {
+	// Wide character is at the end of the span
+	sp := Span{Text: "hello🎉", Width: 7, FG: ColDefault, BG: ColDefault} // hello=5 cells, emoji=2 cells
+
+	left, right, brokeWide := splitSpan(sp, 6, TextReadModeGrapheme)
+
+	if !brokeWide {
+		t.Errorf("Expected brokeWide=true when splitting within emoji at end")
+	}
+	// Left should have "hello", right should be empty
+	if left.Text != "hello" {
+		t.Errorf("Expected left.Text='hello', got %q", left.Text)
+	}
+	if right.Text != "" {
+		t.Errorf("Expected right.Text='', got %q", right.Text)
+	}
+	if left.Width != 5 || right.Width != 0 {
+		t.Errorf("Expected widths 5,0 got %d,%d", left.Width, right.Width)
+	}
+}
+
+func TestSplitSpan_MultipleWideCharacters(t *testing.T) {
+	// Multiple wide characters, split in the middle of one
+	sp := Span{Text: "🎉🎉hello", Width: 9, FG: ColDefault, BG: ColDefault} // emoji+emoji=4, hello=5
+
+	left, right, brokeWide := splitSpan(sp, 3, TextReadModeGrapheme)
+
+	if !brokeWide {
+		t.Errorf("Expected brokeWide=true when splitting within second emoji")
+	}
+	// Left should have first emoji (2 cells), right should have "hello" (5 cells)
+	if left.Text != "🎉" {
+		t.Errorf("Expected left.Text='🎉', got %q", left.Text)
+	}
+	if right.Text != "hello" {
+		t.Errorf("Expected right.Text='hello', got %q", right.Text)
+	}
+	if left.Width != 2 || right.Width != 5 {
+		t.Errorf("Expected widths 2,5 got %d,%d", left.Width, right.Width)
+	}
+}
+
+func TestSplitSpan_BoundaryConditions(t *testing.T) {
+	sp := Span{Text: "abc", Width: 3, FG: ColDefault, BG: ColDefault}
+
+	// Split at 0
+	left, right, brokeWide := splitSpan(sp, 0, TextReadModeRune)
+	if left.Text != "" || left.Width != 0 || right.Text != "abc" {
+		t.Errorf("Split at 0: expected empty left, full right; got left=%q(%d), right=%q", left.Text, left.Width, right.Text)
+	}
+
+	// Split at end
+	left, right, brokeWide = splitSpan(sp, 3, TextReadModeRune)
+	if right.Text != "" || right.Width != 0 || left.Text != "abc" {
+		t.Errorf("Split at end: expected full left, empty right; got left=%q, right=%q(%d)", left.Text, right.Text, right.Width)
+	}
+
+	// Both should not break wide for normal text
+	if brokeWide {
+		t.Errorf("Expected brokeWide=false for normal ASCII boundaries")
+	}
+}

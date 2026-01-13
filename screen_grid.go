@@ -28,7 +28,8 @@ type gridScreen struct {
 
 	size Pos
 
-	cursorPos Pos
+	cursorPos      Pos
+	savedCursorPos Pos
 
 	topMargin, bottomMargin int
 
@@ -693,6 +694,15 @@ func (s *gridScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 	}
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
 	//debugPrintf(debugCursor, "cursor move: %v, %v  %v, %v: %v %v\n", s.cursorPos.X, s.cursorPos.Y, dx, dy, wrap, scroll)
+}
+
+func (s *gridScreen) saveCursorPos() {
+	s.savedCursorPos = s.cursorPos
+}
+
+func (s *gridScreen) restoreCursorPos() {
+	s.cursorPos = s.savedCursorPos
+	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
 }
 
 func (s *gridScreen) printScreen() {
