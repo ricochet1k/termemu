@@ -11,4 +11,7 @@ require (
 	github.com/rivo/uniseg v0.4.7
 )
 
-require github.com/kr/pty v1.1.8 // indirect
+require (
+	github.com/kr/pty v1.1.8 // indirect
+	golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543 // indirect
+)

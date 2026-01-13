@@ -74,18 +74,20 @@ func TestHandleCmdCSI_SetColors(t *testing.T) {
 		t.Fatalf("handleCommand returned false for CSI m sequence")
 	}
 
-	if len(mf.Colors) == 0 {
-		t.Fatalf("ColorsChanged not called")
+	if len(mf.Styles) == 0 {
+		t.Fatalf("StyleChanged not called")
 	}
-	last := mf.Colors[len(mf.Colors)-1]
-	if !last.F.TestMode(ModeBold) {
+	last := mf.Styles[len(mf.Styles)-1]
+	if !last.FG.TestMode(ModeBold) {
 		t.Fatalf("expected FG to have ModeBold set")
 	}
-	if last.F.Color() != int(ColRed) {
-		t.Fatalf("expected FG color red, got %d", last.F.Color())
+	fgColor, _, _ := last.FG.GetColor(ComponentFG)
+	if fgColor != int(ColRed) {
+		t.Fatalf("expected FG color red, got %d", fgColor)
 	}
-	if last.B.Color() != int(ColGreen) {
-		t.Fatalf("expected BG color green, got %d", last.B.Color())
+	bgColor, _, _ := last.BG.GetColor(ComponentBG)
+	if bgColor != int(ColGreen) {
+		t.Fatalf("expected BG color green, got %d", bgColor)
 	}
 }
 
@@ -102,29 +104,33 @@ func TestHandleCmdCSI_DefaultColors(t *testing.T) {
 		t.Fatalf("handleCommand failed for [0m")
 	}
 
-	last := mf.Colors[len(mf.Colors)-1]
-	if last.F != ColDefault {
-		t.Fatalf("expected FG default after reset, got %v", last.F)
+	last := mf.Styles[len(mf.Styles)-1]
+	fgColor, _, _ := last.FG.GetColor(ComponentFG)
+	if fgColor != 0 {
+		t.Fatalf("expected FG default after reset, got %d", fgColor)
 	}
-	if last.B != ColDefault {
-		t.Fatalf("expected BG default after reset, got %v", last.B)
+	bgColor, _, _ := last.BG.GetColor(ComponentBG)
+	if bgColor != 0 {
+		t.Fatalf("expected BG default after reset, got %d", bgColor)
 	}
 
 	// Explicit default foreground/background.
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[39m"))) {
 		t.Fatalf("handleCommand failed for [39m")
 	}
-	last = mf.Colors[len(mf.Colors)-1]
-	if last.F != ColDefault {
-		t.Fatalf("expected FG default after 39m, got %v", last.F)
+	last = mf.Styles[len(mf.Styles)-1]
+	fgColor, _, _ = last.FG.GetColor(ComponentFG)
+	if fgColor != 0 {
+		t.Fatalf("expected FG default after 39m, got %d", fgColor)
 	}
 
 	if !t1.handleCommand(bufio.NewReader(strings.NewReader("[49m"))) {
 		t.Fatalf("handleCommand failed for [49m")
 	}
-	last = mf.Colors[len(mf.Colors)-1]
-	if last.B != ColDefault {
-		t.Fatalf("expected BG default after 49m, got %v", last.B)
+	last = mf.Styles[len(mf.Styles)-1]
+	bgColor, _, _ = last.BG.GetColor(ComponentBG)
+	if bgColor != 0 {
+		t.Fatalf("expected BG default after 49m, got %d", bgColor)
 	}
 }
 
@@ -276,66 +282,66 @@ func TestHandleCmdCSI_NewSGRModes(t *testing.T) {
 	tests := []struct {
 		name    string
 		sgr     string
-		checkFG func(Color) bool
-		checkBG func(Color) bool
+		checkFG func(*Style) bool
+		checkBG func(*Style) bool
 	}{
 		{
 			name:    "SGR 6 - rapid blink",
 			sgr:     "[6m",
-			checkBG: func(c Color) bool { return c.TestMode(ModeRapidBlink) },
+			checkBG: func(s *Style) bool { return s.TestMode(ModeRapidBlink) },
 		},
 		{
 			name:    "SGR 9 - strikethrough",
 			sgr:     "[9m",
-			checkBG: func(c Color) bool { return c.TestMode(ModeStrike) },
+			checkBG: func(s *Style) bool { return s.TestMode(ModeStrike) },
 		},
 		{
 			name:    "SGR 21 - double underline",
 			sgr:     "[21m",
-			checkBG: func(c Color) bool { return c.TestMode(ModeDoubleUnderline) },
+			checkBG: func(s *Style) bool { return s.TestMode(ModeDoubleUnderline) },
 		},
 		{
 			name:    "SGR 51 - framed",
 			sgr:     "[51m",
-			checkBG: func(c Color) bool { return c.TestMode(ModeFramed) },
+			checkBG: func(s *Style) bool { return s.TestMode(ModeFramed) },
 		},
 		{
 			name:    "SGR 52 - encircled",
 			sgr:     "[52m",
-			checkBG: func(c Color) bool { return c.TestMode(ModeEncircled) },
+			checkBG: func(s *Style) bool { return s.TestMode(ModeEncircled) },
 		},
 		{
 			name:    "SGR 53 - overline",
 			sgr:     "[53m",
-			checkBG: func(c Color) bool { return c.TestMode(ModeOverline) },
+			checkBG: func(s *Style) bool { return s.TestMode(ModeOverline) },
 		},
 		{
 			name:    "SGR 25 - reset rapid blink",
 			sgr:     "[6;25m",
-			checkBG: func(c Color) bool { return !c.TestMode(ModeRapidBlink) },
+			checkBG: func(s *Style) bool { return !s.TestMode(ModeRapidBlink) },
 		},
 		{
 			name:    "SGR 29 - reset strikethrough",
 			sgr:     "[9;29m",
-			checkBG: func(c Color) bool { return !c.TestMode(ModeStrike) },
+			checkBG: func(s *Style) bool { return !s.TestMode(ModeStrike) },
 		},
 		{
 			name:    "SGR 24 - reset underline and double underline",
 			sgr:     "[4;21;24m",
-			checkFG: func(c Color) bool { return !c.TestMode(ModeUnderline) },
-			checkBG: func(c Color) bool { return !c.TestMode(ModeDoubleUnderline) },
+			checkFG: func(s *Style) bool { return !s.TestMode(ModeUnderline) },
+			checkBG: func(s *Style) bool { return !s.TestMode(ModeDoubleUnderline) },
 		},
 		{
 			name: "SGR 54 - reset framed and encircled",
 			sgr:  "[51;52;54m",
-			checkBG: func(c Color) bool {
-				return !c.TestMode(ModeFramed) && !c.TestMode(ModeEncircled)
+			checkBG: func(s *Style) bool {
+				return !s.TestMode(ModeFramed) && !s.TestMode(ModeEncircled)
 			},
 		},
 		{
 			name:    "SGR 55 - reset overline",
 			sgr:     "[53;55m",
-			checkBG: func(c Color) bool { return !c.TestMode(ModeOverline) },
+			checkBG: func(s *Style) bool { return !s.TestMode(ModeOverline) },
 		},
 	}
 
@@ -349,18 +355,18 @@ func TestHandleCmdCSI_NewSGRModes(t *testing.T) {
 				t.Fatalf("handleCommand returned false for SGR sequence %s", tt.sgr)
 			}
 
-			if len(mf.Colors) == 0 {
-				t.Fatalf("ColorsChanged not called for SGR %s", tt.sgr)
+			if len(mf.Styles) == 0 {
+				t.Fatalf("StyleChanged not called for SGR %s", tt.sgr)
 			}
 
-			last := mf.Colors[len(mf.Colors)-1]
+			last := mf.Styles[len(mf.Styles)-1]
 
-			if tt.checkFG != nil && !tt.checkFG(last.F) {
-				t.Errorf("FG check failed for SGR %s (FG=%#x)", tt.sgr, last.F)
+			if tt.checkFG != nil && !tt.checkFG(last.FG) {
+				t.Errorf("FG check failed for SGR %s", tt.sgr)
 			}
 
-			if tt.checkBG != nil && !tt.checkBG(last.B) {
-				t.Errorf("BG check failed for SGR %s (BG=%#x)", tt.sgr, last.B)
+			if tt.checkBG != nil && !tt.checkBG(last.BG) {
+				t.Errorf("BG check failed for SGR %s", tt.sgr)
 			}
 		})
 	}

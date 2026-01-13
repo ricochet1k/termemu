@@ -11,8 +11,8 @@ import (
 type screen interface {
 	Size() Pos
 	CursorPos() Pos
-	FrontColor() Color
-	BackColor() Color
+	FrontStyle() *Style
+	BackStyle() *Style
 	AutoWrap() bool
 	SetAutoWrap(value bool)
 	TopMargin() int
@@ -20,11 +20,10 @@ type screen interface {
 	SetFrontend(f Frontend)
 
 	getLine(y int) []rune
-	getLineColors(y int) ([]Color, []Color)
 	StyledLine(x, w, y int) *Line
 	StyledLines(r Region) []*Line
 	renderLineANSI(y int) string
-	setColors(front Color, back Color)
+	setStyle(front *Style, back *Style)
 	setSize(w, h int)
 	eraseRegion(r Region, cr ChangeReason)
 	writeRunes(b []rune)
@@ -52,8 +51,8 @@ type spanScreen struct {
 	lines    []spanLine
 	frontend Frontend
 
-	frontColor Color
-	backColor  Color
+	frontStyle *Style
+	backStyle  *Style
 
 	size Pos
 
@@ -67,9 +66,7 @@ type spanScreen struct {
 	textMode TextReadMode
 
 	// scratch buffers for rendering
-	renderBuffer   []rune
-	renderColorsFG []Color
-	renderColorsBG []Color
+	renderBuffer []rune
 }
 
 type spanLine struct {
@@ -83,11 +80,17 @@ func newScreen(f Frontend) screen {
 
 func newSpanScreen(f Frontend) *spanScreen {
 	s := &spanScreen{
-		frontend: f,
-		textMode: TextReadModeGrapheme,
+		frontend:   f,
+		textMode:   TextReadModeGrapheme,
+		frontStyle: &Style{},
+		backStyle:  &Style{},
 	}
+	s.frontStyle.SetColorDefault(ComponentFG)
+	s.frontStyle.SetColorDefault(ComponentBG)
+	s.backStyle.SetColorDefault(ComponentFG)
+	s.backStyle.SetColorDefault(ComponentBG)
 	s.setSize(80, 14)
-	s.setColors(ColDefault, ColDefault)
+	s.setStyle(s.frontStyle, s.backStyle)
 	s.bottomMargin = s.size.Y - 1
 	s.eraseRegion(Region{X: 0, Y: 0, X2: s.size.X, Y2: s.size.Y}, CRClear)
 	return s
@@ -101,12 +104,12 @@ func (s *spanScreen) CursorPos() Pos {
 	return s.cursorPos
 }
 
-func (s *spanScreen) FrontColor() Color {
-	return s.frontColor
+func (s *spanScreen) FrontStyle() *Style {
+	return s.frontStyle
 }
 
-func (s *spanScreen) BackColor() Color {
-	return s.backColor
+func (s *spanScreen) BackStyle() *Style {
+	return s.backStyle
 }
 
 func (s *spanScreen) AutoWrap() bool {
@@ -146,32 +149,6 @@ func (s *spanScreen) getLine(y int) []rune {
 		pos++
 	}
 	return line
-}
-
-func (s *spanScreen) getLineColors(y int) ([]Color, []Color) {
-	if len(s.renderColorsFG) < s.size.X {
-		s.renderColorsFG = make([]Color, s.size.X)
-		s.renderColorsBG = make([]Color, s.size.X)
-	}
-	fg := s.renderColorsFG[:s.size.X]
-	bg := s.renderColorsBG[:s.size.X]
-	pos := 0
-	for _, sp := range s.lines[y].spans {
-		for i := 0; i < sp.Width && pos < s.size.X; i++ {
-			fg[pos] = sp.FG
-			bg[pos] = sp.BG
-			pos++
-		}
-		if pos >= s.size.X {
-			break
-		}
-	}
-	for pos < s.size.X {
-		fg[pos] = s.frontColor
-		bg[pos] = s.backColor
-		pos++
-	}
-	return fg, bg
 }
 
 func (s *spanScreen) StyledLine(x, w, y int) *Line {
@@ -253,7 +230,7 @@ func (s *spanScreen) renderLineANSI(y int) string {
 		if sp.Width == 0 {
 			continue
 		}
-		buf.Write(ANSIEscape(sp.FG, sp.BG))
+		buf.Write(sp.Style.ANSIEscape())
 		if sp.Text == "" {
 			for i := 0; i < sp.Width; i++ {
 				buf.WriteRune(sp.Rune)
@@ -265,11 +242,11 @@ func (s *spanScreen) renderLineANSI(y int) string {
 	return buf.String()
 }
 
-func (s *spanScreen) setColors(front Color, back Color) {
-	s.frontColor = front
-	s.backColor = back
+func (s *spanScreen) setStyle(front *Style, back *Style) {
+	s.frontStyle = front
+	s.backStyle = back
 
-	s.frontend.ColorsChanged(front, back)
+	s.frontend.StyleChanged(front, back)
 }
 
 func (s *spanScreen) setSize(w, h int) {
@@ -283,10 +260,10 @@ func (s *spanScreen) setSize(w, h int) {
 		switch {
 		case y < prevH && len(s.lines) > 0:
 			line := s.lines[y]
-			resizeLine(&line, w, s.frontColor, s.backColor, s.textMode)
+			resizeLine(&line, w, s.frontStyle, s.textMode)
 			newLines[y] = line
 		default:
-			newLines[y] = blankSpanLine(w, s.frontColor, s.backColor)
+			newLines[y] = blankSpanLine(w, s.frontStyle)
 		}
 	}
 
@@ -298,8 +275,6 @@ func (s *spanScreen) setSize(w, h int) {
 
 	// Resize buffers
 	s.renderBuffer = make([]rune, w)
-	s.renderColorsFG = make([]Color, w)
-	s.renderColorsBG = make([]Color, w)
 
 	if s.cursorPos.X > w {
 		s.cursorPos.X = 0
@@ -308,14 +283,14 @@ func (s *spanScreen) setSize(w, h int) {
 		s.cursorPos.Y = 0
 	}
 
-	s.setColors(s.frontColor, s.backColor)
+	s.setStyle(s.frontStyle, s.backStyle)
 }
 
 func (s *spanScreen) eraseRegion(r Region, cr ChangeReason) {
 	r = s.clampRegion(r)
 
 	// Fast path for clearing (using empty span with repeating rune)
-	emptySpan := Span{FG: s.frontColor, BG: s.backColor, Rune: ' ', Width: r.X2 - r.X}
+	emptySpan := Span{Style: *s.frontStyle, Rune: ' ', Width: r.X2 - r.X}
 
 	for i := r.Y; i < r.Y2; i++ {
 		debugPrintln(debugErase, "erase: ", r.X, i, emptySpan.Width)
@@ -353,7 +328,7 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 			s.cursorPos.X = s.size.X - width
 		}
 	}
-	sp := Span{FG: s.frontColor, BG: s.backColor, Text: text, Width: width}
+	sp := Span{Style: *s.frontStyle, Text: text, Width: width}
 	s.rawWriteSpan(s.cursorPos.X, s.cursorPos.Y, sp, CRText)
 	s.moveCursor(width, 0, true, true)
 }
@@ -372,7 +347,7 @@ func (s *spanScreen) insertRunes(b []rune) {
 
 	line := &s.lines[y]
 	truncateLine(line, s.size.X-n, s.textMode)
-	insertSpan(line, s.cursorPos.X, Span{FG: s.frontColor, BG: s.backColor, Rune: ' ', Width: n}, s.textMode)
+	insertSpan(line, s.cursorPos.X, Span{Style: *s.frontStyle, Rune: ' ', Width: n}, s.textMode)
 
 	s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b[:n], CRText)
 }
@@ -404,9 +379,9 @@ func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReas
 
 	var sp Span
 	if width == 1 && r == ' ' {
-		sp = Span{FG: s.frontColor, BG: s.backColor, Rune: ' ', Width: 1}
+		sp = Span{Style: *s.frontStyle, Rune: ' ', Width: 1}
 	} else {
-		sp = Span{FG: s.frontColor, BG: s.backColor, Text: string(r), Width: width}
+		sp = Span{Style: *s.frontStyle, Text: string(r), Width: width}
 	}
 
 	replaceRange(&s.lines[y], x, width, sp, s.textMode)
@@ -436,7 +411,7 @@ func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 	// Now append spaces to fill the end to width s.size.X
 	curWidth := lineCellWidth(line)
 	if curWidth < s.size.X {
-		line.spans = append(line.spans, Span{FG: s.frontColor, BG: s.backColor, Rune: ' ', Width: s.size.X - curWidth})
+		line.spans = append(line.spans, Span{Style: *s.frontStyle, Rune: ' ', Width: s.size.X - curWidth})
 		line.width = s.size.X
 	}
 
@@ -469,7 +444,7 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 			s.lines[y] = s.lines[y-dy]
 		}
 		for y := y1; y < y1+dy; y++ {
-			s.lines[y] = blankSpanLine(s.size.X, s.frontColor, s.backColor)
+			s.lines[y] = blankSpanLine(s.size.X, s.frontStyle)
 		}
 		s.frontend.RegionChanged(Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 		debugPrintln(debugScroll, "scroll changed region:", Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
@@ -479,7 +454,7 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 			s.lines[y] = s.lines[y-dy]
 		}
 		for y := y2 + dy + 1; y <= y2; y++ {
-			s.lines[y] = blankSpanLine(s.size.X, s.frontColor, s.backColor)
+			s.lines[y] = blankSpanLine(s.size.X, s.frontStyle)
 		}
 		s.frontend.RegionChanged(Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X}, CRScroll)
 		s.frontend.RegionChanged(Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
@@ -598,18 +573,18 @@ func fillLineFromSpan(line []rune, pos int, sp Span, mode TextReadMode) int {
 	return pos
 }
 
-func blankSpanLine(width int, fg Color, bg Color) spanLine {
-	return spanLine{spans: []Span{{FG: fg, BG: bg, Rune: ' ', Width: width}}, width: width}
+func blankSpanLine(width int, style *Style) spanLine {
+	return spanLine{spans: []Span{{Style: *style, Rune: ' ', Width: width}}, width: width}
 }
 
-func resizeLine(line *spanLine, width int, fg Color, bg Color, mode TextReadMode) {
+func resizeLine(line *spanLine, width int, style *Style, mode TextReadMode) {
 	cur := lineCellWidth(line)
 	if cur > width {
 		truncateLine(line, width, mode)
 		return
 	}
 	if cur < width {
-		line.spans = append(line.spans, Span{FG: fg, BG: bg, Rune: ' ', Width: width - cur})
+		line.spans = append(line.spans, Span{Style: *style, Rune: ' ', Width: width - cur})
 	}
 	line.width = width
 }
@@ -775,7 +750,13 @@ func mergeAdjacent(line *spanLine) {
 		cur := line.spans[i]
 		prev := &line.spans[writeIdx]
 
-		canMerge := cur.FG == prev.FG && cur.BG == prev.BG
+		// Compare styles by their color fields
+		curFG, _, _ := cur.Style.GetColor(ComponentFG)
+		prevFG, _, _ := prev.Style.GetColor(ComponentFG)
+		curBG, _, _ := cur.Style.GetColor(ComponentBG)
+		prevBG, _, _ := prev.Style.GetColor(ComponentBG)
+
+		canMerge := curFG == prevFG && curBG == prevBG
 		if canMerge {
 			// Check if mergeable types
 			if prev.Text == "" && cur.Text == "" && prev.Rune == cur.Rune {
@@ -892,7 +873,12 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 			line.width = totalWidth - n + insert.Width
 			return
 		}
-		if insert.Width == n && sp.FG == insert.FG && sp.BG == insert.BG {
+		// Compare styles
+		spFG, _, _ := sp.Style.GetColor(ComponentFG)
+		insertFG, _, _ := insert.Style.GetColor(ComponentFG)
+		spBG, _, _ := sp.Style.GetColor(ComponentBG)
+		insertBG, _, _ := insert.Style.GetColor(ComponentBG)
+		if insert.Width == n && spFG == insertFG && spBG == insertBG {
 			if sp.Text == "" && insert.Text == "" && sp.Rune == insert.Rune {
 				return
 			}
@@ -1113,7 +1099,7 @@ func (s *spanScreen) clearWideOverlaps(y int, x int, n int) {
 	// Clear wide chars in reverse order so indices don't shift
 	for i := len(wideChars) - 1; i >= 0; i-- {
 		wc := wideChars[i]
-		replaceRange(line, wc.start, wc.width, Span{FG: s.frontColor, BG: s.backColor, Rune: ' ', Width: wc.width}, s.textMode)
+		replaceRange(line, wc.start, wc.width, Span{Style: *s.frontStyle, Rune: ' ', Width: wc.width}, s.textMode)
 		s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: wc.start, X2: wc.start + wc.width}, CRClear)
 	}
 }

@@ -394,101 +394,130 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				params = paramStore[:paramCount]
 			}
 
-			fc := t.screen().FrontColor()
-			bc := t.screen().BackColor()
+			style := NewStyle()
+			frontStyle := t.screen().FrontStyle()
+
+			// Copy current colors and modes from front style
+			if fgVal, isRGB, _ := frontStyle.GetColor(ComponentFG); fgVal != 0x100 {
+				if isRGB {
+					r := (fgVal >> 16) & 0xff
+					g := (fgVal >> 8) & 0xff
+					b := fgVal & 0xff
+					style.SetColorRGB(ComponentFG, r, g, b)
+				} else {
+					style.SetColor256(ComponentFG, fgVal)
+				}
+			} else {
+				style.SetColorDefault(ComponentFG)
+			}
+
+			if bgVal, isRGB, _ := frontStyle.GetColor(ComponentBG); bgVal != 0x100 {
+				if isRGB {
+					r := (bgVal >> 16) & 0xff
+					g := (bgVal >> 8) & 0xff
+					b := bgVal & 0xff
+					style.SetColorRGB(ComponentBG, r, g, b)
+				} else {
+					style.SetColor256(ComponentBG, bgVal)
+				}
+			} else {
+				style.SetColorDefault(ComponentBG)
+			}
+
+			// Copy modes
+			for _, mode := range frontStyle.Modes() {
+				style.SetMode(mode)
+			}
 
 			for i := 0; i < len(params); i++ {
 				p := params[i]
 				switch {
 				case p == 0: // reset mode
-					fc = ColDefault
-					bc = ColDefault
+					style.ResetAll()
 
 				case p >= 1 && p <= 5:
-					fc = fc.SetMode(ColorModes[p-1])
+					style.SetMode(ColorModes[p-1])
 
 				case p == 6: // rapid blink
-					bc = bc.SetMode(ModeRapidBlink)
+					style.SetMode(ModeRapidBlink)
 
 				case p == 7:
-					fc = fc.SetMode(ModeReverse)
+					style.SetMode(ModeReverse)
 
 				case p == 8:
-					fc = fc.SetMode(ModeInvisible)
+					style.SetMode(ModeInvisible)
 
 				case p == 9: // strikethrough / crossed-out
-					bc = bc.SetMode(ModeStrike)
+					style.SetMode(ModeStrike)
 
 				case p == 21: // double underline
-					bc = bc.SetMode(ModeDoubleUnderline)
+					style.SetMode(ModeDoubleUnderline)
 
 				case p == 22:
-					fc = fc.ResetMode(ModeBold).ResetMode(ModeDim)
+					style.ResetMode(ModeBold, ModeDim)
 
 				case p == 23:
-					fc = fc.ResetMode(ModeItalic)
+					style.ResetMode(ModeItalic)
 
 				case p == 24:
-					fc = fc.ResetMode(ModeUnderline)
-					bc = bc.ResetMode(ModeDoubleUnderline)
+					style.ResetMode(ModeUnderline, ModeDoubleUnderline)
 
 				case p == 25:
-					fc = fc.ResetMode(ModeBlink)
-					bc = bc.ResetMode(ModeRapidBlink)
+					style.ResetMode(ModeBlink, ModeRapidBlink)
 
 				case p == 27:
-					fc = fc.ResetMode(ModeReverse)
+					style.ResetMode(ModeReverse)
 
 				case p == 28:
-					fc = fc.ResetMode(ModeInvisible)
+					style.ResetMode(ModeInvisible)
 
 				case p == 29: // not crossed-out
-					bc = bc.ResetMode(ModeStrike)
+					style.ResetMode(ModeStrike)
 
 				case p == 51: // framed
-					bc = bc.SetMode(ModeFramed)
+					style.SetMode(ModeFramed)
 
 				case p == 52: // encircled
-					bc = bc.SetMode(ModeEncircled)
+					style.SetMode(ModeEncircled)
 
 				case p == 53: // overline
-					bc = bc.SetMode(ModeOverline)
+					style.SetMode(ModeOverline)
 
 				case p == 54: // not framed, not encircled
-					bc = bc.ResetMode(ModeFramed).ResetMode(ModeEncircled)
+					style.ResetMode(ModeFramed, ModeEncircled)
 
 				case p == 55: // not overline
-					bc = bc.ResetMode(ModeOverline)
+					style.ResetMode(ModeOverline)
 
 				case p >= 30 && p <= 37:
-					fc = fc.SetColor(Colors8[p-30])
+					style.SetColor256(ComponentFG, int(Colors8[p-30]))
 
 				case p == 39: // default color
-					fc = ColDefault
+					style.SetColorDefault(ComponentFG)
 
 				case p >= 40 && p <= 47:
-					bc = bc.SetColor(Colors8[p-40])
+					style.SetColor256(ComponentBG, int(Colors8[p-40]))
 
 				case p == 49: // default color
-					bc = ColDefault
+					style.SetColorDefault(ComponentBG)
 
 				case p == 38 || p == 48: // extended set color
 					if i+2 < len(params) {
 						switch params[i+1] {
 						case 5: // 256 color
-							if p == 38 {
-								fc = fc.SetColor(Color(params[i+2] & 0xff))
-							} else {
-								bc = bc.SetColor(Color(params[i+2] & 0xff))
+							component := ComponentFG
+							if p == 48 {
+								component = ComponentBG
 							}
+							style.SetColor256(component, params[i+2]&0xff)
 							i += 2
 						case 2: // RGB Color
 							if i+4 < len(params) {
-								if p == 38 {
-									fc = fc.SetColorRGB(params[i+2], params[i+3], params[i+4])
-								} else {
-									bc = bc.SetColorRGB(params[i+2], params[i+3], params[i+4])
+								component := ComponentFG
+								if p == 48 {
+									component = ComponentBG
 								}
+								style.SetColorRGB(component, params[i+2], params[i+3], params[i+4])
 								i += 4
 							}
 						default:
@@ -498,20 +527,18 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					}
 
 				case p >= 90 && p <= 97:
-					fc = fc.SetColor(Color(p - 90 + 8))
+					style.SetColor256(ComponentFG, int(p-90+8))
 
 				case p >= 100 && p <= 107:
-					bc = bc.SetColor(Color(p - 100 + 8))
+					style.SetColor256(ComponentBG, int(p-100+8))
 
 				default:
 					debugPrintln(debugTodo, "TODO: Unhandled set color: ", p)
 					continue
 				}
-
-				// debugPrintf("m %v: %x, %x\n", p, fc, bc)
-
-				t.screen().setColors(fc, bc)
 			}
+
+			t.screen().setStyle(&style, &style)
 
 		case 't': // Window manipulation
 			if len(params) > 0 {

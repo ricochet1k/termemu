@@ -127,7 +127,7 @@ func (t *TTYFrontend) CursorMoved(x, y int) {
 	t.cursor = Pos{X: x, Y: y}
 	t.renderCursorLocked()
 }
-func (t *TTYFrontend) ColorsChanged(f, b Color) {}
+func (t *TTYFrontend) StyleChanged(fg, bg *Style) {}
 func (t *TTYFrontend) ViewFlagChanged(v ViewFlag, value bool) {
 	if v != VFShowCursor {
 		return
@@ -189,7 +189,7 @@ func renderStyledLineANSI(line *Line) []byte {
 
 	var buf bytes.Buffer
 	for _, span := range line.Spans {
-		buf.Write(ANSIEscape(span.FG, span.BG))
+		buf.Write(span.Style.ANSIEscape())
 		if span.Text != "" {
 			buf.WriteString(span.Text)
 		} else {

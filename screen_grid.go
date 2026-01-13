@@ -11,20 +11,17 @@ import (
 )
 
 type gridScreen struct {
-	chars       [][]rune
-	cellText    [][]string
-	cellWidth   [][]uint8
-	cellCont    [][]bool
-	backColors  [][]Color
-	frontColors [][]Color
-	frontend    Frontend
+	chars      [][]rune
+	cellText   [][]string
+	cellWidth  [][]uint8
+	cellCont   [][]bool
+	cellStyles [][]*Style
+	frontend   Frontend
 
-	frontColor Color
-	backColor  Color
+	style *Style
 
-	// prealocated for fast copying
-	frontColorBuf []Color
-	backColorBuf  []Color
+	// preallocated for fast copying
+	styleBuf *Style
 
 	size Pos
 
@@ -39,9 +36,12 @@ type gridScreen struct {
 func newGridScreen(f Frontend) *gridScreen {
 	s := &gridScreen{
 		frontend: f,
+		style:    &Style{},
 	}
+	s.style.SetColorDefault(ComponentFG)
+	s.style.SetColorDefault(ComponentBG)
 	s.setSize(80, 14)
-	s.setColors(ColDefault, ColDefault)
+	s.setStyle(s.style, s.style)
 	s.bottomMargin = s.size.Y - 1
 	s.eraseRegion(Region{X: 0, Y: 0, X2: s.size.X, Y2: s.size.Y}, CRClear)
 	return s
@@ -55,12 +55,12 @@ func (s *gridScreen) CursorPos() Pos {
 	return s.cursorPos
 }
 
-func (s *gridScreen) FrontColor() Color {
-	return s.frontColor
+func (s *gridScreen) FrontStyle() *Style {
+	return s.style
 }
 
-func (s *gridScreen) BackColor() Color {
-	return s.backColor
+func (s *gridScreen) BackStyle() *Style {
+	return s.style
 }
 
 func (s *gridScreen) AutoWrap() bool {
@@ -87,30 +87,24 @@ func (s *gridScreen) getLine(y int) []rune {
 	return s.chars[y]
 }
 
-func (s *gridScreen) getLineColors(y int) ([]Color, []Color) {
-	return s.frontColors[y], s.backColors[y]
-}
-
 func (s *gridScreen) StyledLine(x, w, y int) *Line {
 	text := s.getLine(y)
-	fgs := s.frontColors[y]
-	bgs := s.backColors[y]
+	styles := s.cellStyles[y]
 	cellText := s.cellText[y]
 
 	var spans []Span
 
-	if w < 0 || x+w > len(fgs) {
-		w = len(fgs) - x
+	if w < 0 || x+w > len(styles) {
+		w = len(styles) - x
 	}
 
 	for i := x; i < x+w; {
-		fg := fgs[i]
-		bg := bgs[i]
+		style := styles[i]
 		width := 0
 		start := i
 
-		// Find run of identical colors
-		for i < x+w && fg == fgs[i] && bg == bgs[i] {
+		// Find run of identical styles
+		for i < x+w && styles[i] == style {
 			width++
 			i++
 		}
@@ -130,7 +124,7 @@ func (s *gridScreen) StyledLine(x, w, y int) *Line {
 		}
 
 		if isRepeat {
-			spans = append(spans, Span{FG: fg, BG: bg, Rune: firstRune, Width: width})
+			spans = append(spans, Span{Style: *style, Rune: firstRune, Width: width})
 		} else {
 			// Construct text for span
 			var sb strings.Builder
@@ -148,7 +142,7 @@ func (s *gridScreen) StyledLine(x, w, y int) *Line {
 				spanWidth++
 			}
 
-			spans = append(spans, Span{FG: fg, BG: bg, Text: sb.String(), Width: spanWidth})
+			spans = append(spans, Span{Style: *style, Text: sb.String(), Width: spanWidth})
 		}
 	}
 	return &Line{
@@ -167,16 +161,14 @@ func (s *gridScreen) StyledLines(r Region) []*Line {
 
 func (s *gridScreen) renderLineANSI(y int) string {
 	line := s.getLine(y)
-	fg := s.frontColors[y][0]
-	bg := s.backColors[y][0]
+	styles := s.cellStyles[y]
 	buf := bytes.NewBuffer(make([]byte, 0, len(line)+10))
 	x := 0
 	for x < len(line) {
-		fg = s.frontColors[y][x]
-		bg = s.backColors[y][x]
-		buf.Write(ANSIEscape(fg, bg))
+		currentStyle := styles[x]
+		buf.Write(currentStyle.ANSIEscape())
 
-		for x < len(line) && fg == s.frontColors[y][x] && bg == s.backColors[y][x] {
+		for x < len(line) && styles[x] == currentStyle {
 			if line[x] != 0 {
 				buf.WriteRune(line[x])
 			}
@@ -186,18 +178,12 @@ func (s *gridScreen) renderLineANSI(y int) string {
 	return buf.String()
 }
 
-func (s *gridScreen) setColors(front Color, back Color) {
-	s.frontColor = front
-	s.backColor = back
-
-	for i := range s.frontColorBuf {
-		s.frontColorBuf[i] = front
-	}
-	for i := range s.backColorBuf {
-		s.backColorBuf[i] = back
-	}
-
-	s.frontend.ColorsChanged(front, back)
+func (s *gridScreen) setStyle(front, back *Style) {
+	// For gridScreen, we use a single style for simplicity
+	// In a more complex implementation, front could be used for text and back for background
+	s.style = front
+	s.styleBuf = front
+	s.frontend.StyleChanged(front, back)
 }
 
 func (s *gridScreen) setSize(w, h int) {
@@ -262,30 +248,23 @@ func (s *gridScreen) setSize(w, h int) {
 	s.cellWidth = cellWidth
 	s.cellCont = cellCont
 
-	for pi, p := range []*[][]Color{&s.backColors, &s.frontColors} {
-		col := s.backColor
-		if pi == 1 {
-			col = s.frontColor
-		}
+	styleRect := make([][]*Style, h)
+	styleRaw := make([]*Style, w*h)
+	for i := range styleRect {
+		styleRect[i], styleRaw = styleRaw[:w], styleRaw[w:]
+		if i < prevH {
+			copy(styleRect[i][:minW], s.cellStyles[i][:minW])
 
-		rect := make([][]Color, h)
-		raw := make([]Color, w*h)
-		for i := range rect {
-			rect[i], raw = raw[:w], raw[w:]
-			if i < prevH {
-				copy(rect[i][:minW], (*p)[i][:minW])
-
-				for x := minW; x < w; x++ {
-					rect[i][x] = col
-				}
-			} else {
-				for x := 0; x < w; x++ {
-					rect[i][x] = col
-				}
+			for x := minW; x < w; x++ {
+				styleRect[i][x] = s.style
+			}
+		} else {
+			for x := 0; x < w; x++ {
+				styleRect[i][x] = s.style
 			}
 		}
-		*p = rect
 	}
+	s.cellStyles = styleRect
 
 	s.bottomMargin = h - (s.size.Y - s.bottomMargin)
 
@@ -299,9 +278,8 @@ func (s *gridScreen) setSize(w, h int) {
 		s.cursorPos.Y = 0
 	}
 
-	s.frontColorBuf = make([]Color, w)
-	s.backColorBuf = make([]Color, w)
-	s.setColors(s.frontColor, s.backColor)
+	s.styleBuf = s.style
+	s.setStyle(s.style, s.style)
 }
 
 func (s *gridScreen) eraseRegion(r Region, cr ChangeReason) {
@@ -415,8 +393,7 @@ func (s *gridScreen) insertRunes(b []rune) {
 	copy(s.cellText[y][tsx:tex], s.cellText[y][fsx:fex])
 	copy(s.cellWidth[y][tsx:tex], s.cellWidth[y][fsx:fex])
 	copy(s.cellCont[y][tsx:tex], s.cellCont[y][fsx:fex])
-	copy(s.frontColors[y][tsx:tex], s.frontColors[y][fsx:fex])
-	copy(s.backColors[y][tsx:tex], s.backColors[y][fsx:fex])
+	copy(s.cellStyles[y][tsx:tex], s.cellStyles[y][fsx:fex])
 	// TODO! RegionChanged!
 
 	s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b, CRText)
@@ -441,7 +418,7 @@ func (s *gridScreen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
 		widthRow[idx] = 1
 		contRow[idx] = false
 	}
-	s.rawWriteColors(y, x, x+len(b))
+	s.rawWriteStyles(y, x, x+len(b))
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + len(b)}, cr)
 }
 
@@ -489,7 +466,7 @@ func (s *gridScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReas
 	if end > s.size.X {
 		end = s.size.X
 	}
-	s.rawWriteColors(y, x, end)
+	s.rawWriteStyles(y, x, end)
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: end}, cr)
 }
 
@@ -509,7 +486,7 @@ func (s *gridScreen) clearWideAt(y int, x int) {
 		s.cellWidth[y][i] = 1
 		s.cellCont[y][i] = false
 	}
-	s.rawWriteColors(y, base, end)
+	s.rawWriteStyles(y, base, end)
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: base, X2: end}, CRClear)
 }
 
@@ -524,10 +501,11 @@ func runeCellWidth(r rune) int {
 	return width
 }
 
-// rawWriteColors copies one line of current colors to the screen, from x1 to x2
-func (s *gridScreen) rawWriteColors(y int, x1 int, x2 int) {
-	copy(s.frontColors[y][x1:x2], s.frontColorBuf[x1:x2])
-	copy(s.backColors[y][x1:x2], s.backColorBuf[x1:x2])
+// rawWriteStyles copies the current style to the screen, from x1 to x2
+func (s *gridScreen) rawWriteStyles(y int, x1 int, x2 int) {
+	for i := x1; i < x2; i++ {
+		s.cellStyles[y][i] = s.styleBuf
+	}
 }
 
 // deleteChars removes n characters from (x,y), shifts the remainder left,
@@ -562,11 +540,9 @@ func (s *gridScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 		contLine[i] = false
 	}
 
-	fg := s.frontColors[y]
-	bg := s.backColors[y]
-	copy(fg[x:], fg[x+n:])
-	copy(bg[x:], bg[x+n:])
-	s.rawWriteColors(y, s.size.X-n, s.size.X)
+	styleLine := s.cellStyles[y]
+	copy(styleLine[x:], styleLine[x+n:])
+	s.rawWriteStyles(y, s.size.X-n, s.size.X)
 
 	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
 }
@@ -613,8 +589,7 @@ func (s *gridScreen) scroll(y1 int, y2 int, dy int) {
 			copy(s.cellText[y], s.cellText[y-dy])
 			copy(s.cellWidth[y], s.cellWidth[y-dy])
 			copy(s.cellCont[y], s.cellCont[y-dy])
-			copy(s.frontColors[y], s.frontColors[y-dy])
-			copy(s.backColors[y], s.backColors[y-dy])
+			copy(s.cellStyles[y], s.cellStyles[y-dy])
 		}
 		// these are non-inclusive, so need +1
 		s.frontend.RegionChanged(Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
@@ -627,8 +602,7 @@ func (s *gridScreen) scroll(y1 int, y2 int, dy int) {
 			copy(s.cellText[y], s.cellText[y-dy])
 			copy(s.cellWidth[y], s.cellWidth[y-dy])
 			copy(s.cellCont[y], s.cellCont[y-dy])
-			copy(s.frontColors[y], s.frontColors[y-dy])
-			copy(s.backColors[y], s.backColors[y-dy])
+			copy(s.cellStyles[y], s.cellStyles[y-dy])
 		}
 		// these are non-inclusive, so need +1
 		s.frontend.RegionChanged(Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X}, CRScroll)

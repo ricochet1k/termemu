@@ -79,7 +79,7 @@ type Frontend interface {
 	// buffer, do it now.
 	ScrollLines(y int)
 	CursorMoved(x, y int)
-	ColorsChanged(Color, Color)
+	StyleChanged(fg *Style, bg *Style)
 	ViewFlagChanged(vs ViewFlag, value bool)
 	ViewIntChanged(vs ViewInt, value int)
 	ViewStringChanged(vs ViewString, value string)
@@ -92,7 +92,7 @@ func (d *EmptyFrontend) Bell()                                         {}
 func (d *EmptyFrontend) RegionChanged(r Region, c ChangeReason)        {}
 func (d *EmptyFrontend) CursorMoved(x, y int)                          {}
 func (d *EmptyFrontend) ScrollLines(y int)                             {}
-func (d *EmptyFrontend) ColorsChanged(f Color, b Color)                {}
+func (d *EmptyFrontend) StyleChanged(fg *Style, bg *Style)             {}
 func (d *EmptyFrontend) ViewFlagChanged(vs ViewFlag, value bool)       {}
 func (d *EmptyFrontend) ViewIntChanged(vs ViewInt, value int)          {}
 func (d *EmptyFrontend) ViewStringChanged(vs ViewString, value string) {}

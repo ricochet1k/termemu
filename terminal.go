@@ -173,10 +173,12 @@ func (t *terminal) ANSILine(y int) string {
 }
 
 func (t *terminal) LineColors(y int) (fg []Color, bg []Color) {
+	// Deprecated: Use StyledLine() instead for color information
 	if y >= t.screen().Size().Y {
 		return nil, nil
 	}
-	return t.screen().getLineColors(y)
+	// Return empty slices for backward compatibility
+	return nil, nil
 }
 
 func (t *terminal) StyledLine(x, w, y int) *Line {

@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 type screenFactory struct {
@@ -48,7 +49,7 @@ func writeTextAt(s screen, x, y int, text string) {
 		rawWriteSpan(int, int, Span, ChangeReason)
 	}); ok {
 		width := utf8.RuneCountInString(text)
-		writer.rawWriteSpan(x, y, Span{FG: s.FrontColor(), BG: s.BackColor(), Text: text, Width: width}, CRText)
+		writer.rawWriteSpan(x, y, Span{Style: *s.FrontStyle(), Text: text, Width: width}, CRText)
 		return
 	}
 	s.rawWriteRunes(x, y, []rune(text), CRText)
@@ -60,7 +61,7 @@ func writeTextAtWithWidth(s screen, x, y int, text string, width int) {
 	if writer, ok := s.(interface {
 		rawWriteSpan(int, int, Span, ChangeReason)
 	}); ok {
-		writer.rawWriteSpan(x, y, Span{FG: s.FrontColor(), BG: s.BackColor(), Text: text, Width: width}, CRText)
+		writer.rawWriteSpan(x, y, Span{Style: *s.FrontStyle(), Text: text, Width: width}, CRText)
 		return
 	}
 	s.rawWriteRunes(x, y, []rune(text), CRText)
@@ -155,11 +156,11 @@ func TestStyledLine(t *testing.T) {
 
 		l := s.StyledLine(1, 2, 0)
 		want := &Line{
-			Spans: []Span{{FG: ColDefault, BG: ColDefault, Text: "12", Width: 2}},
+			Spans: []Span{{Style: NewStyle(), Text: "12", Width: 2}},
 			Width: 2,
 		}
-		if diff := cmp.Diff(l, want); diff != "" {
-			t.Errorf("s.StyledLine(1, 2, 0) = %#v, want %#v", l, want)
+		if diff := cmp.Diff(l, want, cmpopts.IgnoreUnexported(Style{})); diff != "" {
+			t.Errorf("s.StyledLine(1, 2, 0) diff: %s", diff)
 		}
 	})
 }
@@ -309,7 +310,7 @@ func TestClearWideOverlaps_EdgeCase_SplitInMiddle(t *testing.T) {
 
 func TestSplitSpan_RepeatMode(t *testing.T) {
 	// Repeat mode spans (no wide clusters)
-	sp := Span{Rune: ' ', Width: 5, FG: ColDefault, BG: ColDefault}
+	sp := Span{Rune: ' ', Width: 5, Style: NewStyle()}
 
 	left, right, brokeWide := splitSpan(sp, 2, TextReadModeGrapheme)
 
@@ -329,7 +330,7 @@ func TestSplitSpan_RepeatMode(t *testing.T) {
 
 func TestSplitSpan_SimpleText(t *testing.T) {
 	// Simple ASCII text (no wide characters)
-	sp := Span{Text: "hello", Width: 5, FG: ColDefault, BG: ColDefault}
+	sp := Span{Text: "hello", Width: 5, Style: NewStyle()}
 
 	left, right, brokeWide := splitSpan(sp, 2, TextReadModeRune)
 
@@ -349,7 +350,7 @@ func TestSplitSpan_SimpleText(t *testing.T) {
 
 func TestSplitSpan_WideCharacterBeforeSplit(t *testing.T) {
 	// Wide character before the split point - should split normally
-	sp := Span{Text: "🎉hello", Width: 7, FG: ColDefault, BG: ColDefault} // emoji=2 cells, hello=5 cells
+	sp := Span{Text: "🎉hello", Width: 7, Style: NewStyle()} // emoji=2 cells, hello=5 cells
 
 	left, right, brokeWide := splitSpan(sp, 3, TextReadModeGrapheme)
 
@@ -366,7 +367,7 @@ func TestSplitSpan_WideCharacterBeforeSplit(t *testing.T) {
 
 func TestSplitSpan_SplitInWideCharacter(t *testing.T) {
 	// Split point falls within a wide emoji (width 2)
-	sp := Span{Text: "🎉", Width: 2, FG: ColDefault, BG: ColDefault}
+	sp := Span{Text: "🎉", Width: 2, Style: NewStyle()}
 
 	left, right, brokeWide := splitSpan(sp, 1, TextReadModeGrapheme)
 
@@ -387,7 +388,7 @@ func TestSplitSpan_SplitInWideCharacter(t *testing.T) {
 
 func TestSplitSpan_WideCharAtEndOfSpan(t *testing.T) {
 	// Wide character is at the end of the span
-	sp := Span{Text: "hello🎉", Width: 7, FG: ColDefault, BG: ColDefault} // hello=5 cells, emoji=2 cells
+	sp := Span{Text: "hello🎉", Width: 7, Style: NewStyle()} // hello=5 cells, emoji=2 cells
 
 	left, right, brokeWide := splitSpan(sp, 6, TextReadModeGrapheme)
 
@@ -408,7 +409,7 @@ func TestSplitSpan_WideCharAtEndOfSpan(t *testing.T) {
 
 func TestSplitSpan_MultipleWideCharacters(t *testing.T) {
 	// Multiple wide characters, split in the middle of one
-	sp := Span{Text: "🎉🎉hello", Width: 9, FG: ColDefault, BG: ColDefault} // emoji+emoji=4, hello=5
+	sp := Span{Text: "🎉🎉hello", Width: 9, Style: NewStyle()} // emoji+emoji=4, hello=5
 
 	left, right, brokeWide := splitSpan(sp, 3, TextReadModeGrapheme)
 
@@ -428,7 +429,7 @@ func TestSplitSpan_MultipleWideCharacters(t *testing.T) {
 }
 
 func TestSplitSpan_BoundaryConditions(t *testing.T) {
-	sp := Span{Text: "abc", Width: 3, FG: ColDefault, BG: ColDefault}
+	sp := Span{Text: "abc", Width: 3, Style: NewStyle()}
 
 	// Split at 0
 	left, right, brokeWide := splitSpan(sp, 0, TextReadModeRune)

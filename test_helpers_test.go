@@ -20,9 +20,9 @@ type MockFrontend struct {
 	CursorY          int
 	CursorMovedCount int
 
-	Colors []struct {
-		F Color
-		B Color
+	Styles []struct {
+		FG *Style
+		BG *Style
 	}
 
 	ViewFlags   map[ViewFlag]bool
@@ -66,13 +66,13 @@ func (m *MockFrontend) CursorMoved(x, y int) {
 	m.CursorMovedCount++
 }
 
-func (m *MockFrontend) ColorsChanged(f Color, b Color) {
+func (m *MockFrontend) StyleChanged(fg *Style, bg *Style) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Colors = append(m.Colors, struct {
-		F Color
-		B Color
-	}{f, b})
+	m.Styles = append(m.Styles, struct {
+		FG *Style
+		BG *Style
+	}{fg, bg})
 }
 
 func (m *MockFrontend) ViewFlagChanged(vs ViewFlag, value bool) {
@@ -116,5 +116,5 @@ func MakeTerminalWithMock() (*terminal, *MockFrontend) {
 
 // small helper to fail test with recorded state for easier debugging
 func dumpMock(t *testing.T, m *MockFrontend) {
-	t.Logf("MockFrontend: Bell=%d, Cursor=(%d,%d), Regions=%d, Colors=%d", m.BellCount, m.CursorX, m.CursorY, len(m.Regions), len(m.Colors))
+	t.Logf("MockFrontend: Bell=%d, Cursor=(%d,%d), Regions=%d, Styles=%d", m.BellCount, m.CursorX, m.CursorY, len(m.Regions), len(m.Styles))
 }
