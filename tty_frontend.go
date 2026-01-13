@@ -188,20 +188,15 @@ func renderStyledLineANSI(line *Line) []byte {
 	}
 
 	var buf bytes.Buffer
-	pos := 0
 	for _, span := range line.Spans {
 		buf.Write(ANSIEscape(span.FG, span.BG))
-		end := pos + int(span.Width)
-		if end > len(line.Text) {
-			end = len(line.Text)
-		}
-		for _, r := range line.Text[pos:end] {
-			if r == 0 {
-				continue
+		if span.Text != "" {
+			buf.WriteString(span.Text)
+		} else {
+			for i := 0; i < span.Width; i++ {
+				buf.WriteRune(span.Rune)
 			}
-			buf.WriteRune(r)
 		}
-		pos = end
 	}
 	return buf.Bytes()
 }

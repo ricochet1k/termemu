@@ -18,7 +18,14 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 	outerFrontend.Attach(Region{X: 0, Y: 0, X2: 40, Y2: 2})
 
 	outer.WithLock(func() {
-		outer.screen().writeRunes([]rune("🐹 v1.24.3 took"))
+		text := "🐹 v1.24.3 took"
+		if writer, ok := outer.screen().(interface {
+			writeString(string, int, bool, TextReadMode)
+		}); ok {
+			writer.writeString(text, stringCellWidth(text), false, TextReadModeRune)
+			return
+		}
+		outer.screen().writeRunes([]rune(text))
 	})
 
 	innerBackend := NewNoPTYBackend(bytes.NewReader(nil), io.Discard)
@@ -37,20 +44,22 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 func feedTTYOutput(t *terminal, data []byte) error {
 	gr := NewGraphemeReaderWithMode(bytes.NewReader(data), TextReadModeRune)
 	for {
-		tokens, err := gr.ReadPrintableTokens()
+		text, width, merge, err := gr.ReadPrintableBytes(0)
 		if err != nil {
 			if err == io.EOF {
 				return nil
 			}
 			return err
 		}
-		if len(tokens) > 0 {
-			runes := make([]rune, 0, len(tokens))
-			for _, tok := range tokens {
-				runes = append(runes, []rune(tok.Text)...)
-			}
+		if len(text) > 0 {
 			t.WithLock(func() {
-				t.screen().writeRunes(runes)
+				if writer, ok := t.screen().(interface {
+					writeString(string, int, bool, TextReadMode)
+				}); ok {
+					writer.writeString(text, width, merge, TextReadModeRune)
+					return
+				}
+				t.screen().writeRunes([]rune(text))
 			})
 			continue
 		}
@@ -63,10 +72,18 @@ func feedTTYOutput(t *terminal, data []byte) error {
 		}
 		if b == 27 {
 			t.WithLock(func() {
-				_ = t.handleCommand(&captureReader{r: gr})
+				_ = t.handleCommand(gr)
 			})
 		}
 	}
+}
+
+func stringCellWidth(text string) int {
+	width := 0
+	for _, r := range text {
+		width += runeCellWidth(r)
+	}
+	return width
 }
 
 func stripNul(runes []rune) string {

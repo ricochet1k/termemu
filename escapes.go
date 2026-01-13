@@ -6,33 +6,61 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
 )
 
 func (t *terminal) ptyReadLoop() {
 	reader := bufio.NewReader(t.backend)
 	gr := NewGraphemeReaderWithMode(reader, t.textReadMode)
+	bw, useBytes := t.screen().(interface {
+		writeString(string, int, bool, TextReadMode)
+	})
 
 	for {
-		tokens, err := gr.ReadPrintableTokens()
-		if err != nil {
-			if err != io.EOF {
-				debugPrintln(debugErrors, "ERR ReadPrintableTokens:", err)
-			}
-			return
-		}
-		if len(tokens) > 0 {
-			t.WithLock(func() {
-				t.screen().writeTokens(tokens)
-			})
-			if *debugTxt {
-				var buf bytes.Buffer
-				for _, tok := range tokens {
-					buf.WriteString(tok.Text)
+		if useBytes {
+			maxWidth := 0
+			if t.screen().AutoWrap() {
+				maxWidth = t.screen().Size().X - t.screen().CursorPos().X
+				if maxWidth < 1 {
+					maxWidth = 1
 				}
-				debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", buf.String(), buf.Len())
 			}
-			continue
+			data, width, merge, err := gr.ReadPrintableBytes(maxWidth)
+			if err != nil {
+				if err != io.EOF {
+					debugPrintln(debugErrors, "ERR ReadPrintableBytes:", err)
+				}
+				return
+			}
+			if len(data) > 0 {
+				t.WithLock(func() {
+					bw.writeString(data, width, merge, t.textReadMode)
+				})
+				if *debugTxt {
+					debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", data, len(data))
+				}
+				continue
+			}
+		} else {
+			tokens, err := gr.ReadPrintableTokens(0)
+			if err != nil {
+				if err != io.EOF {
+					debugPrintln(debugErrors, "ERR ReadPrintableTokens:", err)
+				}
+				return
+			}
+			if len(tokens) > 0 {
+				t.WithLock(func() {
+					t.screen().writeTokens(tokens)
+				})
+				if *debugTxt {
+					var buf bytes.Buffer
+					for _, tok := range tokens {
+						buf.Write(tok.Bytes)
+					}
+					debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", buf.String(), buf.Len())
+				}
+				continue
+			}
 		}
 
 		b, err := gr.ReadByte()
@@ -83,17 +111,20 @@ func (t *terminal) ptyReadLoop() {
 
 		case 27: // ESC ^[ Escape Character
 
-			var cmdBytes bytes.Buffer
-
 			t.WithLock(func() {
-				cmdReader := &captureReader{r: gr, buf: &cmdBytes}
-				success := t.handleCommand(cmdReader)
-				cmd := cmdBytes.Bytes()
+				if *debugCmd || *debugTodo {
+					var cmdBytes bytes.Buffer
+					cmdReader := &captureReader{r: gr, buf: &cmdBytes}
+					success := t.handleCommand(cmdReader)
+					cmd := cmdBytes.Bytes()
 
-				if success {
-					debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
+					if success {
+						debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
+					} else {
+						debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
+					}
 				} else {
-					debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
+					_ = t.handleCommand(gr)
 				}
 			})
 			continue
@@ -209,10 +240,9 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		return false
 	}
 
-	var prefix = []byte{}
+	prefix := byte(0)
 	if b == '?' || b == '>' || b == '<' || b == '=' {
-		prefix = append(prefix, byte(b))
-
+		prefix = b
 		b, err = r.ReadByte()
 		if err != nil {
 			if err != io.EOF {
@@ -222,9 +252,30 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		}
 	}
 
-	paramBytes := []byte{}
+	// This cannot escape to the heap! Use append([]int(nil), params...) instead of params to make a copy if needed, such as to debug calls
+	var paramStore [8]int
+	paramCount := 0
+	param := 0
+	paramSet := false
+	sawSeparator := false
 	for b == ';' || (b >= '0' && b <= '9') {
-		paramBytes = append(paramBytes, byte(b))
+		if b == ';' {
+			value := 0
+			if paramSet || sawSeparator || paramCount > 0 {
+				value = param
+			}
+			if paramCount < len(paramStore) {
+				paramStore[paramCount] = value
+				paramCount++
+			}
+			param = 0
+			paramSet = false
+			sawSeparator = true
+		} else {
+			param = param*10 + int(b-'0')
+			paramSet = true
+			sawSeparator = false
+		}
 
 		b, err = r.ReadByte()
 		if err != nil {
@@ -234,48 +285,63 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			return false
 		}
 	}
-
-	paramParts := strings.Split(string(paramBytes), ";")
-	if len(paramParts) == 1 && paramParts[0] == "" {
-		paramParts = []string{}
+	if paramSet || sawSeparator {
+		value := 0
+		if paramSet {
+			value = param
+		}
+		if paramCount < len(paramStore) {
+			paramStore[paramCount] = value
+			paramCount++
+		}
 	}
-	params := make([]int, len(paramParts))
-	for i, p := range paramParts {
-		params[i], _ = strconv.Atoi(p)
-	}
 
-	if string(prefix) == "" {
+	params := paramStore[:paramCount]
+
+	if prefix == 0 {
 		switch b {
 		case 'A': // Move cursor up
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().moveCursor(0, -params[0], false, true)
 		case 'B': // Move cursor down
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().moveCursor(0, params[0], false, true)
 		case 'C': // Move cursor forward
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().moveCursor(params[0], 0, false, false)
 		case 'D': // Move cursor backward
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().moveCursor(-params[0], 0, false, false)
 
 		case 'G': // Cursor Character Absolute
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().setCursorPos(params[0]-1, t.screen().CursorPos().Y)
 
 		case 'c': // Send Device Attributes
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			switch params[0] {
 			case 0:
@@ -283,8 +349,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 
 		case 'd': // Line Position Absolute
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().setCursorPos(t.screen().CursorPos().X, params[0]-1)
 
@@ -307,7 +375,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 
 			if len(params) != 1 {
-				debugPrintln(debugTodo, "TODO: Unhandled CSI mode params: ", params, b)
+				debugPrintln(debugTodo, "TODO: Unhandled CSI mode params: ", append([]int(nil), params...), b)
 				return false
 			}
 
@@ -320,8 +388,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 
 		case 'm': // Set color/mode
-			if len(params) == 0 {
-				params = []int{0}
+			if paramCount == 0 {
+				paramStore[0] = 0
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 
 			fc := t.screen().FrontColor()
@@ -410,14 +480,14 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				case 22, 23:
 					// save/restore window title/icon; no-op for now
 					if *debugCmd {
-						debugPrintf(debugCmd, "CSI t params: %v\n", params)
+						debugPrintf(debugCmd, "CSI t params: %v\n", append([]int(nil), params...))
 					}
 					return true
 				}
 			}
-			debugPrintln(debugTodo, "TODO: Window manipulation: ", params)
+			debugPrintln(debugTodo, "TODO: Window manipulation: ", append([]int(nil), params...))
 			if *debugCmd {
-				debugPrintf(debugCmd, "CSI t params: %v\n", params)
+				debugPrintf(debugCmd, "CSI t params: %v\n", append([]int(nil), params...))
 			}
 
 		case 'K': // Erase
@@ -447,7 +517,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					Y2: t.screen().CursorPos().Y + 1,
 				}, CRClear)
 			default:
-				debugPrintln(debugTodo, "TODO: Unhandled K params: ", params)
+				debugPrintln(debugTodo, "TODO: Unhandled K params: ", append([]int(nil), params...))
 				return false
 			}
 
@@ -479,43 +549,55 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				}, CRClear)
 				t.screen().setCursorPos(0, 0)
 			default:
-				debugPrintln(debugTodo, "TODO: Unhandled J params: ", params)
+				// debugPrintln(debugTodo, "TODO: Unhandled J params: ", params)
 				return false
 			}
 
 		case 'L': // Insert lines, scroll down
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().scroll(t.screen().CursorPos().Y, t.screen().BottomMargin(), params[0])
 
 		case 'M': // Delete lines, scroll up
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().scroll(t.screen().CursorPos().Y, t.screen().BottomMargin(), -params[0])
 
 		case 'S': // Scroll up
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().scroll(t.screen().TopMargin(), t.screen().BottomMargin(), -params[0])
 
 		case 'T': // Scroll down
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().scroll(t.screen().TopMargin(), t.screen().BottomMargin(), params[0])
 
 		case 'P': // Delete n characters
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().deleteChars(t.screen().CursorPos().X, t.screen().CursorPos().Y, params[0], CRClear)
 
 		case 'X': // Erase from cursor pos to the right
-			if len(params) == 0 {
-				params = []int{1}
+			if paramCount == 0 {
+				paramStore[0] = 1
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			t.screen().eraseRegion(Region{
 				X:  t.screen().CursorPos().X,
@@ -537,8 +619,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			t.screen().setScrollMarginTopBottom(top-1, bottom-1)
 
 		case 'n': // Device Status Report
-			if len(params) == 0 {
-				params = []int{0}
+			if paramCount == 0 {
+				paramStore[0] = 0
+				paramCount = 1
+				params = paramStore[:paramCount]
 			}
 			switch params[0] {
 			case 5:
@@ -546,9 +630,9 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			case 6:
 				row := t.screen().CursorPos().Y + 1
 				col := t.screen().CursorPos().X + 1
-				_, _ = t.Write([]byte(fmt.Sprintf("\033[%d;%dR", row, col)))
+				_, _ = fmt.Fprintf(t, "\033[%d;%dR", row, col)
 			default:
-				debugPrintln(debugTodo, "TODO: Unhandled DSR params: ", params)
+				debugPrintln(debugTodo, "TODO: Unhandled DSR params: ", append([]int(nil), params...))
 			}
 
 		case '%': // Select character set (ignored)
@@ -556,11 +640,11 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 		case '<': // SGR mouse or other private mode (ignored)
 			if *debugCmd {
-				debugPrintf(debugCmd, "CSI < params: %v\n", params)
+				debugPrintf(debugCmd, "CSI < params: %v\n", append([]int(nil), params...))
 			}
 
 		default:
-			debugPrintf(debugTodo, "TODO: Unhandled CSI Command: %v %#v\n", params, string(b))
+			debugPrintf(debugTodo, "TODO: Unhandled CSI Command: %v %#v\n", append([]int(nil), params...), string(b))
 			return true
 		}
 	} else if string(prefix) == "?" {
@@ -571,7 +655,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			return true
 		case 'm': // Private SGR (ignored)
 			if *debugCmd {
-				debugPrintf(debugCmd, "CSI ? m params: %v\n", params)
+				debugPrintf(debugCmd, "CSI ? m params: %v\n", append([]int(nil), params...))
 			}
 			return true
 		case 'h', 'l': // h == set, l == reset  for various modes
@@ -657,12 +741,12 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					t.setViewFlag(VFBracketedPaste, value)
 
 				default:
-					debugPrintf(debugTodo, "TODO: Unhandled flag: %#v %v, %v %#v\n", string(prefix), params, p, string(b))
+					debugPrintf(debugTodo, "TODO: Unhandled flag: %#v %v, %v %#v\n", string(prefix), append([]int(nil), params...), p, string(b))
 				}
 			}
 
 		default:
-			debugPrintf(debugTodo, "TODO: Unhandled ? command: %#v %v, %#v\n", string(prefix), params, string(b))
+			debugPrintf(debugTodo, "TODO: Unhandled ? command: %#v %v, %#v\n", string(prefix), append([]int(nil), params...), string(b))
 		}
 	} else if string(prefix) == ">" {
 		switch b {
@@ -687,7 +771,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				t.setViewInt(VIModifyOtherKeys, mode)
 			}
 			if *debugCmd {
-				debugPrintf(debugCmd, "CSI > m params: %v mode=%d\n", params, mode)
+				debugPrintf(debugCmd, "CSI > m params: %v mode=%d\n", append([]int(nil), params...), mode)
 			}
 
 		case 'u': // key encoding mode (ignored)
@@ -698,7 +782,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			t.pushKeyboardFlags(flags)
 
 		default:
-			debugPrintf(debugTodo, "TODO: Unhandled > command: %#v %v, %#v\n", string(prefix), params, string(b))
+			debugPrintf(debugTodo, "TODO: Unhandled > command: %#v %v, %#v\n", string(prefix), append([]int(nil), params...), string(b))
 			return true
 		}
 	} else if string(prefix) == "<" {
@@ -712,11 +796,11 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			return true
 		case 'M', 'm': // SGR mouse report (ignored)
 			if *debugCmd {
-				debugPrintf(debugCmd, "CSI < mouse params: %v %c\n", params, b)
+				debugPrintf(debugCmd, "CSI < mouse params: %v %c\n", append([]int(nil), params...), b)
 			}
 			return true
 		default:
-			debugPrintf(debugTodo, "TODO: Unhandled < command: %#v %v, %#v\n", string(prefix), params, string(b))
+			debugPrintf(debugTodo, "TODO: Unhandled < command: %#v %v, %#v\n", string(prefix), append([]int(nil), params...), string(b))
 			return true
 		}
 	} else if string(prefix) == "=" {
@@ -733,11 +817,11 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			t.updateKeyboardFlags(flags, mode)
 			return true
 		default:
-			debugPrintf(debugTodo, "TODO: Unhandled = command: %#v %v, %#v\n", string(prefix), params, string(b))
+			debugPrintf(debugTodo, "TODO: Unhandled = command: %#v %v, %#v\n", string(prefix), append([]int(nil), params...), string(b))
 			return true
 		}
 	} else {
-		debugPrintf(debugTodo, "TODO: Unhandled prefix: %#v %v, %#v\n", string(prefix), params, string(b))
+		debugPrintf(debugTodo, "TODO: Unhandled prefix: %#v %v, %#v\n", string(prefix), append([]int(nil), params...), string(b))
 		return true
 	}
 

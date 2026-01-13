@@ -19,19 +19,20 @@ const (
 )
 
 // GraphemeToken represents a grapheme cluster or a merge fragment.
+// Bytes is a copy of the input bytes to keep tokens safe across buffer refills.
 // When Merge is true, the token should be merged into the previous cell.
 type GraphemeToken struct {
-	Text  string
+	Bytes []byte
 	Width int
 	Merge bool
 }
 
 // GraphemeReader buffers bytes and emits grapheme tokens for printable runs.
 type GraphemeReader struct {
-	src   io.Reader
-	data  []byte
-	start int
-	end   int
+	src            io.Reader
+	data           []byte
+	start          int
+	end            int
 	state          int
 	forceMergeNext bool
 	lastWasRI      bool
@@ -70,10 +71,100 @@ func (r *GraphemeReader) Buffered() int {
 	return r.end - r.start
 }
 
+// ReadPrintableBytes reads a contiguous run of printable bytes from the stream.
+// It stops before control bytes and leaves them for ReadByte. maxWidth limits
+// the total cell width returned; pass <=0 for unlimited. merge is true when the
+// returned text should be merged into the previous cell.
+func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, error) {
+	if r.Buffered() == 0 {
+		err := r.fill()
+		if err != nil && r.Buffered() == 0 {
+			return "", 0, false, err
+		}
+	}
+	if r.Buffered() == 0 || !isPrintableByte(r.data[r.start]) {
+		return "", 0, false, nil
+	}
+
+	runStart := r.start
+	widthUsed := 0
+	mergeRun := false
+
+	for {
+		if r.start >= r.end {
+			if runStart == r.start {
+				err := r.fill()
+				if err != nil && r.Buffered() == 0 {
+					return "", 0, false, err
+				}
+				if r.Buffered() == 0 || !isPrintableByte(r.data[r.start]) {
+					return "", 0, false, nil
+				}
+				runStart = r.start
+				continue
+			}
+			break
+		}
+		if !isPrintableByte(r.data[r.start]) {
+			break
+		}
+
+		_, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok := r.nextTokenInfo(r.data[r.start:r.end])
+		if !ok {
+			if r.start == runStart {
+				before := r.Buffered()
+				err := r.fill()
+				if r.Buffered() == before {
+					if err != nil {
+						return "", 0, false, err
+					}
+					return "", 0, false, io.EOF
+				}
+				continue
+			}
+			break
+		}
+		if mergeRun && !merge {
+			break
+		}
+
+		tokenWidth := width
+		if merge {
+			tokenWidth = 0
+		}
+		if maxWidth > 0 && widthUsed+tokenWidth > maxWidth && widthUsed > 0 {
+			break
+		}
+
+		r.start += consumed
+		r.state = newState
+		r.forceMergeNext = nextForceMergeNext
+		r.lastWasRI = nextLastWasRI
+		widthUsed += tokenWidth
+		if merge && widthUsed == 0 {
+			mergeRun = true
+		}
+	}
+
+	if r.start == runStart {
+		return "", 0, false, nil
+	}
+	out := string(r.data[runStart:r.start])
+	return out, widthUsed, mergeRun, nil
+}
+
 // ReadPrintableTokens reads a contiguous run of printable bytes from the stream.
-// It stops before control bytes and leaves them for ReadByte.
-func (r *GraphemeReader) ReadPrintableTokens() ([]GraphemeToken, error) {
-	var out []GraphemeToken
+// It stops before control bytes and leaves them for ReadByte. maxWidth limits
+// the total cell width returned; pass <=0 for unlimited.
+func (r *GraphemeReader) ReadPrintableTokens(maxWidth int) ([]GraphemeToken, error) {
+	return r.ReadPrintableTokensInto(maxWidth, nil)
+}
+
+// ReadPrintableTokensInto is like ReadPrintableTokens but reuses dst when provided.
+// TODO: allow a token sink for direct screen writes without slice allocation.
+func (r *GraphemeReader) ReadPrintableTokensInto(maxWidth int, dst []GraphemeToken) ([]GraphemeToken, error) {
+	out := dst[:0]
+	widthUsed := 0
 	for {
 		if r.Buffered() == 0 {
 			if len(out) > 0 {
@@ -93,8 +184,7 @@ func (r *GraphemeReader) ReadPrintableTokens() ([]GraphemeToken, error) {
 			return out, nil
 		}
 
-		segment := r.data[r.start:r.end]
-		token, consumed, newState, ok := r.nextToken(segment)
+		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok := r.nextTokenInfo(r.data[r.start:r.end])
 		if !ok {
 			if len(out) > 0 {
 				return out, nil
@@ -110,9 +200,20 @@ func (r *GraphemeReader) ReadPrintableTokens() ([]GraphemeToken, error) {
 			continue
 		}
 
-		out = append(out, token)
+		tokenWidth := width
+		if merge && tokenWidth > 0 {
+			tokenWidth = 0
+		}
+		if maxWidth > 0 && widthUsed+tokenWidth > maxWidth && len(out) > 0 {
+			return out, nil
+		}
+		tokenBytes := append([]byte(nil), cluster...)
+		out = append(out, GraphemeToken{Bytes: tokenBytes, Width: width, Merge: merge})
+		widthUsed += tokenWidth
 		r.start += consumed
 		r.state = newState
+		r.forceMergeNext = nextForceMergeNext
+		r.lastWasRI = nextLastWasRI
 	}
 }
 
@@ -146,100 +247,149 @@ func isPrintableByte(b byte) bool {
 	return b >= 32 && b != 127
 }
 
-func (r *GraphemeReader) nextToken(buf []byte) (GraphemeToken, int, int, bool) {
-	if r.mode == TextReadModeGrapheme {
-		return nextGraphemeToken(buf, r.state, &r.forceMergeNext, &r.lastWasRI)
+func stepTextCluster(buf []byte, state int, mode TextReadMode) ([]byte, int, int, int, bool) {
+	if mode == TextReadModeGrapheme {
+		return stepGraphemeCluster(buf, state)
 	}
-	return nextRuneToken(buf, r.state)
+	return stepRuneCluster(buf, state)
 }
 
-func nextRuneToken(buf []byte, state int) (GraphemeToken, int, int, bool) {
+func stepRuneCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if !utf8.FullRune(buf) {
-		return GraphemeToken{}, 0, state, false
+		return nil, 0, 0, state, false
 	}
-	ru, size := utf8.DecodeRune(buf)
+	_, size := utf8.DecodeRune(buf)
 	if size == 0 {
-		return GraphemeToken{}, 0, state, false
+		return nil, 0, 0, state, false
 	}
-	return GraphemeToken{Text: string(ru), Width: 1, Merge: false}, size, state, true
+	return buf[:size], size, 1, state, true
 }
 
-func nextGraphemeToken(buf []byte, state int, forceMergeNext *bool, lastWasRI *bool) (GraphemeToken, int, int, bool) {
+func stepGraphemeCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if !utf8.FullRune(buf) {
-		return GraphemeToken{}, 0, state, false
+		return nil, 0, 0, state, false
 	}
 	cluster, rest, boundaries, newState := uniseg.Step(buf, state)
 	if cluster == nil {
-		return GraphemeToken{}, 0, state, false
+		return nil, 0, 0, state, false
 	}
-
-	text := string(cluster)
 	width := boundaries >> uniseg.ShiftWidth
-	merge := false
+	consumed := len(buf) - len(rest)
+	return cluster, consumed, width, newState, true
+}
 
-	if *forceMergeNext {
+func (r *GraphemeReader) nextTokenInfo(buf []byte) ([]byte, int, int, bool, int, bool, bool, bool) {
+	if r.mode == TextReadModeGrapheme {
+		return nextGraphemeTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI)
+	}
+	return nextRuneTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI)
+}
+
+func nextRuneTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool) ([]byte, int, int, bool, int, bool, bool, bool) {
+	cluster, consumed, width, newState, ok := stepRuneCluster(buf, state)
+	if !ok {
+		return nil, 0, 0, false, state, forceMergeNext, lastWasRI, false
+	}
+	return cluster, consumed, width, false, newState, forceMergeNext, lastWasRI, true
+}
+
+func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool) ([]byte, int, int, bool, int, bool, bool, bool) {
+	cluster, consumed, width, newState, ok := stepGraphemeCluster(buf, state)
+	if !ok {
+		return nil, 0, 0, false, state, forceMergeNext, lastWasRI, false
+	}
+	merge := false
+	nextForceMergeNext := forceMergeNext
+	nextLastWasRI := lastWasRI
+
+	if nextForceMergeNext {
 		merge = true
-		*forceMergeNext = false
+		nextForceMergeNext = false
 	}
 
 	switch {
-	case isCombiningOnly(text):
+	case isCombiningOnly(cluster):
 		merge = true
-	case isZWJOnly(text):
+	case isZWJOnly(cluster):
 		merge = true
-		*forceMergeNext = true
-	case isVariationSelectorOnly(text):
+		nextForceMergeNext = true
+	case isVariationSelectorOnly(cluster):
 		merge = true
-	case isRegionalIndicator(text):
-		if *lastWasRI {
+	case isRegionalIndicator(cluster):
+		if nextLastWasRI {
 			merge = true
-			*lastWasRI = false
+			nextLastWasRI = false
 		} else {
-			*lastWasRI = true
+			nextLastWasRI = true
 		}
 	default:
-		*lastWasRI = false
+		nextLastWasRI = false
 	}
 
-	consumed := len(buf) - len(rest)
-	return GraphemeToken{Text: text, Width: width, Merge: merge}, consumed, newState, true
+	if merge {
+		width = 0
+	}
+	return cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, true
 }
 
-func isCombiningOnly(s string) bool {
-	for _, r := range s {
+func isCombiningOnly(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
+		if r == utf8.RuneError && size == 1 {
+			return false
+		}
 		if !unicode.Is(unicode.Mn, r) && !unicode.Is(unicode.Me, r) {
 			return false
 		}
+		b = b[size:]
 	}
-	return s != ""
+	return true
 }
 
-func isZWJOnly(s string) bool {
-	for _, r := range s {
+func isZWJOnly(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
 		if r != '\u200d' {
 			return false
 		}
+		b = b[size:]
 	}
-	return s != ""
+	return true
 }
 
-func isVariationSelectorOnly(s string) bool {
-	for _, r := range s {
+func isVariationSelectorOnly(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
 		switch {
 		case r >= 0xfe00 && r <= 0xfe0f:
 		case r >= 0xe0100 && r <= 0xe01ef:
 		default:
 			return false
 		}
+		b = b[size:]
 	}
-	return s != ""
+	return true
 }
 
-func isRegionalIndicator(s string) bool {
-	for _, r := range s {
+func isRegionalIndicator(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
 		if r < 0x1f1e6 || r > 0x1f1ff {
 			return false
 		}
+		b = b[size:]
 	}
-	return s != ""
+	return true
 }

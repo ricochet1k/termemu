@@ -42,6 +42,7 @@ type terminal struct {
 	viewStrings []string
 
 	readLoopStarted bool
+	readLoopDone    chan struct{}
 	textReadMode    TextReadMode
 
 	keyboardMain keyboardMode
@@ -148,7 +149,13 @@ func (t *terminal) startReadLoop() {
 		return
 	}
 	t.readLoopStarted = true
-	go t.ptyReadLoop()
+	if t.readLoopDone == nil {
+		t.readLoopDone = make(chan struct{})
+	}
+	go func() {
+		defer close(t.readLoopDone)
+		t.ptyReadLoop()
+	}()
 }
 
 func (t *terminal) Line(y int) []rune {

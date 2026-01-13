@@ -94,8 +94,9 @@ func (s *gridScreen) StyledLine(x, w, y int) *Line {
 	text := s.getLine(y)
 	fgs := s.frontColors[y]
 	bgs := s.backColors[y]
+	cellText := s.cellText[y]
 
-	var spans []StyledSpan
+	var spans []Span
 
 	if w < 0 || x+w > len(fgs) {
 		w = len(fgs) - x
@@ -104,19 +105,54 @@ func (s *gridScreen) StyledLine(x, w, y int) *Line {
 	for i := x; i < x+w; {
 		fg := fgs[i]
 		bg := bgs[i]
-		width := uint32(1)
-		i++
+		width := 0
+		start := i
 
+		// Find run of identical colors
 		for i < x+w && fg == fgs[i] && bg == bgs[i] {
-			i++
 			width++
+			i++
 		}
-		spans = append(spans, StyledSpan{fg, bg, width})
+
+		// For this run, check if we can represent it as a single repeat or simple text
+		// We have text[start:start+width] and cellText[start:start+width]
+
+		// Optimization: check if all runes are same and simple (width 1)
+		firstRune := text[start]
+		isRepeat := true
+		for k := 0; k < width; k++ {
+			idx := start + k
+			if text[idx] != firstRune || s.cellWidth[y][idx] != 1 || s.cellCont[y][idx] {
+				isRepeat = false
+				break
+			}
+		}
+
+		if isRepeat {
+			spans = append(spans, Span{FG: fg, BG: bg, Rune: firstRune, Width: width})
+		} else {
+			// Construct text for span
+			var sb strings.Builder
+			spanWidth := 0
+			for k := 0; k < width; k++ {
+				idx := start + k
+				if s.cellCont[y][idx] {
+					// continuation cell, don't add text, it's part of previous
+					spanWidth++ // visual width increases
+					continue
+				}
+				// It's a start of a char
+				// If visual width is > 1, next cells will be cont.
+				sb.WriteString(cellText[idx])
+				spanWidth++
+			}
+
+			spans = append(spans, Span{FG: fg, BG: bg, Text: sb.String(), Width: spanWidth})
+		}
 	}
 	return &Line{
 		Spans: spans,
-		Text:  append([]rune(nil), text[x:x+w]...), // copy
-		Width: uint32(w),
+		Width: w,
 	}
 }
 
@@ -302,10 +338,16 @@ func (s *gridScreen) writeRunes(b []rune) {
 
 func (s *gridScreen) writeTokens(tokens []GraphemeToken) {
 	for _, tok := range tokens {
-		if tok.Text == "" {
+		text := string(tok.Bytes)
+		if len(text) == 0 {
 			continue
 		}
-		if r, size := utf8.DecodeRuneInString(tok.Text); size == len(tok.Text) && !tok.Merge {
+		if tok.Merge {
+			s.mergeIntoPreviousCell(text)
+			continue
+		}
+		if utf8.RuneCountInString(text) == 1 {
+			r, _ := utf8.DecodeRuneInString(text)
 			width := tok.Width
 			if width < 1 {
 				width = 1
@@ -324,7 +366,12 @@ func (s *gridScreen) writeTokens(tokens []GraphemeToken) {
 			s.moveCursor(width, 0, true, true)
 			continue
 		}
-		for _, r := range tok.Text {
+		for len(text) > 0 {
+			r, size := utf8.DecodeRuneInString(text)
+			if size == 0 || r == utf8.RuneError && size == 1 {
+				break
+			}
+			text = text[size:]
 			width := runeCellWidth(r)
 			if width > s.size.X {
 				width = s.size.X
@@ -340,6 +387,18 @@ func (s *gridScreen) writeTokens(tokens []GraphemeToken) {
 			s.moveCursor(width, 0, true, true)
 		}
 	}
+}
+
+func (s *gridScreen) mergeIntoPreviousCell(text string) {
+	if len(text) == 0 || s.cursorPos.X <= 0 {
+		return
+	}
+	y := s.cursorPos.Y
+	x := s.cursorPos.X - 1
+	for x > 0 && s.cellCont[y][x] {
+		x--
+	}
+	s.cellText[y][x] += text
 }
 
 // This is like writeRunes, but it moves existing runes to the right
