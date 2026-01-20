@@ -332,10 +332,11 @@ func (t *terminal) switchScreen() {
 	t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRScreenSwitch)
 }
 
-// testHandleCommand is only for testing
-func (t *terminal) testHandleCommand(te *testing.T, cmd string) {
+// testHandleCommand is only for testing.
+func (t *terminal) testHandleCommand(te *testing.T, cmd string) error {
 	te.Helper()
 	if !t.handleCommand(bufio.NewReader(strings.NewReader(cmd))) {
-		te.Fatalf("handleCommand %q failed", cmd)
+		return fmt.Errorf("handleCommand %q failed", cmd)
 	}
+	return nil
 }

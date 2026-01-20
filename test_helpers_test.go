@@ -5,7 +5,17 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"testing"
 )
+
+// mustHandleCommand is a test helper that calls testHandleCommand and fails on error.
+// Use this for synchronous calls. For goroutine calls, use testHandleCommand directly.
+func (t *terminal) mustHandleCommand(te *testing.T, cmd string) {
+	te.Helper()
+	if err := t.testHandleCommand(te, cmd); err != nil {
+		te.Fatal(err)
+	}
+}
 
 // MockFrontend implements Frontend for tests and records calls.
 type MockFrontend struct {

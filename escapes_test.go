@@ -10,37 +10,37 @@ func TestHandleCmdCSI_CursorMovement(t *testing.T) {
 
 	t1.screen().setCursorPos(5, 5)
 
-	t1.testHandleCommand(t, "[A")
+	t1.mustHandleCommand(t, "[A")
 	if pos := t1.screen().CursorPos(); pos.X != 5 || pos.Y != 4 {
 		t.Fatalf("expected cursor (5,4), got (%d,%d)", pos.X, pos.Y)
 	}
 
-	t1.testHandleCommand(t, "[2B")
+	t1.mustHandleCommand(t, "[2B")
 	if pos := t1.screen().CursorPos(); pos.X != 5 || pos.Y != 6 {
 		t.Fatalf("expected cursor (5,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
-	t1.testHandleCommand(t, "[3C")
+	t1.mustHandleCommand(t, "[3C")
 	if pos := t1.screen().CursorPos(); pos.X != 8 || pos.Y != 6 {
 		t.Fatalf("expected cursor (8,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
-	t1.testHandleCommand(t, "[4D")
+	t1.mustHandleCommand(t, "[4D")
 	if pos := t1.screen().CursorPos(); pos.X != 4 || pos.Y != 6 {
 		t.Fatalf("expected cursor (4,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
-	t1.testHandleCommand(t, "[10G")
+	t1.mustHandleCommand(t, "[10G")
 	if pos := t1.screen().CursorPos(); pos.X != 9 || pos.Y != 6 {
 		t.Fatalf("expected cursor (9,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
-	t1.testHandleCommand(t, "[7;12H")
+	t1.mustHandleCommand(t, "[7;12H")
 	if pos := t1.screen().CursorPos(); pos.X != 11 || pos.Y != 6 {
 		t.Fatalf("expected cursor (11,6), got (%d,%d)", pos.X, pos.Y)
 	}
 
-	t1.testHandleCommand(t, "[9;2f")
+	t1.mustHandleCommand(t, "[9;2f")
 	if pos := t1.screen().CursorPos(); pos.X != 1 || pos.Y != 8 {
 		t.Fatalf("expected cursor (1,8), got (%d,%d)", pos.X, pos.Y)
 	}
@@ -51,7 +51,7 @@ func TestHandleCmdCSI_SetColors(t *testing.T) {
 	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
 	// send ESC [1;31;42m  (bold, fg=red, bg=green)
-	t1.testHandleCommand(t, "[1;31;42m")
+	t1.mustHandleCommand(t, "[1;31;42m")
 	if len(mf.Styles) == 0 {
 		t.Fatalf("StyleChanged not called")
 	}
@@ -73,9 +73,9 @@ func TestHandleCmdCSI_DefaultColors(t *testing.T) {
 	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
 	// Set non-default colors first.
-	t1.testHandleCommand(t, "[31;42m")
+	t1.mustHandleCommand(t, "[31;42m")
 	// Reset all attributes/colors.
-	t1.testHandleCommand(t, "[0m")
+	t1.mustHandleCommand(t, "[0m")
 	last := mf.Styles[len(mf.Styles)-1]
 	fgColor, _, _ := last.GetColor(ComponentFG)
 	if fgColor != 0 {
@@ -87,14 +87,14 @@ func TestHandleCmdCSI_DefaultColors(t *testing.T) {
 	}
 
 	// Explicit default foreground/background.
-	t1.testHandleCommand(t, "[39m")
+	t1.mustHandleCommand(t, "[39m")
 	last = mf.Styles[len(mf.Styles)-1]
 	fgColor, _, _ = last.GetColor(ComponentFG)
 	if fgColor != 0 {
 		t.Fatalf("expected FG default after 39m, got %d", fgColor)
 	}
 
-	t1.testHandleCommand(t, "[49m")
+	t1.mustHandleCommand(t, "[49m")
 	last = mf.Styles[len(mf.Styles)-1]
 	bgColor, _, _ = last.GetColor(ComponentBG)
 	if bgColor != 0 {
@@ -106,12 +106,12 @@ func TestHandleCmdCSI_SetModesAndFlags(t *testing.T) {
 	// test ?25l and ?25h toggles show-cursor flag
 	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-	t1.testHandleCommand(t, "[?25l")
+	t1.mustHandleCommand(t, "[?25l")
 	if v := mf.ViewFlags[VFShowCursor]; v != false {
 		t.Fatalf("expected VFShowCursor false after ?25l, got %v", v)
 	}
 
-	t1.testHandleCommand(t, "[?25h")
+	t1.mustHandleCommand(t, "[?25h")
 	if v := mf.ViewFlags[VFShowCursor]; v != true {
 		t.Fatalf("expected VFShowCursor true after ?25h, got %v", v)
 	}
@@ -120,12 +120,12 @@ func TestHandleCmdCSI_SetModesAndFlags(t *testing.T) {
 func TestHandleCmdCSI_ModifyOtherKeys(t *testing.T) {
 	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-	t1.testHandleCommand(t, "[>4;2m")
+	t1.mustHandleCommand(t, "[>4;2m")
 	if v := mf.ViewInts[VIModifyOtherKeys]; v != 2 {
 		t.Fatalf("expected modifyOtherKeys 2, got %v", v)
 	}
 
-	t1.testHandleCommand(t, "[>4;0m")
+	t1.mustHandleCommand(t, "[>4;0m")
 	if v := mf.ViewInts[VIModifyOtherKeys]; v != 0 {
 		t.Fatalf("expected modifyOtherKeys 0, got %v", v)
 	}
@@ -135,7 +135,7 @@ func TestHandleCmdOSC_WindowTitleAndStrings(t *testing.T) {
 	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
 	// OSC sequence: ]0;title BEL
-	t1.testHandleCommand(t, "]0;mytitle")
+	t1.mustHandleCommand(t, "]0;mytitle")
 	if mf.ViewStrings[VSWindowTitle] != "mytitle" {
 		t.Fatalf("expected window title 'mytitle', got %q", mf.ViewStrings[VSWindowTitle])
 	}
@@ -188,7 +188,7 @@ func TestHandleCmdCSI_DeviceAttrsAndAlternateScreen(t *testing.T) {
 	// Test alternate screen switch ?1049h
 	// Reset regions
 	mf.Regions = nil
-	t1.testHandleCommand(t, "[?1049h")
+	t1.mustHandleCommand(t, "[?1049h")
 	found := false
 	for _, reg := range mf.Regions {
 		if reg.C == CRScreenSwitch {
@@ -275,7 +275,7 @@ func TestHandleCmdCSI_NewSGRModes(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
 			// Send the SGR sequence
-			t1.testHandleCommand(t, tt.sgr)
+			t1.mustHandleCommand(t, tt.sgr)
 			if len(mf.Styles) == 0 {
 				t.Fatalf("StyleChanged not called for SGR %s", tt.sgr)
 			}
@@ -319,7 +319,7 @@ func TestCSI_PrivateModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			if tt.checkFlag != nil {
 				if got := mf.ViewFlags[*tt.checkFlag]; got != tt.wantFlag {
@@ -359,7 +359,7 @@ func TestCSI_MouseModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			if got := mf.ViewInts[VIMouseMode]; got != tt.wantMode {
 				t.Errorf("ViewInts[VIMouseMode] = %v, want %v", got, tt.wantMode)
@@ -389,7 +389,7 @@ func TestCSI_MouseEncoding(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			if got := mf.ViewInts[VIMouseEncoding]; got != tt.wantEncoding {
 				t.Errorf("ViewInts[VIMouseEncoding] = %v, want %v", got, tt.wantEncoding)
@@ -476,7 +476,7 @@ func TestCSI_SaveRestoreCursor(t *testing.T) {
 	}
 
 	// Save cursor position
-	t1.testHandleCommand(t, "[s")
+	t1.mustHandleCommand(t, "[s")
 
 	// Move cursor to (0, 0)
 	t1.screen().setCursorPos(0, 0)
@@ -486,7 +486,7 @@ func TestCSI_SaveRestoreCursor(t *testing.T) {
 	}
 
 	// Restore cursor position
-	t1.testHandleCommand(t, "[u")
+	t1.mustHandleCommand(t, "[u")
 
 	// Verify back at (10, 5)
 	pos = t1.screen().CursorPos()
@@ -556,7 +556,7 @@ func TestCSI_SGR_BasicModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-			t1.testHandleCommand(t, tt.sgr)
+			t1.mustHandleCommand(t, tt.sgr)
 			if len(mf.Styles) == 0 {
 				t.Fatalf("StyleChanged not called for SGR %s", tt.sgr)
 			}
@@ -624,7 +624,7 @@ func TestCSI_SGR_ResetModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-			t1.testHandleCommand(t, tt.setSGR)
+			t1.mustHandleCommand(t, tt.setSGR)
 			if len(mf.Styles) == 0 {
 				t.Fatalf("StyleChanged not called for set SGR %s", tt.setSGR)
 			}
@@ -633,7 +633,7 @@ func TestCSI_SGR_ResetModes(t *testing.T) {
 				t.Fatalf("mode not set after %s", tt.setSGR)
 			}
 
-			t1.testHandleCommand(t, tt.resetSGR)
+			t1.mustHandleCommand(t, tt.resetSGR)
 			last = mf.Styles[len(mf.Styles)-1]
 			if last.TestMode(tt.setMode) {
 				t.Errorf("mode still set after reset %s", tt.resetSGR)
@@ -684,7 +684,7 @@ func TestCSI_SGR_ExtendedColors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-			t1.testHandleCommand(t, tt.sgr)
+			t1.mustHandleCommand(t, tt.sgr)
 			if len(mf.Styles) == 0 {
 				t.Fatalf("StyleChanged not called for SGR %s", tt.sgr)
 			}
@@ -734,7 +734,7 @@ func TestCSI_SGR_BrightColors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
-			t1.testHandleCommand(t, tt.sgr)
+			t1.mustHandleCommand(t, tt.sgr)
 			if len(mf.Styles) == 0 {
 				t.Fatalf("StyleChanged not called for SGR %s", tt.sgr)
 			}
@@ -805,12 +805,12 @@ func TestCSI_KeyboardModes(t *testing.T) {
 			r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 
 			if tt.setupSeq != "" {
-				t1.testHandleCommand(t, tt.setupSeq)
+				t1.mustHandleCommand(t, tt.setupSeq)
 			}
 
 			// For pop test, we need to push first
 			if tt.sequence == "[<u" {
-				t1.testHandleCommand(t, "[>5u") // push 5
+				t1.mustHandleCommand(t, "[>5u") // push 5
 			}
 
 			if tt.query {
@@ -822,7 +822,7 @@ func TestCSI_KeyboardModes(t *testing.T) {
 					t.Fatalf("expected query response to contain escape sequence, got %q", got)
 				}
 			} else {
-				t1.testHandleCommand(t, tt.sequence)
+				t1.mustHandleCommand(t, tt.sequence)
 				if t1.keyboardFlags() != tt.expectedFlags {
 					t.Fatalf("expected keyboard flags %d, got %d", tt.expectedFlags, t1.keyboardFlags())
 				}
@@ -853,7 +853,7 @@ func TestCSI_WindowManipulation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
-			t1.testHandleCommand(t, tt.sequence)
+			t1.mustHandleCommand(t, tt.sequence)
 		})
 	}
 }
@@ -880,7 +880,7 @@ func TestCSI_IgnoredCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
-			t1.testHandleCommand(t, tt.sequence)
+			t1.mustHandleCommand(t, tt.sequence)
 		})
 	}
 }
@@ -911,7 +911,7 @@ func TestCSI_ParamParsing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
-			t1.testHandleCommand(t, tt.sequence)
+			t1.mustHandleCommand(t, tt.sequence)
 		})
 	}
 }
@@ -946,7 +946,7 @@ func TestCSI_UnknownCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
-			t1.testHandleCommand(t, tt.sequence)
+			t1.mustHandleCommand(t, tt.sequence)
 		})
 	}
 }
@@ -977,7 +977,7 @@ func TestCSI_ModifyOtherKeysExtended(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
-			t1.testHandleCommand(t, tt.sequence)
+			t1.mustHandleCommand(t, tt.sequence)
 			if v := mf.ViewInts[VIModifyOtherKeys]; v != tt.expectedMode {
 				t.Fatalf("expected VIModifyOtherKeys %d, got %d", tt.expectedMode, v)
 			}
@@ -1025,7 +1025,7 @@ func TestCSI_CursorCommands(t *testing.T) {
 			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 			t1.screen().setCursorPos(tt.startX, tt.startY)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			pos := t1.screen().CursorPos()
 			if pos.X != tt.wantX || pos.Y != tt.wantY {
@@ -1057,7 +1057,7 @@ func TestCSI_EraseInLine(t *testing.T) {
 			mf.Regions = nil // clear initial regions
 			t1.screen().setCursorPos(tt.cursorX, tt.cursorY)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			found := false
 			for _, reg := range mf.Regions {
@@ -1097,7 +1097,7 @@ func TestCSI_EraseDisplay(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 			t1.screen().setCursorPos(tt.cursorX, tt.cursorY)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			found := false
 			for _, reg := range mf.Regions {
@@ -1144,7 +1144,7 @@ func TestCSI_ScrollCommands(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 			t1.screen().setCursorPos(5, 5)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			found := false
 			for _, reg := range mf.Regions {
@@ -1178,7 +1178,7 @@ func TestCSI_DeleteEraseChars(t *testing.T) {
 			_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 			t1.screen().setCursorPos(5, 5)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			found := false
 			for _, reg := range mf.Regions {
@@ -1212,7 +1212,7 @@ func TestCSI_ScrollMargins(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 
-			t1.testHandleCommand(t, tt.seq)
+			t1.mustHandleCommand(t, tt.seq)
 
 			if got := t1.screen().TopMargin(); got != tt.wantTop {
 				t.Errorf("TopMargin() = %d, want %d", got, tt.wantTop)
