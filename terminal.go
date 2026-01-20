@@ -63,6 +63,16 @@ func NewWithBackend(f Frontend, backend Backend) Terminal {
 
 // NewWithMode makes a new terminal using the provided Frontend, Backend, and text read mode.
 func NewWithMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
+	t := newTerminal(f, backend, mode)
+	if t != nil {
+		t.startReadLoop()
+	}
+	return t
+}
+
+// newTerminal creates a terminal without starting the read loop.
+// Used internally and by tests that feed data synchronously.
+func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 	if f == nil {
 		f = &EmptyFrontend{}
 	}
@@ -70,7 +80,7 @@ func NewWithMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
 		return nil
 	}
 
-	t := &terminal{
+	return &terminal{
 		frontend:     f,
 		mainScreen:   newScreen(f),
 		altScreen:    newScreen(f),
@@ -80,8 +90,6 @@ func NewWithMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
 		viewStrings:  make([]string, viewStringCount),
 		textReadMode: mode,
 	}
-	t.startReadLoop()
-	return t
 }
 
 func (t *terminal) SetFrontend(f Frontend) {
@@ -326,6 +334,7 @@ func (t *terminal) switchScreen() {
 
 // testHandleCommand is only for testing
 func (t *terminal) testHandleCommand(te *testing.T, cmd string) {
+	te.Helper()
 	if !t.handleCommand(bufio.NewReader(strings.NewReader(cmd))) {
 		te.Fatalf("handleCommand %q failed", cmd)
 	}

@@ -77,6 +77,13 @@ func (m *MockFrontend) ViewFlagChanged(vs ViewFlag, value bool) {
 	m.ViewFlags[vs] = value
 }
 
+// RegionCount returns the number of recorded region changes (thread-safe).
+func (m *MockFrontend) RegionCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.Regions)
+}
+
 func (m *MockFrontend) ViewIntChanged(vs ViewInt, value int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -97,6 +104,8 @@ func MakeScreenWithMock() (screen, *MockFrontend) {
 }
 
 // MakeTerminalWithMock constructs a terminal without opening a pty for tests.
+// The terminal does NOT start a read loop; tests use testFeedTerminalInputFromBackend
+// to feed data synchronously, avoiding data races.
 func MakeTerminalWithMock(mode TextReadMode) (io.ReadCloser, *terminal, *MockFrontend) {
 	mf := NewMockFrontend()
 	// Create two pipes: one for input TO terminal, one for output FROM terminal
@@ -105,11 +114,12 @@ func MakeTerminalWithMock(mode TextReadMode) (io.ReadCloser, *terminal, *MockFro
 
 	// Backend reads from terminalInput_r (for ptyReadLoop to consume program output)
 	// Backend writes to terminalOutput_w (for SendMouseRaw/SendKey to write user input)
-	t := NewWithMode(mf, NewNoPTYBackend(bytes.NewReader(nil), terminalOutput_w), mode)
+	// Use newTerminal (no read loop) since tests feed data synchronously
+	t := newTerminal(mf, NewNoPTYBackend(bytes.NewReader(nil), terminalOutput_w), mode)
 
 	// Return terminalOutput_r (where test reads terminal output like mouse events)
 	// and terminalInput_w (where test writes program output to terminal)
-	return terminalOutput_r, t.(*terminal), mf
+	return terminalOutput_r, t, mf
 }
 
 func (t *terminal) testFeedTerminalInputFromBackend(data []byte, mode TextReadMode) error {

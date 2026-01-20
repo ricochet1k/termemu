@@ -35,7 +35,7 @@ func TestIntegration_RunPrintf(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	mf := tln.frontend.(*MockFrontend)
-	if len(mf.Regions) == 0 {
+	if mf.RegionCount() == 0 {
 		t.Fatalf("expected frontend RegionChanged calls, got none")
 	}
 }

@@ -69,7 +69,13 @@ const (
 	CRRedraw
 )
 
-// Frontend is a type that can display data from a Terminal
+// Frontend is a type that can display data from a Terminal.
+//
+// All Frontend methods are called with the terminal lock held.
+// Implementations may safely call terminal read methods (Line, ANSILine,
+// StyledLine, StyledLines) without acquiring additional locks.
+// Implementations must not call terminal write methods or attempt to
+// acquire the terminal lock, as this would cause deadlock.
 type Frontend interface {
 	Bell()
 	RegionChanged(Region, ChangeReason)
