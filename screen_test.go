@@ -218,8 +218,7 @@ func TestRawWriteRunes_RegionChanged(t *testing.T) {
 	})
 }
 
-func TestClearWideOverlaps_WriteOverWideChar(t *testing.T) {
-	// This test specifically tests the span screen's clearWideOverlaps behavior
+func TestWriteOverWideChar(t *testing.T) {
 	s := newSpanScreen(&EmptyFrontend{})
 	s.setSize(8, 2)
 
@@ -233,7 +232,6 @@ func TestClearWideOverlaps_WriteOverWideChar(t *testing.T) {
 	}
 
 	// Now write a narrow char at position 1 (overlaps the first half of emoji)
-	// This should trigger clearWideOverlaps
 	writeTextAt(s, 1, 0, "A")
 
 	// Check that the emoji was cleared and 'A' was written
