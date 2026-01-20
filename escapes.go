@@ -8,136 +8,158 @@ import (
 	"strconv"
 )
 
+// colorModes maps SGR codes 1-7 to their Mode values
+var colorModes = [7]Mode{
+	ModeBold,      // SGR 1
+	ModeDim,       // SGR 2
+	ModeItalic,    // SGR 3
+	ModeUnderline, // SGR 4
+	ModeBlink,     // SGR 5
+	ModeReverse,   // SGR 7 (skipping 6 which is RapidBlink in BG)
+	ModeInvisible, // SGR 8
+}
+
 func (t *terminal) ptyReadLoop() {
 	reader := bufio.NewReader(t.backend)
 	gr := NewGraphemeReaderWithMode(reader, t.textReadMode)
+
+	for {
+		if err := t.ptyReadOne(gr); err != nil {
+			return
+		}
+	}
+}
+
+func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 	bw, useBytes := t.screen().(interface {
 		writeString(string, int, bool, TextReadMode)
 	})
-
-	for {
-		if useBytes {
-			maxWidth := 0
-			if t.screen().AutoWrap() {
-				maxWidth = t.screen().Size().X - t.screen().CursorPos().X
-				if maxWidth < 1 {
-					maxWidth = 1
-				}
-			}
-			data, width, merge, err := gr.ReadPrintableBytes(maxWidth)
-			if err != nil {
-				if err != io.EOF {
-					debugPrintln(debugErrors, "ERR ReadPrintableBytes:", err)
-				}
-				return
-			}
-			if len(data) > 0 {
-				t.WithLock(func() {
-					bw.writeString(data, width, merge, t.textReadMode)
-				})
-				if *debugTxt {
-					debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", data, len(data))
-				}
-				continue
-			}
-		} else {
-			tokens, err := gr.ReadPrintableTokens(0)
-			if err != nil {
-				if err != io.EOF {
-					debugPrintln(debugErrors, "ERR ReadPrintableTokens:", err)
-				}
-				return
-			}
-			if len(tokens) > 0 {
-				t.WithLock(func() {
-					t.screen().writeTokens(tokens)
-				})
-				if *debugTxt {
-					var buf bytes.Buffer
-					for _, tok := range tokens {
-						buf.Write(tok.Bytes)
-					}
-					debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", buf.String(), buf.Len())
-				}
-				continue
+	if useBytes {
+		maxWidth := 0
+		if t.screen().AutoWrap() {
+			maxWidth = t.screen().Size().X - t.screen().CursorPos().X
+			if maxWidth < 1 {
+				maxWidth = 1
 			}
 		}
-
-		b, err := gr.ReadByte()
+		data, width, merge, err := gr.ReadPrintableBytes(maxWidth)
 		if err != nil {
 			if err != io.EOF {
-				debugPrintln(debugErrors, "ERR ReadByte:", err)
+				debugPrintln(debugErrors, "ERR ReadPrintableBytes:", err)
 			}
-			return
+			return err
 		}
-
-		// ABCDEFGHIJKLMNOPQRSTUVWXYZ
-
-		switch b {
-		case 0: // NUL Null byte, ignore
-
-		case 5: // ENQ ^E Return Terminal Status
-			debugPrintln(debugTodo, "TODO: ENQ")
-		case 7: // BEL ^G Bell
+		if len(data) > 0 {
 			t.WithLock(func() {
-				t.frontend.Bell()
+				bw.writeString(data, width, merge, t.textReadMode)
 			})
-
-		case 8: // BS ^H Backspace
+			if *debugTxt {
+				debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", data, len(data))
+			}
+			return nil
+		}
+	} else {
+		tokens, err := gr.ReadPrintableTokens(0)
+		if err != nil {
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadPrintableTokens:", err)
+			}
+			return err
+		}
+		if len(tokens) > 0 {
 			t.WithLock(func() {
-				t.screen().moveCursor(-1, 0, false, false)
+				t.screen().writeTokens(tokens)
 			})
-
-		case 9: // HT ^I Horizontal TAB
-			debugPrintln(debugTodo, "TODO: tab")
-
-		case 10: // LF ^J Linefeed (newline)
-			t.WithLock(func() {
-				t.screen().moveCursor(0, 1, true, true)
-			})
-
-		case 11: // VT ^K Vertical TAB
-			debugPrintln(debugTodo, "TODO: vtab")
-
-		case 12: // FF ^L Formfeed (also: New page NP)
-			t.WithLock(func() {
-				t.screen().moveCursor(0, 1, false, true)
-			})
-
-		case 13: // CR ^M Carriage Return
-			t.WithLock(func() {
-				t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
-			})
-
-		case 27: // ESC ^[ Escape Character
-
-			t.WithLock(func() {
-				if *debugCmd || *debugTodo {
-					var cmdBytes bytes.Buffer
-					cmdReader := &captureReader{r: gr, buf: &cmdBytes}
-					success := t.handleCommand(cmdReader)
-					cmd := cmdBytes.Bytes()
-
-					if success {
-						debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
-					} else {
-						debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
-					}
-				} else {
-					_ = t.handleCommand(gr)
+			if *debugTxt {
+				var buf bytes.Buffer
+				for _, tok := range tokens {
+					buf.Write(tok.Bytes)
 				}
-			})
-			continue
-
-		case 127: // DEL  Delete Character (treat as backspace)
-			t.WithLock(func() {
-				t.screen().moveCursor(-1, 0, false, false)
-			})
-		default:
-			debugPrintf(debugTodo, "TODO: unhandled char %v %#v\n", b, string(b))
-			continue
+				debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", buf.String(), buf.Len())
+			}
+			return nil
 		}
 	}
+
+	b, err := gr.ReadByte()
+	if err != nil {
+		if err != io.EOF {
+			debugPrintln(debugErrors, "ERR ReadByte:", err)
+		}
+		return err
+	}
+
+	// ABCDEFGHIJKLMNOPQRSTUVWXYZ
+
+	switch b {
+	case 0: // NUL Null byte, ignore
+
+	case 5: // ENQ ^E Return Terminal Status
+		debugPrintln(debugTodo, "TODO: ENQ")
+	case 7: // BEL ^G Bell
+		t.WithLock(func() {
+			t.frontend.Bell()
+		})
+
+	case 8: // BS ^H Backspace
+		t.WithLock(func() {
+			t.screen().moveCursor(-1, 0, false, false)
+		})
+
+	case 9: // HT ^I Horizontal TAB
+		t.WithLock(func() {
+			cursorPos := t.screen().CursorPos()
+			cursorPos.X = ((cursorPos.X >> 3) + 1) << 3
+			t.screen().setCursorPos(cursorPos.X, cursorPos.Y)
+		})
+
+	case 10: // LF ^J Linefeed (newline)
+		t.WithLock(func() {
+			cursorPos := t.screen().CursorPos()
+			t.screen().setCursorPos(0, cursorPos.Y)
+			t.screen().moveCursor(0, 1, true, true)
+		})
+
+	case 11: // VT ^K Vertical TAB
+		debugPrintln(debugTodo, "TODO: vtab")
+
+	case 12: // FF ^L Formfeed (also: New page NP)
+		t.WithLock(func() {
+			t.screen().moveCursor(0, 1, false, true)
+		})
+
+	case 13: // CR ^M Carriage Return
+		t.WithLock(func() {
+			t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
+		})
+
+	case 27: // ESC ^[ Escape Character
+
+		t.WithLock(func() {
+			if *debugCmd || *debugTodo {
+				var cmdBytes bytes.Buffer
+				cmdReader := &captureReader{r: gr, buf: &cmdBytes}
+				success := t.handleCommand(cmdReader)
+				cmd := cmdBytes.Bytes()
+
+				if success {
+					debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
+				} else {
+					debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
+				}
+			} else {
+				_ = t.handleCommand(gr)
+			}
+		})
+
+	case 127: // DEL  Delete Character (treat as backspace)
+		t.WithLock(func() {
+			t.screen().moveCursor(-1, 0, false, false)
+		})
+	default:
+		debugPrintf(debugTodo, "TODO: unhandled char %v %#v\n", b, string(b))
+	}
+	return nil
 }
 
 type escapeReader interface {
@@ -306,7 +328,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				paramCount = 1
 				params = paramStore[:paramCount]
 			}
-			t.screen().moveCursor(0, -params[0], false, true)
+			t.screen().moveCursor(0, -params[0], false, false)
 		case 'B': // Move cursor down
 			if paramCount == 0 {
 				paramStore[0] = 1
@@ -394,40 +416,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				params = paramStore[:paramCount]
 			}
 
-			style := NewStyle()
-			frontStyle := t.screen().FrontStyle()
-
-			// Copy current colors and modes from front style
-			if fgVal, isRGB, _ := frontStyle.GetColor(ComponentFG); fgVal != 0x100 {
-				if isRGB {
-					r := (fgVal >> 16) & 0xff
-					g := (fgVal >> 8) & 0xff
-					b := fgVal & 0xff
-					style.SetColorRGB(ComponentFG, r, g, b)
-				} else {
-					style.SetColor256(ComponentFG, fgVal)
-				}
-			} else {
-				style.SetColorDefault(ComponentFG)
-			}
-
-			if bgVal, isRGB, _ := frontStyle.GetColor(ComponentBG); bgVal != 0x100 {
-				if isRGB {
-					r := (bgVal >> 16) & 0xff
-					g := (bgVal >> 8) & 0xff
-					b := bgVal & 0xff
-					style.SetColorRGB(ComponentBG, r, g, b)
-				} else {
-					style.SetColor256(ComponentBG, bgVal)
-				}
-			} else {
-				style.SetColorDefault(ComponentBG)
-			}
-
-			// Copy modes
-			for _, mode := range frontStyle.Modes() {
-				style.SetMode(mode)
-			}
+			style := t.screen().Style()
 
 			for i := 0; i < len(params); i++ {
 				p := params[i]
@@ -436,7 +425,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					style.ResetAll()
 
 				case p >= 1 && p <= 5:
-					style.SetMode(ColorModes[p-1])
+					style.SetMode(colorModes[p-1])
 
 				case p == 6: // rapid blink
 					style.SetMode(ModeRapidBlink)
@@ -490,13 +479,13 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					style.ResetMode(ModeOverline)
 
 				case p >= 30 && p <= 37:
-					style.SetColor256(ComponentFG, int(Colors8[p-30]))
+					style.SetColor256(ComponentFG, p-30)
 
 				case p == 39: // default color
 					style.SetColorDefault(ComponentFG)
 
 				case p >= 40 && p <= 47:
-					style.SetColor256(ComponentBG, int(Colors8[p-40]))
+					style.SetColor256(ComponentBG, p-40)
 
 				case p == 49: // default color
 					style.SetColorDefault(ComponentBG)
@@ -527,10 +516,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					}
 
 				case p >= 90 && p <= 97:
-					style.SetColor256(ComponentFG, int(p-90+8))
+					style.SetColorBright(ComponentFG, int(p-90))
 
 				case p >= 100 && p <= 107:
-					style.SetColor256(ComponentBG, int(p-100+8))
+					style.SetColorBright(ComponentBG, int(p-100))
 
 				default:
 					debugPrintln(debugTodo, "TODO: Unhandled set color: ", p)
@@ -538,7 +527,13 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				}
 			}
 
-			t.screen().setStyle(&style, &style)
+			t.screen().setStyle(style)
+
+		case 's': // Save cursor pos
+			t.screen().saveCursorPos()
+
+		case 'u': // Restore cursor pos
+			t.screen().restoreCursorPos()
 
 		case 't': // Window manipulation
 			if len(params) > 0 {
@@ -593,18 +588,40 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 			switch {
 			case len(params) == 0 || params[0] == 0: // Erase to bottom of screen
+				cursorPos := t.screen().CursorPos()
+				// Erase from cursor to end of current line
 				t.screen().eraseRegion(Region{
-					X:  0,
-					Y:  t.screen().CursorPos().Y,
+					X:  cursorPos.X,
+					Y:  cursorPos.Y,
 					X2: t.screen().Size().X,
-					Y2: t.screen().Size().Y,
+					Y2: cursorPos.Y + 1,
 				}, CRClear)
+				// Erase all lines below current line
+				if cursorPos.Y+1 < t.screen().Size().Y {
+					t.screen().eraseRegion(Region{
+						X:  0,
+						Y:  cursorPos.Y + 1,
+						X2: t.screen().Size().X,
+						Y2: t.screen().Size().Y,
+					}, CRClear)
+				}
 			case params[0] == 1: // Erase to top of screen
+				cursorPos := t.screen().CursorPos()
+				// Erase all lines above current line
+				if cursorPos.Y > 0 {
+					t.screen().eraseRegion(Region{
+						X:  0,
+						Y:  0,
+						X2: t.screen().Size().X,
+						Y2: cursorPos.Y,
+					}, CRClear)
+				}
+				// Erase from beginning of current line to cursor (inclusive)
 				t.screen().eraseRegion(Region{
 					X:  0,
-					Y:  0,
-					X2: t.screen().Size().X,
-					Y2: t.screen().CursorPos().Y,
+					Y:  cursorPos.Y,
+					X2: cursorPos.X + 1,
+					Y2: cursorPos.Y + 1,
 				}, CRClear)
 			case params[0] == 2: // Erase screen and home cursor
 				t.screen().eraseRegion(Region{

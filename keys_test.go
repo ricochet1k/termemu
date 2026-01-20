@@ -3,7 +3,7 @@ package termemu
 import "testing"
 
 func TestEncodeKey_ModifyOtherKeys(t *testing.T) {
-	t1, _ := MakeTerminalWithMock()
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 	t1.viewInts[VIModifyOtherKeys] = 2
 
 	out := string(t1.encodeKey(KeyEvent{Code: KeyRune, Rune: 'a', Mod: ModCtrl}))
@@ -13,7 +13,7 @@ func TestEncodeKey_ModifyOtherKeys(t *testing.T) {
 }
 
 func TestEncodeKey_CtrlRuneDefault(t *testing.T) {
-	t1, _ := MakeTerminalWithMock()
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 
 	out := t1.encodeKey(KeyEvent{Code: KeyRune, Rune: 'a', Mod: ModCtrl})
 	if len(out) != 1 || out[0] != 0x01 {
@@ -22,7 +22,7 @@ func TestEncodeKey_CtrlRuneDefault(t *testing.T) {
 }
 
 func TestEncodeKey_KittyDisambiguateAlt(t *testing.T) {
-	t1, _ := MakeTerminalWithMock()
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 	t1.keyboardMain.flags = int(KbdDisambiguate)
 
 	out := string(t1.encodeKey(KeyEvent{Code: KeyRune, Rune: 'a', Mod: ModAlt}))
@@ -32,7 +32,7 @@ func TestEncodeKey_KittyDisambiguateAlt(t *testing.T) {
 }
 
 func TestEncodeKey_KittyReportEventsRepeat(t *testing.T) {
-	t1, _ := MakeTerminalWithMock()
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 	t1.keyboardMain.flags = int(KbdReportAllKeys | KbdReportEvents)
 
 	out := string(t1.encodeKey(KeyEvent{Code: KeyUp, Event: KeyRepeat}))

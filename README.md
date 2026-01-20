@@ -74,15 +74,15 @@ import (
 
 type loggingFrontend struct{}
 
-func (loggingFrontend) Bell()                                     {}
+func (loggingFrontend) Bell() {}
 func (loggingFrontend) RegionChanged(r termemu.Region, _ termemu.ChangeReason) {
 	fmt.Printf("region changed: (%d,%d)-(%d,%d)\n", r.X, r.Y, r.X2, r.Y2)
 }
-func (loggingFrontend) ScrollLines(y int)                         {}
-func (loggingFrontend) CursorMoved(x, y int)                      {}
-func (loggingFrontend) ColorsChanged(f, b termemu.Color)          {}
+func (loggingFrontend) ScrollLines(y int) {}
+func (loggingFrontend) CursorMoved(x, y int) {}
+func (loggingFrontend) StyleChanged(s termemu.Style) {}
 func (loggingFrontend) ViewFlagChanged(v termemu.ViewFlag, v2 bool) {}
-func (loggingFrontend) ViewIntChanged(v termemu.ViewInt, v2 int)   {}
+func (loggingFrontend) ViewIntChanged(v termemu.ViewInt, v2 int) {}
 func (loggingFrontend) ViewStringChanged(v termemu.ViewString, v2 string) {}
 
 func main() {

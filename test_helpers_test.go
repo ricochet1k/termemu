@@ -1,8 +1,10 @@
 package termemu
 
 import (
+	"bytes"
+	"io"
 	"sync"
-	"testing"
+	"sync/atomic"
 )
 
 // MockFrontend implements Frontend for tests and records calls.
@@ -20,10 +22,7 @@ type MockFrontend struct {
 	CursorY          int
 	CursorMovedCount int
 
-	Styles []struct {
-		FG *Style
-		BG *Style
-	}
+	Styles []Style
 
 	ViewFlags   map[ViewFlag]bool
 	ViewInts    map[ViewInt]int
@@ -66,13 +65,10 @@ func (m *MockFrontend) CursorMoved(x, y int) {
 	m.CursorMovedCount++
 }
 
-func (m *MockFrontend) StyleChanged(fg *Style, bg *Style) {
+func (m *MockFrontend) StyleChanged(s Style) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Styles = append(m.Styles, struct {
-		FG *Style
-		BG *Style
-	}{fg, bg})
+	m.Styles = append(m.Styles, s)
 }
 
 func (m *MockFrontend) ViewFlagChanged(vs ViewFlag, value bool) {
@@ -101,20 +97,114 @@ func MakeScreenWithMock() (screen, *MockFrontend) {
 }
 
 // MakeTerminalWithMock constructs a terminal without opening a pty for tests.
-func MakeTerminalWithMock() (*terminal, *MockFrontend) {
+func MakeTerminalWithMock(mode TextReadMode) (io.ReadCloser, *terminal, *MockFrontend) {
 	mf := NewMockFrontend()
-	t := &terminal{
-		frontend:    mf,
-		mainScreen:  newScreen(mf),
-		altScreen:   newScreen(mf),
-		viewFlags:   make([]bool, viewFlagCount),
-		viewInts:    make([]int, viewIntCount),
-		viewStrings: make([]string, viewStringCount),
-	}
-	return t, mf
+	// Create two pipes: one for input TO terminal, one for output FROM terminal
+	// terminalInput_r, terminalInput_w := io.Pipe()
+	terminalOutput_r, terminalOutput_w := NewBufPipe(10)
+
+	// Backend reads from terminalInput_r (for ptyReadLoop to consume program output)
+	// Backend writes to terminalOutput_w (for SendMouseRaw/SendKey to write user input)
+	t := NewWithMode(mf, NewNoPTYBackend(bytes.NewReader(nil), terminalOutput_w), mode)
+
+	// Return terminalOutput_r (where test reads terminal output like mouse events)
+	// and terminalInput_w (where test writes program output to terminal)
+	return terminalOutput_r, t.(*terminal), mf
 }
 
-// small helper to fail test with recorded state for easier debugging
-func dumpMock(t *testing.T, m *MockFrontend) {
-	t.Logf("MockFrontend: Bell=%d, Cursor=(%d,%d), Regions=%d, Styles=%d", m.BellCount, m.CursorX, m.CursorY, len(m.Regions), len(m.Styles))
+func (t *terminal) testFeedTerminalInputFromBackend(data []byte, mode TextReadMode) error {
+	r := bytes.NewReader(data)
+	gr := NewGraphemeReaderWithMode(r, mode)
+	for r.Len() > 0 || gr.Buffered() > 0 {
+		if err := t.ptyReadOne(gr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// // small helper to fail test with recorded state for easier debugging
+// func dumpMock(t *testing.T, m *MockFrontend) {
+// 	t.Logf("MockFrontend: Bell=%d, Cursor=(%d,%d), Regions=%d, Styles=%d", m.BellCount, m.CursorX, m.CursorY, len(m.Regions), len(m.Styles))
+// }
+
+type BufPipeReader struct {
+	c      <-chan []byte
+	buf    []byte
+	closed *atomic.Bool
+}
+
+// Close implements io.ReadCloser.
+func (b *BufPipeReader) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+// Read implements io.ReadCloser.
+func (b *BufPipeReader) Read(p []byte) (n int, err error) {
+	if b.buf != nil {
+		n = copy(p, b.buf)
+		if n < len(b.buf) {
+			b.buf = b.buf[n:]
+		} else {
+			b.buf = nil
+		}
+	}
+	for n < len(p) {
+		if b.closed.Load() {
+			return 0, io.EOF
+		}
+		var buf []byte
+		var ok bool
+		// log.Printf("bufpipe start read %v, %v", n, len(b.c))
+		if n > 0 {
+			select {
+			case buf, ok = <-b.c:
+				if !ok {
+					return n, nil
+				}
+			default:
+				return n, nil
+			}
+		} else {
+			buf = <-b.c
+		}
+		// log.Printf("bufpipe read %v %q", len(buf), string(buf))
+		nn := copy(p[n:], buf)
+		if nn < len(b.buf) {
+			b.buf = buf[nn:]
+		}
+		n += nn
+	}
+	return n, nil
+}
+
+type BufPipeWriter struct {
+	c      chan<- []byte
+	closed *atomic.Bool
+}
+
+// Close implements io.WriteCloser.
+func (b *BufPipeWriter) Close() error {
+	close(b.c)
+	b.closed.Store(true)
+	return nil
+}
+
+// Write implements io.WriteCloser.
+func (b *BufPipeWriter) Write(p []byte) (n int, err error) {
+	if b.closed.Load() {
+		return 0, io.EOF
+	}
+	buf := make([]byte, len(p))
+	copy(buf, p)
+	b.c <- buf
+	return len(p), nil
+}
+
+func NewBufPipe(writesBuffered int) (io.ReadCloser, io.WriteCloser) {
+	c := make(chan []byte, writesBuffered)
+	closed := new(atomic.Bool)
+
+	return &BufPipeReader{c, nil, closed}, &BufPipeWriter{c, closed}
 }

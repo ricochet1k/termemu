@@ -258,11 +258,16 @@ func stepRuneCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if !utf8.FullRune(buf) {
 		return nil, 0, 0, state, false
 	}
-	_, size := utf8.DecodeRune(buf)
+	r, size := utf8.DecodeRune(buf)
 	if size == 0 {
 		return nil, 0, 0, state, false
 	}
-	return buf[:size], size, 1, state, true
+	// Calculate actual display width (e.g., emoji = 2, normal char = 1)
+	width := uniseg.StringWidth(string(r))
+	if width <= 0 {
+		width = 1
+	}
+	return buf[:size], size, width, state, true
 }
 
 func stepGraphemeCluster(buf []byte, state int) ([]byte, int, int, int, bool) {

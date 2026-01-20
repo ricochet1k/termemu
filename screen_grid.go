@@ -15,13 +15,10 @@ type gridScreen struct {
 	cellText   [][]string
 	cellWidth  [][]uint8
 	cellCont   [][]bool
-	cellStyles [][]*Style
+	cellStyles [][]Style
 	frontend   Frontend
 
-	style *Style
-
-	// preallocated for fast copying
-	styleBuf *Style
+	style Style
 
 	size Pos
 
@@ -36,12 +33,9 @@ type gridScreen struct {
 func newGridScreen(f Frontend) *gridScreen {
 	s := &gridScreen{
 		frontend: f,
-		style:    &Style{},
+		style:    NewStyle(),
 	}
-	s.style.SetColorDefault(ComponentFG)
-	s.style.SetColorDefault(ComponentBG)
 	s.setSize(80, 14)
-	s.setStyle(s.style, s.style)
 	s.bottomMargin = s.size.Y - 1
 	s.eraseRegion(Region{X: 0, Y: 0, X2: s.size.X, Y2: s.size.Y}, CRClear)
 	return s
@@ -55,11 +49,7 @@ func (s *gridScreen) CursorPos() Pos {
 	return s.cursorPos
 }
 
-func (s *gridScreen) FrontStyle() *Style {
-	return s.style
-}
-
-func (s *gridScreen) BackStyle() *Style {
+func (s *gridScreen) Style() Style {
 	return s.style
 }
 
@@ -87,7 +77,21 @@ func (s *gridScreen) getLine(y int) []rune {
 	return s.chars[y]
 }
 
-func (s *gridScreen) StyledLine(x, w, y int) *Line {
+func (s *gridScreen) Line(y int) string {
+	line := s.chars[y]
+	// Convert null bytes (wide character continuation markers) to spaces
+	result := make([]rune, len(line))
+	for i, r := range line {
+		if r == 0 {
+			result[i] = ' '
+		} else {
+			result[i] = r
+		}
+	}
+	return string(result)
+}
+
+func (s *gridScreen) StyledLine(x, w, y int) Line {
 	text := s.getLine(y)
 	styles := s.cellStyles[y]
 	cellText := s.cellText[y]
@@ -124,7 +128,7 @@ func (s *gridScreen) StyledLine(x, w, y int) *Line {
 		}
 
 		if isRepeat {
-			spans = append(spans, Span{Style: *style, Rune: firstRune, Width: width})
+			spans = append(spans, Span{Style: style, Rune: firstRune, Width: width})
 		} else {
 			// Construct text for span
 			var sb strings.Builder
@@ -142,17 +146,17 @@ func (s *gridScreen) StyledLine(x, w, y int) *Line {
 				spanWidth++
 			}
 
-			spans = append(spans, Span{Style: *style, Text: sb.String(), Width: spanWidth})
+			spans = append(spans, Span{Style: style, Text: sb.String(), Width: spanWidth})
 		}
 	}
-	return &Line{
+	return Line{
 		Spans: spans,
 		Width: w,
 	}
 }
 
-func (s *gridScreen) StyledLines(r Region) []*Line {
-	var lines []*Line
+func (s *gridScreen) StyledLines(r Region) []Line {
+	var lines []Line
 	for y := r.Y; y < r.Y2; y++ {
 		lines = append(lines, s.StyledLine(r.X, r.X2-r.X, y))
 	}
@@ -178,12 +182,9 @@ func (s *gridScreen) renderLineANSI(y int) string {
 	return buf.String()
 }
 
-func (s *gridScreen) setStyle(front, back *Style) {
-	// For gridScreen, we use a single style for simplicity
-	// In a more complex implementation, front could be used for text and back for background
-	s.style = front
-	s.styleBuf = front
-	s.frontend.StyleChanged(front, back)
+func (s *gridScreen) setStyle(style Style) {
+	s.style = style
+	s.frontend.StyleChanged(style)
 }
 
 func (s *gridScreen) setSize(w, h int) {
@@ -248,8 +249,8 @@ func (s *gridScreen) setSize(w, h int) {
 	s.cellWidth = cellWidth
 	s.cellCont = cellCont
 
-	styleRect := make([][]*Style, h)
-	styleRaw := make([]*Style, w*h)
+	styleRect := make([][]Style, h)
+	styleRaw := make([]Style, w*h)
 	for i := range styleRect {
 		styleRect[i], styleRaw = styleRaw[:w], styleRaw[w:]
 		if i < prevH {
@@ -278,8 +279,7 @@ func (s *gridScreen) setSize(w, h int) {
 		s.cursorPos.Y = 0
 	}
 
-	s.styleBuf = s.style
-	s.setStyle(s.style, s.style)
+	s.setStyle(s.style)
 }
 
 func (s *gridScreen) eraseRegion(r Region, cr ChangeReason) {
@@ -504,7 +504,7 @@ func runeCellWidth(r rune) int {
 // rawWriteStyles copies the current style to the screen, from x1 to x2
 func (s *gridScreen) rawWriteStyles(y int, x1 int, x2 int) {
 	for i := x1; i < x2; i++ {
-		s.cellStyles[y][i] = s.styleBuf
+		s.cellStyles[y][i] = s.style
 	}
 }
 

@@ -48,8 +48,10 @@ const (
 // Internal constants and masks
 const (
 	colDefault     uint32 = 0x100 // outside the 256-color range
+	colBright      uint32 = 0x200 // bright color flag (uses bit 9)
 	mask256color   uint32 = 0xff
 	maskRGBcolor   uint32 = 0xffffff
+	maskBrightIdx  uint32 = 0x7 // 3 bits for bright color index (0-7)
 	colorTypeShift        = 31
 	colorTypeMask  uint32 = 1 << colorTypeShift
 	modeBitsShift         = 24
@@ -121,120 +123,6 @@ func (s *Style) modeBits() Mode {
 	return combined
 }
 
-// --- Temporary backward compatibility exports ---
-// These will be removed after migrating all code to Style
-
-// Color is a backward compatibility type wrapping uint32
-type Color uint32
-
-// ColDefault is the default color value
-const ColDefault Color = Color(colDefault)
-
-// Colors8 provides the 8 basic colors
-var Colors8 = [8]Color{
-	ColBlack,
-	ColRed,
-	ColGreen,
-	ColYellow,
-	ColBlue,
-	ColMagenta,
-	ColCyan,
-	ColWhite,
-}
-
-// ColorModes maps SGR codes 1-7 to their Mode values
-var ColorModes = [7]Mode{
-	ModeBold,      // SGR 1
-	ModeDim,       // SGR 2
-	ModeItalic,    // SGR 3
-	ModeUnderline, // SGR 4
-	ModeBlink,     // SGR 5
-	ModeReverse,   // SGR 7 (skipping 6 which is RapidBlink in BG)
-	ModeInvisible, // SGR 8
-}
-
-// ANSIEscape generates ANSI escape for two Color values (backward compatibility)
-func ANSIEscape(fg, bg Color) []byte {
-	// Convert Color values to Style
-	s := Style{fg: uint32(fg), bg: uint32(bg), underlineColor: colDefault}
-	return s.ANSIEscape()
-}
-
-// Helper methods on Color for backward compatibility
-// These store mode bits directly in bits 24-30 without caring about FG vs BG distribution
-func (c Color) SetMode(mode Mode) Color {
-	// Mode already has the bit position (0-12), store it directly in bits 24-30
-	// For modes 0-6, store as-is; for modes 7-12, shift down by 7
-	modeBits := uint32(mode)
-	if mode >= (1 << 7) {
-		// BG mode (7-12), shift down to fit in 7-bit space
-		modeBits = modeBits >> 7
-	}
-	return Color(uint32(c) | (modeBits << modeBitsShift))
-}
-
-func (c Color) ResetMode(mode Mode) Color {
-	modeBits := uint32(mode)
-	if mode >= (1 << 7) {
-		modeBits = modeBits >> 7
-	}
-	return Color(uint32(c) &^ (modeBits << modeBitsShift))
-}
-
-func (c Color) TestMode(mode Mode) bool {
-	modeBits := uint32(mode)
-	if mode >= (1 << 7) {
-		modeBits = modeBits >> 7
-	}
-	return (uint32(c) & (modeBits << modeBitsShift)) != 0
-}
-
-func (c Color) SetColor(col Color) Color {
-	// Preserve mode bits, replace color
-	return Color((uint32(c) & modeBitsMask) | (uint32(col) & ^modeBitsMask))
-}
-
-func (c Color) SetColorRGB(r, g, b int) Color {
-	r &= 0xff
-	g &= 0xff
-	b &= 0xff
-	colorVal := (uint32(r)<<16 | uint32(g)<<8 | uint32(b)) | colorTypeMask
-	return Color((uint32(c) & modeBitsMask) | colorVal)
-}
-
-func (c Color) Color() int {
-	c = Color(uint32(c) &^ modeBitsMask)
-	isRGB := (uint32(c) & colorTypeMask) == colorTypeMask
-	if isRGB {
-		return int(uint32(c) & maskRGBcolor)
-	}
-	return int(uint32(c) & mask256color)
-}
-
-func (c Color) ColorRGB() (int, int, int) {
-	val := c.Color()
-	return val >> 16, (val >> 8) & 0xff, val & 0xff
-}
-
-func (c Color) ColorType() int {
-	c = Color(uint32(c) &^ modeBitsMask)
-	if (uint32(c) & colorTypeMask) == colorTypeMask {
-		return 1 // RGB
-	}
-	return 0 // 256
-}
-
-func (c Color) Modes() []Mode {
-	var result []Mode
-	modes := (uint32(c) >> modeBitsShift) & 0x7F
-	for i := uint(0); i < 7; i++ {
-		if (modes & (1 << i)) != 0 {
-			result = append(result, Mode(1)<<i)
-		}
-	}
-	return result
-}
-
 // ColorType constants
 const (
 	ColorType256 = 0
@@ -262,6 +150,25 @@ func (s *Style) SetColor256(component ColorComponent, idx int) error {
 		return fmt.Errorf("color index out of range: %d", idx)
 	}
 	colorVal := uint32(idx&0xff) & ^colorTypeMask
+	switch component {
+	case ComponentFG:
+		s.fg = (s.fg & modeBitsMask) | colorVal
+	case ComponentBG:
+		s.bg = (s.bg & modeBitsMask) | colorVal
+	case ComponentUnderline:
+		s.underlineColor = (s.underlineColor & modeBitsMask) | colorVal
+	default:
+		return fmt.Errorf("invalid color component: %d", component)
+	}
+	return nil
+}
+
+// SetColorBright sets a color component to a bright color (0-7)
+func (s *Style) SetColorBright(component ColorComponent, idx int) error {
+	if idx < 0 || idx > 7 {
+		return fmt.Errorf("bright color index out of range: %d", idx)
+	}
+	colorVal := colBright | (uint32(idx) & maskBrightIdx)
 	switch component {
 	case ComponentFG:
 		s.fg = (s.fg & modeBitsMask) | colorVal
@@ -395,6 +302,7 @@ func ansiEscapeColor(c uint32, param byte) []byte {
 	c &= ^modeBitsMask
 
 	isRGB := (c & colorTypeMask) == colorTypeMask
+	isBright := (c & colBright) == colBright
 
 	if isRGB {
 		rgb := c & maskRGBcolor
@@ -402,7 +310,17 @@ func ansiEscapeColor(c uint32, param byte) []byte {
 		g := (rgb >> 8) & 0xff
 		b := rgb & 0xff
 		seq = append(seq, ESC, '[', param, '8', ';', '2', ';')
-		seq = append(seq, []byte(fmt.Sprintf("%d;%d;%dm", r, g, b))...)
+		seq = fmt.Appendf(seq, "%d;%d;%dm", r, g, b)
+	} else if isBright {
+		// Bright colors: SGR 90-97 for FG (param='3'), 100-107 for BG (param='4')
+		brightIdx := int(c & maskBrightIdx)
+		baseCode := 90
+		if param == '4' {
+			baseCode = 100
+		}
+		seq = append(seq, ESC, '[')
+		seq = append(seq, []byte(strconv.Itoa(baseCode+brightIdx))...)
+		seq = append(seq, 'm')
 	} else {
 		colorVal := int(c & mask256color)
 		if c == colDefault {
@@ -419,30 +337,20 @@ func ansiEscapeColor(c uint32, param byte) []byte {
 }
 
 // ANSIEscape generates a complete ANSI escape sequence for this style
-func (s *Style) ANSIEscape() []byte {
+func (s Style) ANSIEscape() []byte {
 	var seq []byte
 
 	// Reset first
 	seq = append(seq, ESC, '[', '0', 'm')
 
-	// Add modes
-	for _, mode := range s.Modes() {
-		if code, ok := modeToSGRCode[mode]; ok {
-			seq = append(seq, ESC, '[')
-			seq = append(seq, []byte(strconv.Itoa(code))...)
-			seq = append(seq, 'm')
-		}
-	}
-
-	// Add colors
-	seq = append(seq, ansiEscapeColor(s.fg, '3')...)
-	seq = append(seq, ansiEscapeColor(s.bg, '4')...)
+	def := NewStyle()
+	seq = append(seq, s.ANSIEscapeFrom(def)...)
 
 	return seq
 }
 
 // ANSIEscapeFrom generates a minimal ANSI escape sequence that changes from prev to this style
-func (s *Style) ANSIEscapeFrom(prev *Style) []byte {
+func (s Style) ANSIEscapeFrom(prev Style) []byte {
 	var seq []byte
 
 	// Check what changed

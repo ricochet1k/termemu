@@ -1,10 +1,13 @@
 package termemu
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
+	"testing"
 )
 
 type Terminal interface {
@@ -18,11 +21,10 @@ type Terminal interface {
 	SendKey(KeyEvent) (int, error)
 	Size() (int, int)
 	Resize(int, int) error
-	Line(int) []rune
+	Line(int) string
 	ANSILine(y int) string
-	LineColors(int) ([]Color, []Color)
-	StyledLine(x, w, y int) *Line
-	StyledLines(r Region) []*Line
+	StyledLine(x, w, y int) Line
+	StyledLines(r Region) []Line
 
 	PrintTerminal() // for debugging
 }
@@ -99,6 +101,7 @@ func (t *terminal) SetFrontend(f Frontend) {
 
 const termStr = "TERM=xterm-256color"
 
+// Write is for the client to write keyboard/mouse input or terminal feedback
 func (t *terminal) Write(b []byte) (int, error) {
 	if t.backend == nil {
 		return 0, errors.New("backend is nil")
@@ -118,6 +121,8 @@ func (t *terminal) Write(b []byte) (int, error) {
 	return total, nil
 }
 
+// Size returns the terminal width and height.
+// The caller must ensure the terminal is locked before calling this method.
 func (t *terminal) Size() (w, h int) {
 	size := t.screen().Size()
 	return size.X, size.Y
@@ -158,13 +163,18 @@ func (t *terminal) startReadLoop() {
 	}()
 }
 
-func (t *terminal) Line(y int) []rune {
-	if y >= t.screen().Size().Y {
-		return nil
+// Line returns the plain text content of line y.
+// The caller must lock the terminal before calling this method.
+func (t *terminal) Line(y int) string {
+	size := t.screen().Size()
+	if y >= size.Y {
+		return ""
 	}
-	return t.screen().getLine(y)
+	return t.screen().StyledLine(0, size.X, y).PlainTextString()
 }
 
+// ANSILine returns the ANSI-escaped content of line y.
+// The caller must lock the terminal before calling this method.
 func (t *terminal) ANSILine(y int) string {
 	if y >= t.screen().Size().Y {
 		return ""
@@ -172,20 +182,15 @@ func (t *terminal) ANSILine(y int) string {
 	return t.screen().renderLineANSI(y)
 }
 
-func (t *terminal) LineColors(y int) (fg []Color, bg []Color) {
-	// Deprecated: Use StyledLine() instead for color information
-	if y >= t.screen().Size().Y {
-		return nil, nil
-	}
-	// Return empty slices for backward compatibility
-	return nil, nil
-}
-
-func (t *terminal) StyledLine(x, w, y int) *Line {
+// StyledLine returns the styled content of a line region.
+// The caller must lock the terminal before calling this method.
+func (t *terminal) StyledLine(x, w, y int) Line {
 	return t.screen().StyledLine(x, w, y)
 }
 
-func (t *terminal) StyledLines(r Region) []*Line {
+// StyledLines returns the styled content of multiple lines in a region.
+// The caller must lock the terminal before calling this method.
+func (t *terminal) StyledLines(r Region) []Line {
 	return t.screen().StyledLines(r)
 }
 
@@ -214,26 +219,27 @@ const (
 
 // x and y should start at 1
 // wheel events should use btn1 for wheel up, btn2 for wheel down, true for press, and M_wheel for mods
-func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int) {
+func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int) error {
 	switch t.viewInts[VIMouseMode] {
 	case MMNone:
-		return
+		return nil
 	case MMPress:
 		if !press {
-			return
+			return nil
 		}
 	case MMPressRelease:
 		if mods&MMotion != 0 {
-			return
+			return nil
 		}
 	case MMPressReleaseMove:
 		if byte(mods)&mWhichBtn == byte(MRelease) {
-			return
+			return nil
 		}
 	case MMPressReleaseMoveAll:
 	}
 
-	switch t.viewInts[VIMouseEncoding] {
+	mouseEncoding := t.viewInts[VIMouseEncoding]
+	switch mouseEncoding {
 	case MEX10:
 		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
 		if !press {
@@ -247,7 +253,12 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 			y = 255 - 32
 		}
 
-		t.Write([]byte("\033[M" + string(32+btnByte) + string(byte(32+x)) + string(byte(32+y))))
+		mouseCmd := []byte("\033[M" + string(32+btnByte) + string(byte(32+x)) + string(byte(32+y)))
+		_, err := t.Write(mouseCmd)
+		if err != nil {
+			panic(fmt.Sprintf("error %v", err))
+		}
+		return err
 
 	case MEUTF8:
 		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
@@ -255,7 +266,8 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 			btnByte |= byte(MRelease)
 		}
 
-		t.Write([]byte("\033[M" + string(32+btnByte) + string(rune(32+x)) + string(rune(32+y))))
+		_, err := t.Write([]byte("\033[M" + string(32+btnByte) + string(rune(32+x)) + string(rune(32+y))))
+		return err
 
 	case MESGR:
 		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
@@ -263,8 +275,10 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 		if !press {
 			pressByte = 'm'
 		}
-		t.Write([]byte(fmt.Sprintf("\033[<%v;%v;%v%c", btnByte, x, y, pressByte)))
+		_, err := fmt.Fprintf(t, "\033[<%v;%v;%v%c", btnByte, x, y, pressByte)
+		return err
 	}
+	panic(fmt.Sprintf("Unhandled ViMouseEncoding?? %v", mouseEncoding))
 }
 
 func (t *terminal) setViewFlag(flag ViewFlag, value bool) {
@@ -308,4 +322,11 @@ func (t *terminal) switchScreen() {
 	t.onAltScreen = !t.onAltScreen
 	size := t.screen().Size()
 	t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRScreenSwitch)
+}
+
+// testHandleCommand is only for testing
+func (t *terminal) testHandleCommand(te *testing.T, cmd string) {
+	if !t.handleCommand(bufio.NewReader(strings.NewReader(cmd))) {
+		te.Fatalf("handleCommand %q failed", cmd)
+	}
 }

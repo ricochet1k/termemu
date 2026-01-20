@@ -2,6 +2,7 @@ package termemu
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -49,7 +50,7 @@ func writeTextAt(s screen, x, y int, text string) {
 		rawWriteSpan(int, int, Span, ChangeReason)
 	}); ok {
 		width := utf8.RuneCountInString(text)
-		writer.rawWriteSpan(x, y, Span{Style: *s.FrontStyle(), Text: text, Width: width}, CRText)
+		writer.rawWriteSpan(x, y, Span{Style: s.Style(), Text: text, Width: width}, CRText)
 		return
 	}
 	s.rawWriteRunes(x, y, []rune(text), CRText)
@@ -61,7 +62,7 @@ func writeTextAtWithWidth(s screen, x, y int, text string, width int) {
 	if writer, ok := s.(interface {
 		rawWriteSpan(int, int, Span, ChangeReason)
 	}); ok {
-		writer.rawWriteSpan(x, y, Span{Style: *s.FrontStyle(), Text: text, Width: width}, CRText)
+		writer.rawWriteSpan(x, y, Span{Style: s.Style(), Text: text, Width: width}, CRText)
 		return
 	}
 	s.rawWriteRunes(x, y, []rune(text), CRText)
@@ -69,11 +70,9 @@ func writeTextAtWithWidth(s screen, x, y int, text string, width int) {
 
 func testScreen(s screen, chars []string) bool {
 	for i := range chars {
-		line := s.getLine(i)
-		for j := range chars[i] {
-			if line[j] != rune(chars[i][j]) {
-				return false
-			}
+		line := s.Line(i)
+		if line != chars[i] {
+			return false
 		}
 	}
 	return true
@@ -155,7 +154,7 @@ func TestStyledLine(t *testing.T) {
 		s := makeScreen(ninePatch, newFn)
 
 		l := s.StyledLine(1, 2, 0)
-		want := &Line{
+		want := Line{
 			Spans: []Span{{Style: NewStyle(), Text: "12", Width: 2}},
 			Width: 2,
 		}
@@ -171,15 +170,16 @@ func TestSetSize_PreservesContent(t *testing.T) {
 
 		old := make([][]rune, len(ninePatch))
 		for y := range ninePatch {
-			old[y] = append([]rune(nil), s.getLine(y)...)
+			old[y] = []rune(s.Line(y))
 		}
 
 		// grow width and height
 		s.setSize(8, 8)
 		// original content should be at top-left
 		for y := 0; y < len(ninePatch); y++ {
+			line := []rune(s.Line(y))
 			for x := 0; x < len(ninePatch[0]); x++ {
-				if got := s.getLine(y)[x]; got != old[y][x] {
+				if got := line[x]; got != old[y][x] {
 					t.Fatalf("expected preserved char at %d,%d: got %q want %q", x, y, got, old[y][x])
 				}
 			}
@@ -188,8 +188,9 @@ func TestSetSize_PreservesContent(t *testing.T) {
 		// new areas should be spaces
 		size := s.Size()
 		for y := 0; y < size.Y; y++ {
+			line := []rune(s.Line(y))
 			for x := 6; x < size.X; x++ {
-				if got := s.getLine(y)[x]; got != ' ' {
+				if got := line[x]; got != ' ' {
 					t.Fatalf("expected space at new area %d,%d; got %q", x, y, got)
 				}
 			}
@@ -208,7 +209,7 @@ func TestRawWriteRunes_RegionChanged(t *testing.T) {
 
 		s.deleteChars(2, 0, 2, CRClear)
 
-		if got := string(s.getLine(0)); got != "abef  " {
+		if got := s.Line(0); got != "abef  " {
 			t.Fatalf("deleteChars result = %q; want %q", got, "abef  ")
 		}
 		if len(mf.Regions) == 0 {
@@ -236,7 +237,7 @@ func TestClearWideOverlaps_WriteOverWideChar(t *testing.T) {
 	writeTextAt(s, 1, 0, "A")
 
 	// Check that the emoji was cleared and 'A' was written
-	line := s.getLine(0)
+	line := []rune(s.Line(0))
 	if line[1] != 'A' {
 		t.Errorf("Expected 'A' at position 1, got %q", line[1])
 	}
@@ -253,30 +254,27 @@ func TestClearWideOverlaps_WriteAfterWideChar_NoInterference(t *testing.T) {
 
 	// Write emoji at position 1 with width 2
 	writeTextAtWithWidth(s, 1, 0, "🎉", 2)
-	line := s.getLine(0)
+	lineStr := s.Line(0)
 
-	// Verify emoji is there
-	if line[1] == ' ' {
-		t.Errorf("Expected emoji at position 1")
-	}
-	if line[2] != 0 {
-		t.Errorf("Expected null byte at position 2")
+	// Verify emoji is there (at position 1-2 in visible text)
+	if !strings.Contains(lineStr, "🎉") {
+		t.Errorf("Expected emoji in line, got %q", lineStr)
 	}
 
 	// Write a char at position 3 (after the emoji, doesn't overlap)
 	writeTextAt(s, 3, 0, "X")
-	line = s.getLine(0)
+	lineStr = s.Line(0)
 
-	// Emoji should still be there
-	if line[1] == ' ' {
-		t.Errorf("Expected emoji still at position 1 after writing after it")
+	// Emoji should still be there and X should be visible
+	if !strings.Contains(lineStr, "🎉") {
+		t.Errorf("Expected emoji still in line after writing after it, got %q", lineStr)
 	}
-	if line[2] != 0 {
-		t.Errorf("Expected null byte still at position 2")
+	if !strings.Contains(lineStr, "X") {
+		t.Errorf("Expected 'X' in line, got %q", lineStr)
 	}
-	// X should be at position 3
-	if line[3] != 'X' {
-		t.Errorf("Expected 'X' at position 3, got %q", line[3])
+	// Check overall pattern (space, emoji taking 2 cells, X at position 3)
+	if !strings.HasPrefix(lineStr, " 🎉X") {
+		t.Errorf("Expected line to start with ' 🎉X', got %q", lineStr)
 	}
 }
 
@@ -287,24 +285,27 @@ func TestClearWideOverlaps_EdgeCase_SplitInMiddle(t *testing.T) {
 
 	// Write emoji at position 0 with width 2
 	writeTextAtWithWidth(s, 0, 0, "🎉", 2)
-	line := s.getLine(0)
-	if line[0] == ' ' || line[1] != 0 {
-		t.Errorf("Expected emoji at positions 0-1, got line: %q", string(line))
+	lineStr := s.Line(0)
+	if !strings.Contains(lineStr, "🎉") {
+		t.Errorf("Expected emoji at start, got line: %q", lineStr)
 	}
 
 	// Write at position 1 (the second cell of the emoji)
-	// This should clear the emoji and write 'Y'
+	// New tmux-compatible behavior: insert 'Y' after the emoji
 	writeTextAt(s, 1, 0, "Y")
 
-	line = s.getLine(0)
+	lineStr = s.Line(0)
 
-	// Position 0 should be space (emoji cleared)
-	if line[0] != ' ' {
-		t.Errorf("Expected space at position 0 after write at emoji's second cell, got %q", line[0])
+	// The emoji should be preserved and Y should follow it
+	if !strings.Contains(lineStr, "🎉") {
+		t.Errorf("Expected emoji to be preserved, got %q", lineStr)
 	}
-	// Position 1 should be 'Y'
-	if line[1] != 'Y' {
-		t.Errorf("Expected 'Y' at position 1, got %q", line[1])
+	if !strings.Contains(lineStr, "Y") {
+		t.Errorf("Expected 'Y' in line, got %q", lineStr)
+	}
+	// Line should start with emoji and Y (insert after wide char)
+	if !strings.HasPrefix(lineStr, "🎉Y") {
+		t.Errorf("Expected line to start with '🎉Y', got %q", lineStr)
 	}
 }
 
@@ -314,7 +315,7 @@ func TestSplitSpan_RepeatMode(t *testing.T) {
 
 	left, right, brokeWide := splitSpan(sp, 2, TextReadModeGrapheme)
 
-	if brokeWide {
+	if brokeWide.Width > 0 {
 		t.Errorf("Expected brokeWide=false for repeat mode")
 	}
 	if left.Width != 2 {
@@ -334,7 +335,7 @@ func TestSplitSpan_SimpleText(t *testing.T) {
 
 	left, right, brokeWide := splitSpan(sp, 2, TextReadModeRune)
 
-	if brokeWide {
+	if brokeWide.Width > 0 {
 		t.Errorf("Expected brokeWide=false for simple ASCII")
 	}
 	if left.Text != "he" {
@@ -354,7 +355,7 @@ func TestSplitSpan_WideCharacterBeforeSplit(t *testing.T) {
 
 	left, right, brokeWide := splitSpan(sp, 3, TextReadModeGrapheme)
 
-	if brokeWide {
+	if brokeWide.Width > 0 {
 		t.Errorf("Expected brokeWide=false, split is after the emoji")
 	}
 	if left.Width != 3 {
@@ -371,7 +372,7 @@ func TestSplitSpan_SplitInWideCharacter(t *testing.T) {
 
 	left, right, brokeWide := splitSpan(sp, 1, TextReadModeGrapheme)
 
-	if !brokeWide {
+	if brokeWide.Width == 0 {
 		t.Errorf("Expected brokeWide=true when splitting within wide char")
 	}
 	// Neither span should contain the broken wide character
@@ -392,7 +393,7 @@ func TestSplitSpan_WideCharAtEndOfSpan(t *testing.T) {
 
 	left, right, brokeWide := splitSpan(sp, 6, TextReadModeGrapheme)
 
-	if !brokeWide {
+	if brokeWide.Width == 0 {
 		t.Errorf("Expected brokeWide=true when splitting within emoji at end")
 	}
 	// Left should have "hello", right should be empty
@@ -413,7 +414,7 @@ func TestSplitSpan_MultipleWideCharacters(t *testing.T) {
 
 	left, right, brokeWide := splitSpan(sp, 3, TextReadModeGrapheme)
 
-	if !brokeWide {
+	if brokeWide.Width == 0 {
 		t.Errorf("Expected brokeWide=true when splitting within second emoji")
 	}
 	// Left should have first emoji (2 cells), right should have "hello" (5 cells)
@@ -444,7 +445,7 @@ func TestSplitSpan_BoundaryConditions(t *testing.T) {
 	}
 
 	// Both should not break wide for normal text
-	if brokeWide {
+	if brokeWide.Width > 0 {
 		t.Errorf("Expected brokeWide=false for normal ASCII boundaries")
 	}
 }

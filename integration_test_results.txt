@@ -1,0 +1,12 @@
+
+Integration Test Results
+========================
+
+❌ emoji_overwrite
+  - TTY output differs from tmux
+    Diff (quoted):
+      Line 3:
+        Expected: "🐹yc"
+        Actual:   "🐹c"
+
+Results: 0 passed, 1 failed

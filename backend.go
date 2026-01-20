@@ -124,6 +124,17 @@ func (b *NoPTYBackend) SetSize(w, h int) error {
 	return nil
 }
 
+func (b *NoPTYBackend) Close() error {
+	var err, err2 error
+	if wc, ok := b.w.(io.Closer); ok {
+		err = wc.Close()
+	}
+	if rc, ok := b.r.(io.Closer); ok {
+		err2 = rc.Close()
+	}
+	return errors.Join(err, err2)
+}
+
 // TeeBackend duplicates all reads into tee.
 type TeeBackend struct {
 	backend Backend
@@ -131,8 +142,8 @@ type TeeBackend struct {
 	tee     io.Writer
 }
 
-// WrapBackend returns a TeeBackend wrapping the provided backend.
-func WrapBackend(backend Backend) *TeeBackend {
+// NewTeeBackend returns a TeeBackend wrapping the provided backend.
+func NewTeeBackend(backend Backend) *TeeBackend {
 	if backend == nil {
 		return nil
 	}

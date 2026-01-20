@@ -127,7 +127,7 @@ func (t *TTYFrontend) CursorMoved(x, y int) {
 	t.cursor = Pos{X: x, Y: y}
 	t.renderCursorLocked()
 }
-func (t *TTYFrontend) StyleChanged(fg, bg *Style) {}
+func (t *TTYFrontend) StyleChanged(s Style) {}
 func (t *TTYFrontend) ViewFlagChanged(v ViewFlag, value bool) {
 	if v != VFShowCursor {
 		return
@@ -182,8 +182,8 @@ func (t *TTYFrontend) renderCursorLocked() {
 	_, _ = t.out.Write([]byte(ansiMoveCursor(t.cursor.X, t.cursor.Y) + ansiCursorShow))
 }
 
-func renderStyledLineANSI(line *Line) []byte {
-	if line == nil || len(line.Spans) == 0 {
+func renderStyledLineANSI(line Line) []byte {
+	if len(line.Spans) == 0 {
 		return nil
 	}
 

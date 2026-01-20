@@ -8,49 +8,59 @@ import (
 // TestCursorUp tests the cursor up escape sequence (CSI A)
 // Integration test "cursor_up" was failing - cursor moves up but text placement is wrong
 func TestCursorUp(t *testing.T) {
-	term, _ := MakeTerminalWithMock()
+	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
+	screen := term.screen()
+	width := screen.Size().X
 
 	// Trace what happens step by step
-	term.Write([]byte("Line1"))
+	term.testFeedTerminalInputFromBackend([]byte("Line1"), TextReadModeRune)
 	t.Logf("After 'Line1':")
-	t.Logf("  Cursor: (%d, %d)", term.screen().CursorPos().X, term.screen().CursorPos().Y)
-	t.Logf("  Line 0: %q", strings.TrimRight(string(term.screen().getLine(0)), " "))
+	t.Logf("  Cursor: (%d, %d)", screen.CursorPos().X, screen.CursorPos().Y)
+	t.Logf("  Line 0: %q", strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " "))
 
-	term.Write([]byte("\x1b[A"))
+	term.testFeedTerminalInputFromBackend([]byte("\x1b[A"), TextReadModeRune)
 	t.Logf("After cursor up:")
-	t.Logf("  Cursor: (%d, %d)", term.screen().CursorPos().X, term.screen().CursorPos().Y)
+	t.Logf("  Cursor: (%d, %d)", screen.CursorPos().X, screen.CursorPos().Y)
 
-	term.Write([]byte("Line0"))
+	term.testFeedTerminalInputFromBackend([]byte("Line0"), TextReadModeRune)
 	t.Logf("After 'Line0':")
-	t.Logf("  Cursor: (%d, %d)", term.screen().CursorPos().X, term.screen().CursorPos().Y)
-	t.Logf("  Line 0: %q", strings.TrimRight(string(term.screen().getLine(0)), " "))
-	t.Logf("  Line 1: %q", strings.TrimRight(string(term.screen().getLine(1)), " "))
+	t.Logf("  Cursor: (%d, %d)", screen.CursorPos().X, screen.CursorPos().Y)
+	t.Logf("  Line 0: %q", strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " "))
+	t.Logf("  Line 1: %q", strings.TrimRight(screen.StyledLine(0, width, 1).PlainTextString(), " "))
 
 	// Get the screen output
-	line0 := strings.TrimRight(string(term.screen().getLine(0)), " ")
-	line1 := strings.TrimRight(string(term.screen().getLine(1)), " ")
+	line0 := strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " ")
 
 	// Integration test shows tmux expects "Line1Line0" on a single line
 	// This means after writing "Line1", cursor up should keep cursor at same X position
 	// Then "Line0" overwrites starting from that position
 	expected := "Line1Line0"
-	if line0 != expected && line1 != expected {
-		t.Errorf("Expected %q on one of the lines, got line0=%q, line1=%q", expected, line0, line1)
+	if line0 != expected {
+		t.Errorf("Expected %q on line 0, got %q", expected, line0)
 	}
 }
 
 // TestBrightColorsForeground tests SGR 90-97 (bright foreground colors)
 // Integration test shows we're outputting \x1b[38;5;8m instead of \x1b[90m
 func TestBrightColorsForeground(t *testing.T) {
-	term, _ := MakeTerminalWithMock()
+	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
+	screen := term.screen()
+	width := screen.Size().X
+
+	// *debugCmd = true
+	// *debugTxt = true
 
 	// Write bright colors
 	input := "\x1b[90mDark\x1b[91mRed\x1b[92mGreen\x1b[93mYellow\x1b[39m"
-	term.Write([]byte(input))
+	if err := term.testFeedTerminalInputFromBackend([]byte(input), TextReadModeRune); err != nil {
+		t.Fatal(err)
+	}
 
 	// Check what was actually written
-	line := strings.TrimRight(string(term.screen().getLine(0)), " ")
+	line := strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " ")
 	t.Logf("Text on line 0: %q", line)
+
+	t.Logf("FirstSpanStyle line 0: %#v %q", screen.StyledLine(0, width, 0).Spans[0].Style, string(screen.StyledLine(0, width, 0).Spans[0].Style.ANSIEscape()))
 
 	// Get ANSI output for the line
 	ansi := term.screen().renderLineANSI(0)
@@ -80,10 +90,10 @@ func TestBrightColorsForeground(t *testing.T) {
 
 // TestBrightColorsBackground tests SGR 100-107 (bright background colors)
 func TestBrightColorsBackground(t *testing.T) {
-	term, _ := MakeTerminalWithMock()
+	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
 
 	// Write bright background colors
-	term.Write([]byte("\x1b[100mBG Dark\x1b[101mBG Red\x1b[102mBG Green\x1b[49m"))
+	term.testFeedTerminalInputFromBackend([]byte("\x1b[100mBG Dark\x1b[101mBG Red\x1b[102mBG Green\x1b[49m"), TextReadModeRune)
 
 	// Get ANSI output
 	ansi := term.screen().renderLineANSI(0)
@@ -106,14 +116,17 @@ func TestBrightColorsBackground(t *testing.T) {
 
 // TestEraseAbove tests CSI 1J (erase from cursor to beginning of display)
 func TestEraseAbove(t *testing.T) {
-	term, _ := MakeTerminalWithMock()
+	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	screen := term.screen()
+	width := screen.Size().X
 
 	// Write 3 lines, then erase above current cursor position
-	term.Write([]byte("Top\nMiddle\nBottom\x1b[1JEnd"))
+	term.testFeedTerminalInputFromBackend([]byte("Top\nMiddle\nBottom\x1b[1JEnd"), TextReadModeRune)
 
-	line1 := strings.TrimRight(string(term.screen().getLine(0)), " ")
-	line2 := strings.TrimRight(string(term.screen().getLine(1)), " ")
-	line3 := strings.TrimRight(string(term.screen().getLine(2)), " ")
+	line1 := strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " ")
+	line2 := strings.TrimRight(screen.StyledLine(0, width, 1).PlainTextString(), " ")
+	line3 := strings.TrimRight(screen.StyledLine(0, width, 2).PlainTextString(), " ")
 
 	t.Logf("Line 0: %q", line1)
 	t.Logf("Line 1: %q", line2)
@@ -131,14 +144,17 @@ func TestEraseAbove(t *testing.T) {
 
 // TestEraseBelow tests CSI 0J or CSI J (erase from cursor to end of display)
 func TestEraseBelow(t *testing.T) {
-	term, _ := MakeTerminalWithMock()
+	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	screen := term.screen()
+	width := screen.Size().X
 
 	// Write 3 lines, then erase below current cursor position
-	term.Write([]byte("Top\nMiddle\nBottom\x1b[0JEnd"))
+	term.testFeedTerminalInputFromBackend([]byte("Top\nMiddle\nBottom\x1b[0JEnd"), TextReadModeRune)
 
-	line1 := strings.TrimRight(string(term.screen().getLine(0)), " ")
-	line2 := strings.TrimRight(string(term.screen().getLine(1)), " ")
-	line3 := strings.TrimRight(string(term.screen().getLine(2)), " ")
+	line1 := strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " ")
+	line2 := strings.TrimRight(screen.StyledLine(0, width, 1).PlainTextString(), " ")
+	line3 := strings.TrimRight(screen.StyledLine(0, width, 2).PlainTextString(), " ")
 
 	t.Logf("Line 0: %q", line1)
 	t.Logf("Line 1: %q", line2)
