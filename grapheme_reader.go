@@ -94,13 +94,13 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 		if r.start >= r.end {
 			if runStart == r.start {
 				err := r.fill()
+				runStart = r.start
 				if err != nil && r.Buffered() == 0 {
 					return "", 0, false, err
 				}
 				if r.Buffered() == 0 || !isPrintableByte(r.data[r.start]) {
 					return "", 0, false, nil
 				}
-				runStart = r.start
 				continue
 			}
 			break
@@ -114,6 +114,7 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 			if r.start == runStart {
 				before := r.Buffered()
 				err := r.fill()
+				runStart = r.start
 				if r.Buffered() == before {
 					if err != nil {
 						return "", 0, false, err
