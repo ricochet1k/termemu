@@ -688,7 +688,7 @@ func (s *gridScreen) printScreen() {
 	fmt.Println("+")
 	for i := 0; i < h; i++ {
 		lstr := string(s.renderLineANSI(i))
-		lstr = strings.Replace(lstr, "\000", " ", -1)
+		lstr = strings.ReplaceAll(lstr, "\000", " ")
 		fmt.Printf("\033[m|%s\033[m|\n", lstr)
 	}
 	fmt.Print("+")

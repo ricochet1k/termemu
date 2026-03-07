@@ -27,7 +27,7 @@ func (d *dummyBackend) Write(p []byte) (n int, err error) {
 func TestDataRace_Frontend(t *testing.T) {
 	backend := &dummyBackend{buf: new(bytes.Buffer)}
 	for i := 0; i < 1000; i++ {
-		backend.Write([]byte("Hello, world! "))
+		_, _ = backend.Write([]byte("Hello, world! "))
 	}
 
 	term := New(&EmptyFrontend{}, backend)
@@ -56,7 +56,7 @@ func TestDataRace_Frontend(t *testing.T) {
 func TestDataRace_Write(t *testing.T) {
 	backend := &dummyBackend{buf: new(bytes.Buffer)}
 	for i := 0; i < 1000; i++ {
-		backend.Write([]byte("Hello, world! "))
+		_, _ = backend.Write([]byte("Hello, world! "))
 	}
 
 	term := New(&EmptyFrontend{}, backend)
@@ -64,7 +64,7 @@ func TestDataRace_Write(t *testing.T) {
 	done := make(chan bool)
 	go func() {
 		for i := 0; i < 1000; i++ {
-			term.Write([]byte("A"))
+			_, _ = term.Write([]byte("A"))
 		}
 		done <- true
 	}()
@@ -85,7 +85,7 @@ func TestDataRace_Write(t *testing.T) {
 func TestDataRace_Resize(t *testing.T) {
 	backend := &dummyBackend{buf: new(bytes.Buffer)}
 	for i := 0; i < 1000; i++ {
-		backend.Write([]byte("Hello, world! "))
+		_, _ = backend.Write([]byte("Hello, world! "))
 	}
 
 	term := New(&EmptyFrontend{}, backend)
@@ -93,7 +93,7 @@ func TestDataRace_Resize(t *testing.T) {
 	done := make(chan bool)
 	go func() {
 		for i := 0; i < 1000; i++ {
-			term.Resize(100+i%10, 100)
+			_ = term.Resize(100+i%10, 100)
 		}
 		done <- true
 	}()

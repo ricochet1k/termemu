@@ -481,16 +481,16 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					style.ResetMode(ModeOverline)
 
 				case p >= 30 && p <= 37:
-					style.SetColor256(ComponentFG, p-30)
+					_ = style.SetColor256(ComponentFG, p-30)
 
 				case p == 39: // default color
-					style.SetColorDefault(ComponentFG)
+					_ = style.SetColorDefault(ComponentFG)
 
 				case p >= 40 && p <= 47:
-					style.SetColor256(ComponentBG, p-40)
+					_ = style.SetColor256(ComponentBG, p-40)
 
 				case p == 49: // default color
-					style.SetColorDefault(ComponentBG)
+					_ = style.SetColorDefault(ComponentBG)
 
 				case p == 38 || p == 48: // extended set color
 					if i+2 < len(params) {
@@ -500,7 +500,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 							if p == 48 {
 								component = ComponentBG
 							}
-							style.SetColor256(component, params[i+2]&0xff)
+							_ = style.SetColor256(component, params[i+2]&0xff)
 							i += 2
 						case 2: // RGB Color
 							if i+4 < len(params) {
@@ -508,7 +508,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 								if p == 48 {
 									component = ComponentBG
 								}
-								style.SetColorRGB(component, params[i+2], params[i+3], params[i+4])
+								_ = style.SetColorRGB(component, params[i+2], params[i+3], params[i+4])
 								i += 4
 							}
 						default:
@@ -518,10 +518,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					}
 
 				case p >= 90 && p <= 97:
-					style.SetColorBright(ComponentFG, int(p-90))
+					_ = style.SetColorBright(ComponentFG, int(p-90))
 
 				case p >= 100 && p <= 107:
-					style.SetColorBright(ComponentBG, int(p-100))
+					_ = style.SetColorBright(ComponentBG, int(p-100))
 
 				default:
 					debugPrintln(debugTodo, "TODO: Unhandled set color: ", p)
@@ -736,7 +736,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		switch b {
 		case 'u': // Query keyboard mode
 			flags := t.keyboardFlags()
-			_, _ = t.Write([]byte(fmt.Sprintf("\033[?%du", flags)))
+			_, _ = fmt.Fprintf(t, "\033[?%du", flags)
 			return true
 		case 'm': // Private SGR (ignored)
 			if *debugCmd {

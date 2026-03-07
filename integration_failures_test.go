@@ -13,16 +13,16 @@ func TestCursorUp(t *testing.T) {
 	width := screen.Size().X
 
 	// Trace what happens step by step
-	term.testFeedTerminalInputFromBackend([]byte("Line1"), TextReadModeRune)
+	_ = term.testFeedTerminalInputFromBackend([]byte("Line1"), TextReadModeRune)
 	t.Logf("After 'Line1':")
 	t.Logf("  Cursor: (%d, %d)", screen.CursorPos().X, screen.CursorPos().Y)
 	t.Logf("  Line 0: %q", strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " "))
 
-	term.testFeedTerminalInputFromBackend([]byte("\x1b[A"), TextReadModeRune)
+	_ = term.testFeedTerminalInputFromBackend([]byte("\x1b[A"), TextReadModeRune)
 	t.Logf("After cursor up:")
 	t.Logf("  Cursor: (%d, %d)", screen.CursorPos().X, screen.CursorPos().Y)
 
-	term.testFeedTerminalInputFromBackend([]byte("Line0"), TextReadModeRune)
+	_ = term.testFeedTerminalInputFromBackend([]byte("Line0"), TextReadModeRune)
 	t.Logf("After 'Line0':")
 	t.Logf("  Cursor: (%d, %d)", screen.CursorPos().X, screen.CursorPos().Y)
 	t.Logf("  Line 0: %q", strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " "))
@@ -93,7 +93,7 @@ func TestBrightColorsBackground(t *testing.T) {
 	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
 
 	// Write bright background colors
-	term.testFeedTerminalInputFromBackend([]byte("\x1b[100mBG Dark\x1b[101mBG Red\x1b[102mBG Green\x1b[49m"), TextReadModeRune)
+	_ = term.testFeedTerminalInputFromBackend([]byte("\x1b[100mBG Dark\x1b[101mBG Red\x1b[102mBG Green\x1b[49m"), TextReadModeRune)
 
 	// Get ANSI output
 	ansi := term.screen().renderLineANSI(0)
@@ -122,7 +122,7 @@ func TestEraseAbove(t *testing.T) {
 	width := screen.Size().X
 
 	// Write 3 lines, then erase above current cursor position
-	term.testFeedTerminalInputFromBackend([]byte("Top\nMiddle\nBottom\x1b[1JEnd"), TextReadModeRune)
+	_ = term.testFeedTerminalInputFromBackend([]byte("Top\nMiddle\nBottom\x1b[1JEnd"), TextReadModeRune)
 
 	line1 := strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " ")
 	line2 := strings.TrimRight(screen.StyledLine(0, width, 1).PlainTextString(), " ")
@@ -150,7 +150,7 @@ func TestEraseBelow(t *testing.T) {
 	width := screen.Size().X
 
 	// Write 3 lines, then erase below current cursor position
-	term.testFeedTerminalInputFromBackend([]byte("Top\nMiddle\nBottom\x1b[0JEnd"), TextReadModeRune)
+	_ = term.testFeedTerminalInputFromBackend([]byte("Top\nMiddle\nBottom\x1b[0JEnd"), TextReadModeRune)
 
 	line1 := strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " ")
 	line2 := strings.TrimRight(screen.StyledLine(0, width, 1).PlainTextString(), " ")

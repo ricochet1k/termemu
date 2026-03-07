@@ -51,7 +51,7 @@ func initDebug() {
 func debugPause(debugFlag *bool) {
 	if *debugWait && (debugFlag == debugTxt || debugFlag == debugScroll) {
 		b := []byte{0}
-		os.Stdin.Read(b)
+		_, _ = os.Stdin.Read(b)
 		if b[0] == 'q' {
 			os.Exit(1)
 		}
@@ -63,7 +63,7 @@ func debugPrintln(debugFlag *bool, args ...interface{}) {
 		initDebug()
 	}
 	if *debugFlag {
-		fmt.Fprintln(debugOutput, args...)
+		_, _ = fmt.Fprintln(debugOutput, args...)
 		debugPause(debugFlag)
 	}
 }
@@ -73,7 +73,7 @@ func debugPrintf(debugFlag *bool, f string, args ...interface{}) {
 		initDebug()
 	}
 	if *debugFlag {
-		fmt.Fprintf(debugOutput, f, args...)
+		_, _ = fmt.Fprintf(debugOutput, f, args...)
 		debugPause(debugFlag)
 	}
 }

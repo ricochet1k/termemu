@@ -149,7 +149,7 @@ func TestSendMouseRaw_Encodings(t *testing.T) {
 
 	// X10 encoding
 	t1.viewInts[VIMouseEncoding] = MEX10
-	go t1.SendMouseRaw(MBtn1, true, 0, 1, 2)
+	go func() { _ = t1.SendMouseRaw(MBtn1, true, 0, 1, 2) }()
 	buf := make([]byte, 16)
 	n, _ := r.Read(buf)
 	if !strings.HasPrefix(string(buf[:n]), "\x1b[M") {
@@ -158,7 +158,7 @@ func TestSendMouseRaw_Encodings(t *testing.T) {
 
 	// UTF8 encoding
 	t1.viewInts[VIMouseEncoding] = MEUTF8
-	go t1.SendMouseRaw(MBtn2, false, 0, 3, 4)
+	go func() { _ = t1.SendMouseRaw(MBtn2, false, 0, 3, 4) }()
 	n, _ = r.Read(buf)
 	if !strings.HasPrefix(string(buf[:n]), "\x1b[M") {
 		t.Fatalf("unexpected UTF8 mouse seq: %q", string(buf[:n]))
@@ -166,7 +166,7 @@ func TestSendMouseRaw_Encodings(t *testing.T) {
 
 	// SGR encoding
 	t1.viewInts[VIMouseEncoding] = MESGR
-	go t1.SendMouseRaw(MBtn3, true, 0, 5, 6)
+	go func() { _ = t1.SendMouseRaw(MBtn3, true, 0, 5, 6) }()
 	// SGR writes longer string; read until newline-like end
 	n, _ = r.Read(buf)
 	if !strings.HasPrefix(string(buf[:n]), "\x1b[<") {
@@ -178,7 +178,7 @@ func TestHandleCmdCSI_DeviceAttrsAndAlternateScreen(t *testing.T) {
 	r, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
 	// Run in goroutine because device attrs query writes response to backend
-	go t1.testHandleCommand(t, "[>c")
+	go func() { _ = t1.testHandleCommand(t, "[>c") }()
 	buf := make([]byte, 64)
 	n, _ := r.Read(buf)
 	if !strings.Contains(string(buf[:n]), "\x1b[>1;4402;0c") {
@@ -419,7 +419,7 @@ func TestCSI_DeviceStatusReport(t *testing.T) {
 				t1.screen().setCursorPos(tt.cursorX, tt.cursorY)
 			}
 
-			go t1.testHandleCommand(t, tt.seq)
+			go func() { _ = t1.testHandleCommand(t, tt.seq) }()
 
 			buf := make([]byte, 64)
 			n, err := r.Read(buf)
@@ -450,7 +450,7 @@ func TestCSI_DeviceAttributes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 
-			go t1.testHandleCommand(t, tt.seq)
+			go func() { _ = t1.testHandleCommand(t, tt.seq) }()
 
 			buf := make([]byte, 64)
 			n, err := r.Read(buf)
@@ -814,7 +814,7 @@ func TestCSI_KeyboardModes(t *testing.T) {
 			}
 
 			if tt.query {
-				go t1.testHandleCommand(t, tt.sequence)
+				go func() { _ = t1.testHandleCommand(t, tt.sequence) }()
 				buf := make([]byte, 32)
 				n, _ := r.Read(buf)
 				got := string(buf[:n])

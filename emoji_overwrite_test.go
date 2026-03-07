@@ -11,7 +11,7 @@ import (
 func TestEmojiOverwriteSequence(t *testing.T) {
 	// This reproduces the emoji_overwrite integration test scenario
 	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
-	term.Resize(80, 8)
+	_ = term.Resize(80, 8)
 
 	// Test case from integration: "🐹c\x1b[D\x1b[Dy"
 	if err := term.testFeedTerminalInputFromBackend([]byte(
@@ -43,7 +43,7 @@ func TestEmojiOverwriteSequence(t *testing.T) {
 func TestSimpleTextWrite(t *testing.T) {
 	// Test the most basic case - just writing text
 	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
-	term.Resize(80, 24)
+	_ = term.Resize(80, 24)
 
 	screen := term.screen()
 	if writer, ok := screen.(interface {
@@ -67,7 +67,7 @@ func TestSimpleTextWrite(t *testing.T) {
 func TestCaptureANSILikeIntegrationTest(t *testing.T) {
 	// This replicates exactly what the integration test does
 	r, w := io.Pipe()
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	backend := NewNoPTYBackend(r, w)
 	frontend := &EmptyFrontend{}
@@ -85,7 +85,7 @@ func TestCaptureANSILikeIntegrationTest(t *testing.T) {
 	if _, err := w.Write([]byte(sequence)); err != nil {
 		t.Fatalf("write sequence: %v", err)
 	}
-	w.Close()
+	_ = w.Close()
 
 	// Give time for processing
 	time.Sleep(50 * time.Millisecond)
@@ -116,7 +116,7 @@ func TestEmojiOverwriteThroughTTY(t *testing.T) {
 	backend := NewNoPTYBackend(pr, io.Discard)
 	outer := NewWithMode(outerFrontend, backend, TextReadModeRune).(*terminal)
 	outerFrontend.SetTerminal(outer)
-	outer.Resize(80, 8)
+	_ = outer.Resize(80, 8)
 
 	// Write the sequence: "🐹c\x1b[D\x1b[Dy"
 	sequence := "🐹c\x1b[D\x1b[Dy"

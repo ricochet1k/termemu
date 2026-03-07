@@ -63,10 +63,11 @@ func NewWithBackend(f Frontend, backend Backend) Terminal {
 
 // NewWithMode makes a new terminal using the provided Frontend, Backend, and text read mode.
 func NewWithMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
-	t := newTerminal(f, backend, mode)
-	if t != nil {
-		t.startReadLoop()
+	if backend == nil {
+		return nil
 	}
+	t := newTerminal(f, backend, mode)
+	t.startReadLoop()
 	return t
 }
 
@@ -75,9 +76,6 @@ func NewWithMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
 func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 	if f == nil {
 		f = &EmptyFrontend{}
-	}
-	if backend == nil {
-		return nil
 	}
 
 	return &terminal{
@@ -140,13 +138,6 @@ func (t *terminal) Write(b []byte) (int, error) {
 func (t *terminal) Size() (w, h int) {
 	size := t.screen().Size()
 	return size.X, size.Y
-}
-
-type winsize struct {
-	wsRow    uint16
-	wsCol    uint16
-	wsXPixel uint16
-	wsYPixel uint16
 }
 
 func (t *terminal) Resize(w, h int) error {

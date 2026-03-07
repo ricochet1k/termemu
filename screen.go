@@ -517,7 +517,7 @@ func (s *spanScreen) printScreen() {
 	fmt.Println("+")
 	for i := 0; i < h; i++ {
 		lstr := string(s.renderLineANSI(i))
-		lstr = strings.Replace(lstr, "\000", " ", -1)
+		lstr = strings.ReplaceAll(lstr, "\000", " ")
 		fmt.Printf("\033[m|%s\033[m|\n", lstr)
 	}
 	fmt.Print("+")
@@ -997,7 +997,6 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	}
 	if hasRight {
 		line.spans[dest] = right
-		dest++
 	}
 
 	if suffixLen > 0 && destAfter <= suffixStart {
