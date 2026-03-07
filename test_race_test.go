@@ -2,8 +2,8 @@ package termemu
 
 import (
 	"bytes"
-	"testing"
 	"sync"
+	"testing"
 )
 
 type dummyBackend struct {
@@ -12,7 +12,7 @@ type dummyBackend struct {
 }
 
 func (d *dummyBackend) SetSize(w, h int) error { return nil }
-func (d *dummyBackend) Close() error { return nil }
+func (d *dummyBackend) Close() error           { return nil }
 func (d *dummyBackend) Read(p []byte) (n int, err error) {
 	d.Lock()
 	defer d.Unlock()

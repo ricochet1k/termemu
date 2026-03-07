@@ -38,6 +38,7 @@ func main() {
 
 	tty := termemu.NewTTYFrontend(nil, os.Stdout)
 	mode := termemu.TextReadModeRune
+	_ = mode
 	switch strings.ToLower(*textMode) {
 	case "rune":
 		mode = termemu.TextReadModeRune

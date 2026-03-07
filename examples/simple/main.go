@@ -27,6 +27,7 @@ func main() {
 	// Simple example: create a terminal, run printf, and print the screen
 	mf := &termemu.EmptyFrontend{}
 	mode := termemu.TextReadModeRune
+	_ = mode
 	switch strings.ToLower(*textMode) {
 	case "rune":
 		mode = termemu.TextReadModeRune

@@ -135,7 +135,7 @@ func TestHandleCmdOSC_WindowTitleAndStrings(t *testing.T) {
 	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
 
 	// OSC sequence: ]0;title BEL
-	t1.mustHandleCommand(t, "]0;mytitle")
+	t1.mustHandleCommand(t, "]0;mytitle\a")
 	if mf.ViewStrings[VSWindowTitle] != "mytitle" {
 		t.Fatalf("expected window title 'mytitle', got %q", mf.ViewStrings[VSWindowTitle])
 	}

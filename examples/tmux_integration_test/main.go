@@ -403,7 +403,7 @@ func printQuotedDiff(w *os.File, expected, actual string) {
 		if expLine != actLine {
 			_, _ = fmt.Fprintf(w, "      Line %d:\n", i+1)
 			_, _ = fmt.Fprintf(w, "        Expected: %q\n", expLine)
-			fmt.Fprintf(w, "        Actual:   %q\n", actLine)
+			_, _ = fmt.Fprintf(w, "        Actual:   %q\n", actLine)
 		}
 	}
 }
