@@ -241,7 +241,7 @@ func captureTermemuThroughTmux(seq string, width, height int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create pipe: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	backend := termemu.NewNoPTYBackend(r, w)
 	frontend := &termemu.EmptyFrontend{}
@@ -258,7 +258,7 @@ func captureTermemuThroughTmux(seq string, width, height int) (string, error) {
 	if _, err := w.Write([]byte(seq)); err != nil {
 		return "", fmt.Errorf("write sequence: %w", err)
 	}
-	w.Close()
+	_ = w.Close()
 
 	// Give time for processing
 	time.Sleep(50 * time.Millisecond)
@@ -304,7 +304,7 @@ func captureTTYThroughTmux(seq string, width, height int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create pipe: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	// Create a buffer to capture TTY output
 	var ttyBuf bytes.Buffer
@@ -328,7 +328,7 @@ func captureTTYThroughTmux(seq string, width, height int) (string, error) {
 	if _, err := w.Write([]byte(seq)); err != nil {
 		return "", fmt.Errorf("write sequence: %w", err)
 	}
-	w.Close()
+	_ = w.Close()
 
 	// Give time for processing
 	time.Sleep(50 * time.Millisecond)
@@ -401,9 +401,9 @@ func printQuotedDiff(w *os.File, expected, actual string) {
 		}
 
 		if expLine != actLine {
-			fmt.Fprintf(w, "      Line %d:\n", i+1)
-			fmt.Fprintf(w, "        Expected: %q\n", expLine)
-			fmt.Fprintf(w, "        Actual:   %q\n", actLine)
+			_, _ = fmt.Fprintf(w, "      Line %d:\n", i+1)
+			_, _ = fmt.Fprintf(w, "        Expected: %q\n", expLine)
+			_, _ = fmt.Fprintf(w, "        Actual:   %q\n", actLine)
 		}
 	}
 }

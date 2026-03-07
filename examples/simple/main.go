@@ -27,6 +27,7 @@ func main() {
 	// Simple example: create a terminal, run printf, and print the screen
 	mf := &termemu.EmptyFrontend{}
 	mode := termemu.TextReadModeRune
+	_ = mode
 	switch strings.ToLower(*textMode) {
 	case "rune":
 		mode = termemu.TextReadModeRune
@@ -94,9 +95,9 @@ func main() {
 	}
 	if *delay > 0 {
 		<-time.After(time.Duration(*delay) * time.Millisecond)
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 	} else {
-		cmd.Wait()
+		_ = cmd.Wait()
 	}
 	// Print the terminal screen to stdout
 	t.PrintTerminal()
