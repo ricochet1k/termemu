@@ -93,9 +93,11 @@ func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 }
 
 func (t *terminal) SetFrontend(f Frontend) {
-	t.frontend = f
-	t.mainScreen.SetFrontend(f)
-	t.altScreen.SetFrontend(f)
+	t.WithLock(func() {
+		t.frontend = f
+		t.mainScreen.SetFrontend(f)
+		t.altScreen.SetFrontend(f)
+	})
 }
 
 // func NewNoPTY(f Frontend) Terminal {
@@ -111,12 +113,16 @@ const termStr = "TERM=xterm-256color"
 
 // Write is for the client to write keyboard/mouse input or terminal feedback
 func (t *terminal) Write(b []byte) (int, error) {
-	if t.backend == nil {
+	t.Lock()
+	backend := t.backend
+	t.Unlock()
+
+	if backend == nil {
 		return 0, errors.New("backend is nil")
 	}
 	total := 0
 	for len(b) > 0 {
-		n, err := t.backend.Write(b)
+		n, err := backend.Write(b)
 		total += n
 		if err != nil {
 			return total, err
@@ -144,27 +150,36 @@ type winsize struct {
 }
 
 func (t *terminal) Resize(w, h int) error {
-	t.mainScreen.setSize(w, h)
-	t.altScreen.setSize(w, h)
+	t.WithLock(func() {
+		t.mainScreen.setSize(w, h)
+		t.altScreen.setSize(w, h)
+	})
 
-	if t.backend == nil {
+	t.Lock()
+	backend := t.backend
+	t.Unlock()
+
+	if backend == nil {
 		return nil
 	}
 
-	return t.backend.SetSize(w, h)
+	return backend.SetSize(w, h)
 }
 
 func (t *terminal) startReadLoop() {
-	if t.readLoopStarted {
-		return
-	}
-	if t.backend == nil {
+	t.Lock()
+	started := t.readLoopStarted
+	backend := t.backend
+	if started || backend == nil {
+		t.Unlock()
 		return
 	}
 	t.readLoopStarted = true
 	if t.readLoopDone == nil {
 		t.readLoopDone = make(chan struct{})
 	}
+	t.Unlock()
+
 	go func() {
 		defer close(t.readLoopDone)
 		t.ptyReadLoop()

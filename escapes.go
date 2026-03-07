@@ -36,12 +36,14 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 	})
 	if useBytes {
 		maxWidth := 0
-		if t.screen().AutoWrap() {
-			maxWidth = t.screen().Size().X - t.screen().CursorPos().X
-			if maxWidth < 1 {
-				maxWidth = 1
+		t.WithLock(func() {
+			if t.screen().AutoWrap() {
+				maxWidth = t.screen().Size().X - t.screen().CursorPos().X
+				if maxWidth < 1 {
+					maxWidth = 1
+				}
 			}
-		}
+		})
 		data, width, merge, err := gr.ReadPrintableBytes(maxWidth)
 		if err != nil {
 			if err != io.EOF {
