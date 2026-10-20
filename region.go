@@ -43,6 +43,7 @@ func (r Region) Clamp(rc Region) Region {
 		X:  nx,
 		X2: clamp(r.X2, nx, rc.X2),
 		Y:  ny,
-		Y2: clamp(r.Y2, ny, rc.X2),
+		Y2: clamp(r.Y2, ny, rc.Y2),
 	}
 }
+
