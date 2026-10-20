@@ -37,6 +37,7 @@ type screen interface {
 	saveCursorPos()
 	restoreCursorPos()
 	printScreen()
+	setScrollCapture(func(lines []spanLine, wrapped []bool))
 }
 
 // Pos holds X/Y coordinates.
@@ -47,6 +48,7 @@ type Pos struct {
 
 type spanScreen struct {
 	lines    []spanLine
+	wrapped  []bool // wrapped[y] is true when line y is a continuation of the previous line due to auto-wrap
 	frontend Frontend
 
 	style Style
@@ -64,6 +66,10 @@ type spanScreen struct {
 
 	// scratch buffers for rendering
 	renderBuffer []rune
+
+	// scrollCapture is called before lines scroll off. It receives the
+	// physical rows being lost, along with their wrapped flags.
+	scrollCapture func(lines []spanLine, wrapped []bool)
 }
 
 type spanLine struct {
@@ -261,18 +267,23 @@ func (s *spanScreen) setSize(w, h int) {
 
 	prevH := s.size.Y
 	newLines := make([]spanLine, h)
+	newWrapped := make([]bool, h)
 	for y := 0; y < h; y++ {
 		switch {
 		case y < prevH && len(s.lines) > 0:
 			line := s.lines[y]
 			resizeLine(&line, w, s.style, s.textMode)
 			newLines[y] = line
+			if y < len(s.wrapped) {
+				newWrapped[y] = s.wrapped[y]
+			}
 		default:
 			newLines[y] = blankSpanLine(w, s.style)
 		}
 	}
 
 	s.lines = newLines
+	s.wrapped = newWrapped
 
 	s.bottomMargin = h - (s.size.Y - s.bottomMargin)
 
@@ -300,6 +311,9 @@ func (s *spanScreen) eraseRegion(r Region, cr ChangeReason) {
 	for i := r.Y; i < r.Y2; i++ {
 		debugPrintln(debugErase, "erase: ", r.X, i, emptySpan.Width)
 		s.rawWriteSpan(r.X, i, emptySpan, cr)
+		if r.X == 0 && r.X2 == s.size.X && i < len(s.wrapped) {
+			s.wrapped[i] = false
+		}
 	}
 }
 
@@ -329,6 +343,9 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 	if s.cursorPos.X+width > s.size.X {
 		if s.autoWrap {
 			s.moveCursor(-s.cursorPos.X, 1, false, true)
+			if s.cursorPos.Y < len(s.wrapped) {
+				s.wrapped[s.cursorPos.Y] = true
+			}
 		} else {
 			s.cursorPos.X = s.size.X - width
 		}
@@ -420,8 +437,11 @@ func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 func (s *spanScreen) setCursorPos(x, y int) {
 	s.cursorPos.X = clamp(x, 0, s.size.X-1)
 	s.cursorPos.Y = clamp(y, 0, s.size.Y-1)
+	// Explicit cursor positioning breaks any wrap continuation.
+	if s.cursorPos.Y < len(s.wrapped) {
+		s.wrapped[s.cursorPos.Y] = false
+	}
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
-	// debugPrintln(debugCursor, "cursor set: ", x, y, s.cursorPos, s.size)
 }
 
 func (s *spanScreen) setScrollMarginTopBottom(top, bottom int) {
@@ -441,19 +461,45 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 	if dy > 0 {
 		for y := y2; y >= y1+dy; y-- {
 			s.lines[y] = s.lines[y-dy]
+			if y < len(s.wrapped) {
+				s.wrapped[y] = s.wrapped[y-dy]
+			}
 		}
 		for y := y1; y < y1+dy; y++ {
 			s.lines[y] = blankSpanLine(s.size.X, s.style)
+			if y < len(s.wrapped) {
+				s.wrapped[y] = false
+			}
 		}
 		s.frontend.RegionChanged(Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 		debugPrintln(debugScroll, "scroll changed region:", Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
 		s.frontend.RegionChanged(Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X}, CRScroll)
 	} else {
+		// dy < 0: content shifts up, lines at the top scroll off.
+		captureCount := -dy
+		if s.scrollCapture != nil {
+			captured := make([]spanLine, captureCount)
+			capturedW := make([]bool, captureCount)
+			for i := 0; i < captureCount; i++ {
+				captured[i] = s.lines[y1+i]
+				if y1+i < len(s.wrapped) {
+					capturedW[i] = s.wrapped[y1+i]
+				}
+			}
+			s.scrollCapture(captured, capturedW)
+		}
+
 		for y := y1; y <= y2+dy; y++ {
 			s.lines[y] = s.lines[y-dy]
+			if y < len(s.wrapped) {
+				s.wrapped[y] = s.wrapped[y-dy]
+			}
 		}
 		for y := y2 + dy + 1; y <= y2; y++ {
 			s.lines[y] = blankSpanLine(s.size.X, s.style)
+			if y < len(s.wrapped) {
+				s.wrapped[y] = false
+			}
 		}
 		s.frontend.RegionChanged(Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X}, CRScroll)
 		s.frontend.RegionChanged(Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
@@ -474,6 +520,9 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 		for s.cursorPos.X >= s.size.X {
 			s.cursorPos.X -= s.size.X
 			s.cursorPos.Y++
+			if s.cursorPos.Y < len(s.wrapped) {
+				s.wrapped[s.cursorPos.Y] = true
+			}
 		}
 	} else {
 		s.cursorPos.X += dx
@@ -506,6 +555,10 @@ func (s *spanScreen) saveCursorPos() {
 func (s *spanScreen) restoreCursorPos() {
 	s.cursorPos = s.savedCursorPos
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
+}
+
+func (s *spanScreen) setScrollCapture(cb func(lines []spanLine, wrapped []bool)) {
+	s.scrollCapture = cb
 }
 
 func (s *spanScreen) printScreen() {

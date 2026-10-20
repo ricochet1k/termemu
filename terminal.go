@@ -19,6 +19,7 @@ type Terminal interface {
 
 	Write(b []byte) (int, error)
 	SendKey(KeyEvent) (int, error)
+	SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int) error
 	Size() (int, int)
 	Resize(int, int) error
 	Line(int) string
@@ -26,7 +27,8 @@ type Terminal interface {
 	StyledLine(x, w, y int) Line
 	StyledLines(r Region) []Line
 
-	PrintTerminal() // for debugging
+	// Scrollback returns the terminal's scrollback buffer for reading.
+	Scrollback() *Scrollback
 }
 
 type terminal struct {
@@ -49,6 +51,11 @@ type terminal struct {
 
 	keyboardMain keyboardMode
 	keyboardAlt  keyboardMode
+
+	scrollRows    []scrollRow
+	scrollNextID  ScrollID
+	scrollBaseIdx int
+	scrollMaxRows int
 }
 
 // New makes a new terminal using the provided Frontend, Backend, and default text read mode.
@@ -56,17 +63,20 @@ func New(f Frontend, backend Backend) Terminal {
 	return NewWithMode(f, backend, TextReadModeRune)
 }
 
-// NewWithBackend makes a new terminal using the provided Frontend and Backend.
-func NewWithBackend(f Frontend, backend Backend) Terminal {
-	return NewWithMode(f, backend, TextReadModeRune)
-}
-
 // NewWithMode makes a new terminal using the provided Frontend, Backend, and text read mode.
-func NewWithMode(f Frontend, backend Backend, mode TextReadMode) Terminal {
+// If the frontend implements SetTerminal (e.g. *TTYFrontend), it is wired automatically.
+// Optional TerminalOptions configure scrollback size and other settings.
+func NewWithMode(f Frontend, backend Backend, mode TextReadMode, opts ...TerminalOption) Terminal {
 	if backend == nil {
 		return nil
 	}
 	t := newTerminal(f, backend, mode)
+	for _, opt := range opts {
+		opt(t)
+	}
+	if setter, ok := f.(interface{ SetTerminal(Terminal) }); ok {
+		setter.SetTerminal(t)
+	}
 	t.startReadLoop()
 	return t
 }
@@ -78,16 +88,25 @@ func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 		f = &EmptyFrontend{}
 	}
 
-	return &terminal{
-		frontend:     f,
-		mainScreen:   newScreen(f),
-		altScreen:    newScreen(f),
-		backend:      backend,
-		viewFlags:    make([]bool, viewFlagCount),
-		viewInts:     make([]int, viewIntCount),
-		viewStrings:  make([]string, viewStringCount),
-		textReadMode: mode,
+	t := &terminal{
+		frontend:      f,
+		mainScreen:    newScreen(f),
+		altScreen:     newScreen(f),
+		backend:       backend,
+		viewFlags:     make([]bool, viewFlagCount),
+		viewInts:      make([]int, viewIntCount),
+		viewStrings:   make([]string, viewStringCount),
+		textReadMode:  mode,
+		scrollRows:    make([]scrollRow, 0, DefaultScrollbackRows),
+		scrollNextID:  1,
+		scrollMaxRows: DefaultScrollbackRows,
 	}
+
+	// Wire scroll capture to feed incoming rows into the scrollback buffer.
+	t.mainScreen.setScrollCapture(t.scrollCapture)
+	t.altScreen.setScrollCapture(t.scrollCapture)
+
+	return t
 }
 
 func (t *terminal) SetFrontend(f Frontend) {
@@ -106,6 +125,20 @@ func (t *terminal) SetFrontend(f Frontend) {
 // 		},
 // 	}
 // }
+
+// TerminalOption configures a Terminal at construction time.
+type TerminalOption func(*terminal)
+
+// WithScrollback sets the scrollback row capacity. Rows <= 0 uses DefaultScrollbackRows.
+func WithScrollback(rows int) TerminalOption {
+	return func(t *terminal) {
+		if rows <= 0 {
+			rows = DefaultScrollbackRows
+		}
+		t.scrollRows = make([]scrollRow, 0, rows)
+		t.scrollMaxRows = rows
+	}
+}
 
 const termStr = "TERM=xterm-256color"
 
@@ -208,8 +241,27 @@ func (t *terminal) StyledLines(r Region) []Line {
 	return t.screen().StyledLines(r)
 }
 
-func (t *terminal) PrintTerminal() {
-	t.screen().printScreen()
+// PrintTerminal prints the terminal screen contents to stdout for debugging.
+// It uses only the public Terminal interface, with proper locking.
+func PrintTerminal(t Terminal) {
+	t.WithLock(func() {
+		w, h := t.Size()
+		fmt.Print("+")
+		for i := 0; i < w; i++ {
+			fmt.Print("-")
+		}
+		fmt.Println("+")
+		for i := 0; i < h; i++ {
+			lstr := t.ANSILine(i)
+			lstr = strings.ReplaceAll(lstr, "\000", " ")
+			fmt.Printf("\033[m|%s\033[m|\n", lstr)
+		}
+		fmt.Print("+")
+		for i := 0; i < w; i++ {
+			fmt.Print("-")
+		}
+		fmt.Println("+")
+	})
 }
 
 type MouseBtn byte
@@ -315,6 +367,49 @@ func (t *terminal) setViewString(flag ViewString, value string) {
 }
 func (t *terminal) GetViewString(flag ViewString) string {
 	return t.viewStrings[flag]
+}
+
+// Scrollback returns the terminal's scrollback buffer.
+func (t *terminal) Scrollback() *Scrollback {
+	return &Scrollback{t: t}
+}
+
+// scrollCapture is the callback wired to the screen's scrollCapture.
+// Called with t.Lock held.
+func (t *terminal) scrollCapture(lines []spanLine, wrapped []bool) {
+	if t.onAltScreen {
+		return
+	}
+	for i, sl := range lines {
+		if i >= len(wrapped) {
+			break
+		}
+		t.addScrollRow(sl.spans, sl.width, wrapped[i])
+	}
+}
+
+// addScrollRow appends a physical row to the scrollback ring buffer.
+// Caller must hold t.Lock.
+func (t *terminal) addScrollRow(spans []Span, width int, wrapped bool) {
+	// Deep-copy spans since the screen will reuse them.
+	spansCopy := make([]Span, len(spans))
+	copy(spansCopy, spans)
+
+	idx := len(t.scrollRows)
+	if idx < t.scrollMaxRows {
+		t.scrollRows = append(t.scrollRows, scrollRow{})
+	} else {
+		idx = t.scrollBaseIdx
+		t.scrollBaseIdx = (t.scrollBaseIdx + 1) % cap(t.scrollRows)
+	}
+
+	t.scrollRows[idx] = scrollRow{
+		id:      t.scrollNextID,
+		spans:   spansCopy,
+		width:   width,
+		wrapped: wrapped,
+	}
+	t.scrollNextID++
 }
 
 // returns screen and unlock fn, must defer the unlock fn

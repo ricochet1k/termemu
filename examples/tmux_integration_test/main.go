@@ -310,12 +310,8 @@ func captureTTYThroughTmux(seq string, width, height int) (string, error) {
 	var ttyBuf bytes.Buffer
 
 	backend := termemu.NewNoPTYBackend(r, w)
-	ttyFrontend := termemu.NewTTYFrontend(nil, &ttyBuf)
+	ttyFrontend := termemu.NewTTYFrontend(&ttyBuf)
 	term := termemu.New(ttyFrontend, backend)
-	if term == nil {
-		return "", fmt.Errorf("failed to create terminal")
-	}
-	ttyFrontend.SetTerminal(term)
 
 	if err := term.Resize(width, height); err != nil {
 		return "", fmt.Errorf("resize: %w", err)

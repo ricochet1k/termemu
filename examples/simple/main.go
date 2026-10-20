@@ -59,8 +59,12 @@ func main() {
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	backend := &termemu.PTYBackend{}
-	if err := backend.StartCommand(cmd); err != nil {
-		fmt.Fprintln(os.Stderr, "StartCommand error; falling back:", err)
+	if err := backend.Attach(cmd); err != nil {
+		fmt.Fprintln(os.Stderr, "Attach error; falling back:", err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "cmd.Start error:", err)
 		return
 	}
 	t := termemu.NewWithMode(mf, backend, mode)
@@ -100,5 +104,5 @@ func main() {
 		_ = cmd.Wait()
 	}
 	// Print the terminal screen to stdout
-	t.PrintTerminal()
+	termemu.PrintTerminal(t)
 }

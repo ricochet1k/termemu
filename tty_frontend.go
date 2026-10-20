@@ -32,11 +32,12 @@ type TTYFrontend struct {
 }
 
 // NewTTYFrontend returns a frontend that writes to out (defaults to stdout).
-func NewTTYFrontend(term Terminal, out io.Writer) *TTYFrontend {
+// The terminal is set automatically when the Terminal is created with NewWithMode.
+func NewTTYFrontend(out io.Writer) *TTYFrontend {
 	if out == nil {
 		out = os.Stdout
 	}
-	return &TTYFrontend{term: term, out: out, showCur: true, focused: true}
+	return &TTYFrontend{out: out, showCur: true, focused: true}
 }
 
 // SetTerminal updates the terminal used for rendering.

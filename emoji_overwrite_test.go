@@ -111,11 +111,10 @@ func TestEmojiOverwriteThroughTTY(t *testing.T) {
 	// parse it back into another terminal
 	var outBuf bytes.Buffer
 
-	outerFrontend := NewTTYFrontend(nil, &outBuf)
+	outerFrontend := NewTTYFrontend(&outBuf)
 	pr, pw := io.Pipe()
 	backend := NewNoPTYBackend(pr, io.Discard)
 	outer := NewWithMode(outerFrontend, backend, TextReadModeRune).(*terminal)
-	outerFrontend.SetTerminal(outer)
 	_ = outer.Resize(80, 8)
 
 	// Write the sequence: "🐹c\x1b[D\x1b[Dy"

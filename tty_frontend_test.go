@@ -81,9 +81,8 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 
 			outer := NewWithMode(&EmptyFrontend{}, NewNoPTYBackend(r, io.Discard), TextReadModeRune).(*terminal)
 
-			innerFrontend := NewTTYFrontend(nil, w)
+			innerFrontend := NewTTYFrontend(w)
 			inner := NewWithMode(innerFrontend, NewNoPTYBackend(bytes.NewReader(nil), io.Discard), TextReadModeRune).(*terminal)
-			innerFrontend.SetTerminal(inner)
 
 			_ = outer.Resize(width, height)
 			_ = inner.Resize(width, height)

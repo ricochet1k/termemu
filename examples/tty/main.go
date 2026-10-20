@@ -36,9 +36,8 @@ func main() {
 		_ = raw.TcSetAttr(os.Stdin.Fd(), tios)
 	}()
 
-	tty := termemu.NewTTYFrontend(nil, os.Stdout)
+	tty := termemu.NewTTYFrontend(os.Stdout)
 	mode := termemu.TextReadModeRune
-	_ = mode
 	switch strings.ToLower(*textMode) {
 	case "rune":
 		mode = termemu.TextReadModeRune
@@ -50,12 +49,15 @@ func main() {
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	backend := &termemu.PTYBackend{}
-	if err := backend.StartCommand(cmd); err != nil {
-		fmt.Fprintln(os.Stderr, "StartCommand error:", err)
+	if err := backend.Attach(cmd); err != nil {
+		fmt.Fprintln(os.Stderr, "Attach error:", err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "cmd.Start error:", err)
 		return
 	}
 	term := termemu.NewWithMode(tty, backend, mode)
-	tty.SetTerminal(term)
 
 	resize := func() {
 		ws, err := pty.GetsizeFull(os.Stdout)

@@ -64,9 +64,6 @@ const (
 
 	// CRScreenSwitch means the screen has been switched between main and alt
 	CRScreenSwitch
-
-	// CRRedraw means the application requested a redraw with RedrawAll
-	CRRedraw
 )
 
 // Frontend is a type that can display data from a Terminal.
