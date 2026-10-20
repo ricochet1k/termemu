@@ -59,13 +59,13 @@ func TestHandleCmdCSI_SetColors(t *testing.T) {
 	if !last.TestMode(ModeBold) {
 		t.Fatalf("expected to have ModeBold set")
 	}
-	fgColor, _, _ := last.GetColor(ComponentFG)
-	if fgColor != int(ColRed) {
-		t.Fatalf("expected FG color red, got %d", fgColor)
+	fgColor, _ := last.GetColor(ComponentFG)
+	if fgColor != Color256(ColRed) {
+		t.Fatalf("expected FG color red, got %v", fgColor)
 	}
-	bgColor, _, _ := last.GetColor(ComponentBG)
-	if bgColor != int(ColGreen) {
-		t.Fatalf("expected BG color green, got %d", bgColor)
+	bgColor, _ := last.GetColor(ComponentBG)
+	if bgColor != Color256(ColGreen) {
+		t.Fatalf("expected BG color green, got %v", bgColor)
 	}
 }
 
@@ -77,28 +77,28 @@ func TestHandleCmdCSI_DefaultColors(t *testing.T) {
 	// Reset all attributes/colors.
 	t1.mustHandleCommand(t, "[0m")
 	last := mf.Styles[len(mf.Styles)-1]
-	fgColor, _, _ := last.GetColor(ComponentFG)
-	if fgColor != 0 {
-		t.Fatalf("expected FG default after reset, got %d", fgColor)
+	fgColor, _ := last.GetColor(ComponentFG)
+	if fgColor != DefaultColor() {
+		t.Fatalf("expected FG default after reset, got %v", fgColor)
 	}
-	bgColor, _, _ := last.GetColor(ComponentBG)
-	if bgColor != 0 {
-		t.Fatalf("expected BG default after reset, got %d", bgColor)
+	bgColor, _ := last.GetColor(ComponentBG)
+	if bgColor != DefaultColor() {
+		t.Fatalf("expected BG default after reset, got %v", bgColor)
 	}
 
 	// Explicit default foreground/background.
 	t1.mustHandleCommand(t, "[39m")
 	last = mf.Styles[len(mf.Styles)-1]
-	fgColor, _, _ = last.GetColor(ComponentFG)
-	if fgColor != 0 {
-		t.Fatalf("expected FG default after 39m, got %d", fgColor)
+	fgColor, _ = last.GetColor(ComponentFG)
+	if fgColor != DefaultColor() {
+		t.Fatalf("expected FG default after 39m, got %v", fgColor)
 	}
 
 	t1.mustHandleCommand(t, "[49m")
 	last = mf.Styles[len(mf.Styles)-1]
-	bgColor, _, _ = last.GetColor(ComponentBG)
-	if bgColor != 0 {
-		t.Fatalf("expected BG default after 49m, got %d", bgColor)
+	bgColor, _ = last.GetColor(ComponentBG)
+	if bgColor != DefaultColor() {
+		t.Fatalf("expected BG default after 49m, got %v", bgColor)
 	}
 }
 
@@ -647,36 +647,31 @@ func TestCSI_SGR_ExtendedColors(t *testing.T) {
 		name      string
 		sgr       string
 		component ColorComponent
-		wantColor int
-		wantRGB   bool
+		wantColor Color
 	}{
 		{
 			name:      "256-color foreground (red 196)",
 			sgr:       "[38;5;196m",
 			component: ComponentFG,
-			wantColor: 196,
-			wantRGB:   false,
+			wantColor: Color256(196),
 		},
 		{
 			name:      "256-color background (blue 21)",
 			sgr:       "[48;5;21m",
 			component: ComponentBG,
-			wantColor: 21,
-			wantRGB:   false,
+			wantColor: Color256(21),
 		},
 		{
 			name:      "RGB foreground (255;128;64)",
 			sgr:       "[38;2;255;128;64m",
 			component: ComponentFG,
-			wantColor: 0xFF8040,
-			wantRGB:   true,
+			wantColor: RGB(255, 128, 64),
 		},
 		{
 			name:      "RGB background (32;64;128)",
 			sgr:       "[48;2;32;64;128m",
 			component: ComponentBG,
-			wantColor: 0x204080,
-			wantRGB:   true,
+			wantColor: RGB(32, 64, 128),
 		},
 	}
 
@@ -690,16 +685,13 @@ func TestCSI_SGR_ExtendedColors(t *testing.T) {
 			}
 
 			last := mf.Styles[len(mf.Styles)-1]
-			gotColor, gotRGB, err := last.GetColor(tt.component)
+			gotColor, err := last.GetColor(tt.component)
 			if err != nil {
 				t.Fatalf("GetColor error: %v", err)
 			}
 
-			if gotRGB != tt.wantRGB {
-				t.Errorf("RGB flag: got %v, want %v", gotRGB, tt.wantRGB)
-			}
 			if gotColor != tt.wantColor {
-				t.Errorf("color value: got %d (0x%X), want %d (0x%X)", gotColor, gotColor, tt.wantColor, tt.wantColor)
+				t.Errorf("color: got %v (0x%X), want %v (0x%X)", gotColor, uint32(gotColor), tt.wantColor, uint32(tt.wantColor))
 			}
 		})
 	}
@@ -740,13 +732,13 @@ func TestCSI_SGR_BrightColors(t *testing.T) {
 			}
 
 			last := mf.Styles[len(mf.Styles)-1]
-			gotColor, _, err := last.GetColor(tt.component)
+			gotColor, err := last.GetColor(tt.component)
 			if err != nil {
 				t.Fatalf("GetColor error: %v", err)
 			}
 
-			if gotColor != tt.wantIdx {
-				t.Errorf("bright color index: got %d, want %d", gotColor, tt.wantIdx)
+			if gotColor != BrightColor(tt.wantIdx) {
+				t.Errorf("bright color: got %v, want BrightColor(%d)", gotColor, tt.wantIdx)
 			}
 		})
 	}

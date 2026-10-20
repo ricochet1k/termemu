@@ -47,15 +47,21 @@ const (
 
 // Internal constants and masks
 const (
-	colDefault     uint32 = 0x100 // outside the 256-color range
-	colBright      uint32 = 0x200 // bright color flag (uses bit 9)
+	colDefault     uint32 = 0x100
+	colBright      uint32 = 0x200
 	mask256color   uint32 = 0xff
 	maskRGBcolor   uint32 = 0xffffff
-	maskBrightIdx  uint32 = 0x7 // 3 bits for bright color index (0-7)
+	maskBrightIdx  uint32 = 0x7
 	colorTypeShift        = 31
 	colorTypeMask  uint32 = 1 << colorTypeShift
 	modeBitsShift         = 24
-	modeBitsMask   uint32 = 0x7F << modeBitsShift // 7 bits for modes
+	modeBitsMask   uint32 = 0x7F << modeBitsShift
+)
+
+// Color constants for the Color type
+const (
+	ColorType256 = 0
+	ColorTypeRGB = 1
 )
 
 // Mode to SGR code mappings for output generation
@@ -73,6 +79,70 @@ var modeToSGRCode = map[Mode]int{
 	ModeFramed:          51,
 	ModeEncircled:       52,
 	ModeOverline:        53,
+}
+
+// Color represents a terminal color value. Use the constructor functions
+// to create values: DefaultColor, Color256, BrightColor, RGB.
+type Color uint32
+
+const (
+	defaultColor Color = Color(colDefault)
+)
+
+// DefaultColor returns the terminal's default color.
+func DefaultColor() Color { return defaultColor }
+
+// Color256 returns a color from the 256-color palette (0–255).
+func Color256(idx int) Color {
+	if idx < 0 {
+		idx = 0
+	} else if idx > 255 {
+		idx = 255
+	}
+	return Color(uint32(idx) & mask256color)
+}
+
+// BrightColor returns a bright variant (0–7) of the standard ANSI color.
+func BrightColor(idx int) Color {
+	if idx < 0 {
+		idx = 0
+	} else if idx > 7 {
+		idx = 7
+	}
+	return Color(colBright | (uint32(idx) & maskBrightIdx))
+}
+
+// RGB creates a color from red, green, and blue components (0–255 each).
+func RGB(r, g, b int) Color {
+	r &= 0xff
+	g &= 0xff
+	b &= 0xff
+	return Color((uint32(r)<<16 | uint32(g)<<8 | uint32(b)) | colorTypeMask)
+}
+
+// raw returns the internal uint32 representation.
+func (c Color) raw() uint32 { return uint32(c) }
+
+// IsDefault reports whether this is the terminal's default color.
+func (c Color) IsDefault() bool { return c.raw() == colDefault }
+
+// IsRGB reports whether this is an RGB color.
+func (c Color) IsRGB() bool { return c.raw()&colorTypeMask != 0 }
+
+// IsBright reports whether this is a bright ANSI color (0–7).
+func (c Color) IsBright() bool {
+	r := c.raw()
+	return !c.IsDefault() && !c.IsRGB() && (r&colBright) != 0
+}
+
+// Index returns the 256-color or bright-color index.
+// For RGB colors the lower 24 bits are returned.
+func (c Color) Index() int { return int(c.raw() & maskRGBcolor) }
+
+// RGB returns the red, green, blue components for an RGB color.
+func (c Color) RGB() (r, g, b int) {
+	v := c.raw() & maskRGBcolor
+	return int((v >> 16) & 0xff), int((v >> 8) & 0xff), int(v & 0xff)
 }
 
 // Style represents complete text styling including colors and text modes.
@@ -123,87 +193,24 @@ func (s *Style) modeBits() Mode {
 	return combined
 }
 
-// ColorType constants
-const (
-	ColorType256 = 0
-	ColorTypeRGB = 1
-)
-
-// SetColorDefault resets a color component to its default value
-func (s *Style) SetColorDefault(component ColorComponent) error {
+// SetColor sets a color component to the given Color value.
+func (s *Style) SetColor(component ColorComponent, color Color) error {
+	c := uint32(color) & ^modeBitsMask
 	switch component {
 	case ComponentFG:
-		s.fg = (s.fg & modeBitsMask) | colDefault
+		s.fg = (s.fg & modeBitsMask) | c
 	case ComponentBG:
-		s.bg = (s.bg & modeBitsMask) | colDefault
+		s.bg = (s.bg & modeBitsMask) | c
 	case ComponentUnderline:
-		s.underlineColor = (s.underlineColor & modeBitsMask) | colDefault
+		s.underlineColor = (s.underlineColor & modeBitsMask) | c
 	default:
 		return fmt.Errorf("invalid color component: %d", component)
 	}
 	return nil
 }
 
-// SetColor256 sets a color component to a 256-color mode value
-func (s *Style) SetColor256(component ColorComponent, idx int) error {
-	if idx < 0 || idx > 255 {
-		return fmt.Errorf("color index out of range: %d", idx)
-	}
-	colorVal := uint32(idx&0xff) & ^colorTypeMask
-	switch component {
-	case ComponentFG:
-		s.fg = (s.fg & modeBitsMask) | colorVal
-	case ComponentBG:
-		s.bg = (s.bg & modeBitsMask) | colorVal
-	case ComponentUnderline:
-		s.underlineColor = (s.underlineColor & modeBitsMask) | colorVal
-	default:
-		return fmt.Errorf("invalid color component: %d", component)
-	}
-	return nil
-}
-
-// SetColorBright sets a color component to a bright color (0-7)
-func (s *Style) SetColorBright(component ColorComponent, idx int) error {
-	if idx < 0 || idx > 7 {
-		return fmt.Errorf("bright color index out of range: %d", idx)
-	}
-	colorVal := colBright | (uint32(idx) & maskBrightIdx)
-	switch component {
-	case ComponentFG:
-		s.fg = (s.fg & modeBitsMask) | colorVal
-	case ComponentBG:
-		s.bg = (s.bg & modeBitsMask) | colorVal
-	case ComponentUnderline:
-		s.underlineColor = (s.underlineColor & modeBitsMask) | colorVal
-	default:
-		return fmt.Errorf("invalid color component: %d", component)
-	}
-	return nil
-}
-
-// SetColorRGB sets a color component to an RGB value
-func (s *Style) SetColorRGB(component ColorComponent, r, g, b int) error {
-	r &= 0xff
-	g &= 0xff
-	b &= 0xff
-	colorVal := (uint32(r)<<16 | uint32(g)<<8 | uint32(b)) | colorTypeMask
-	switch component {
-	case ComponentFG:
-		s.fg = (s.fg & modeBitsMask) | colorVal
-	case ComponentBG:
-		s.bg = (s.bg & modeBitsMask) | colorVal
-	case ComponentUnderline:
-		s.underlineColor = (s.underlineColor & modeBitsMask) | colorVal
-	default:
-		return fmt.Errorf("invalid color component: %d", component)
-	}
-	return nil
-}
-
-// GetColor returns the color value for a component and its type
-// Returns (value, isRGB, error)
-func (s *Style) GetColor(component ColorComponent) (int, bool, error) {
+// GetColor returns the Color for a component.
+func (s *Style) GetColor(component ColorComponent) (Color, error) {
 	var c uint32
 	switch component {
 	case ComponentFG:
@@ -213,18 +220,9 @@ func (s *Style) GetColor(component ColorComponent) (int, bool, error) {
 	case ComponentUnderline:
 		c = s.underlineColor
 	default:
-		return 0, false, fmt.Errorf("invalid color component: %d", component)
+		return 0, fmt.Errorf("invalid color component: %d", component)
 	}
-
-	c &= ^modeBitsMask // Clear mode bits
-	isRGB := (c & colorTypeMask) == colorTypeMask
-	var value int
-	if isRGB {
-		value = int(c & maskRGBcolor)
-	} else {
-		value = int(c & mask256color)
-	}
-	return value, isRGB, nil
+	return Color(c & ^modeBitsMask), nil
 }
 
 // SetMode sets one or more text modes
@@ -243,8 +241,19 @@ func (s *Style) SetMode(modes ...Mode) {
 	}
 }
 
-// ResetMode clears one or more text modes
-func (s *Style) ResetMode(modes ...Mode) {
+// Reset clears specific text modes, or resets everything when no modes are given.
+//
+//	style.Reset()           // reset all colors and modes
+//	style.Reset(ModeBold)   // clear only bold
+func (s *Style) Reset(modes ...Mode) {
+	if len(modes) == 0 {
+		// Reset everything
+		s.fg = colDefault
+		s.bg = colDefault
+		s.underlineColor = colDefault
+		return
+	}
+
 	for _, m := range modes {
 		if m < (1 << 7) {
 			// Modes 0-6 in FG
@@ -275,45 +284,21 @@ func (s *Style) Modes() []Mode {
 	return result
 }
 
-// ResetModes clears all text modes
-func (s *Style) ResetModes() {
-	s.fg &= ^modeBitsMask
-	s.bg &= ^modeBitsMask
-	s.underlineColor &= ^modeBitsMask
-}
-
-// ResetColor resets a color component to default
-func (s *Style) ResetColor(component ColorComponent) error {
-	return s.SetColorDefault(component)
-}
-
-// ResetAll resets all colors and modes to defaults
-func (s *Style) ResetAll() {
-	s.fg = colDefault
-	s.bg = colDefault
-	s.underlineColor = colDefault
-}
-
 // ansiEscapeColor generates ANSI escape sequences for a single color
-func ansiEscapeColor(c uint32, param byte) []byte {
+func ansiEscapeColor(c Color, param byte) []byte {
 	var seq []byte
 
-	// Clear mode bits to get just the color
-	c &= ^modeBitsMask
-
-	isRGB := (c & colorTypeMask) == colorTypeMask
-	isBright := (c & colBright) == colBright
+	cval := c.raw()
+	isRGB := cval&colorTypeMask == colorTypeMask
+	isBright := !c.IsDefault() && !isRGB && (cval&colBright) == colBright
 
 	if isRGB {
-		rgb := c & maskRGBcolor
-		r := (rgb >> 16) & 0xff
-		g := (rgb >> 8) & 0xff
-		b := rgb & 0xff
+		r, g, b := c.RGB()
 		seq = append(seq, ESC, '[', param, '8', ';', '2', ';')
 		seq = fmt.Appendf(seq, "%d;%d;%dm", r, g, b)
 	} else if isBright {
 		// Bright colors: SGR 90-97 for FG (param='3'), 100-107 for BG (param='4')
-		brightIdx := int(c & maskBrightIdx)
+		brightIdx := int(cval & maskBrightIdx)
 		baseCode := 90
 		if param == '4' {
 			baseCode = 100
@@ -322,8 +307,8 @@ func ansiEscapeColor(c uint32, param byte) []byte {
 		seq = append(seq, []byte(strconv.Itoa(baseCode+brightIdx))...)
 		seq = append(seq, 'm')
 	} else {
-		colorVal := int(c & mask256color)
-		if c == colDefault {
+		colorVal := int(cval & mask256color)
+		if cval == colDefault {
 			// Don't emit anything for default color
 		} else if colorVal < 8 {
 			seq = append(seq, ESC, '[', param, byte('0'+rune(colorVal)), 'm')
@@ -380,10 +365,10 @@ func (s Style) ANSIEscapeFrom(prev Style) []byte {
 
 	// Only emit color changes if they changed
 	if fgChanged {
-		seq = append(seq, ansiEscapeColor(s.fg, '3')...)
+		seq = append(seq, ansiEscapeColor(Color(s.fg&^modeBitsMask), '3')...)
 	}
 	if bgChanged {
-		seq = append(seq, ansiEscapeColor(s.bg, '4')...)
+		seq = append(seq, ansiEscapeColor(Color(s.bg&^modeBitsMask), '4')...)
 	}
 
 	return seq

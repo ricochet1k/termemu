@@ -423,8 +423,8 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			for i := 0; i < len(params); i++ {
 				p := params[i]
 				switch {
-				case p == 0: // reset mode
-					style.ResetAll()
+				case p == 0: // reset
+					style.Reset()
 
 				case p >= 1 && p <= 5:
 					style.SetMode(colorModes[p-1])
@@ -445,25 +445,25 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					style.SetMode(ModeDoubleUnderline)
 
 				case p == 22:
-					style.ResetMode(ModeBold, ModeDim)
+					style.Reset(ModeBold, ModeDim)
 
 				case p == 23:
-					style.ResetMode(ModeItalic)
+					style.Reset(ModeItalic)
 
 				case p == 24:
-					style.ResetMode(ModeUnderline, ModeDoubleUnderline)
+					style.Reset(ModeUnderline, ModeDoubleUnderline)
 
 				case p == 25:
-					style.ResetMode(ModeBlink, ModeRapidBlink)
+					style.Reset(ModeBlink, ModeRapidBlink)
 
 				case p == 27:
-					style.ResetMode(ModeReverse)
+					style.Reset(ModeReverse)
 
 				case p == 28:
-					style.ResetMode(ModeInvisible)
+					style.Reset(ModeInvisible)
 
 				case p == 29: // not crossed-out
-					style.ResetMode(ModeStrike)
+					style.Reset(ModeStrike)
 
 				case p == 51: // framed
 					style.SetMode(ModeFramed)
@@ -475,22 +475,22 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					style.SetMode(ModeOverline)
 
 				case p == 54: // not framed, not encircled
-					style.ResetMode(ModeFramed, ModeEncircled)
+					style.Reset(ModeFramed, ModeEncircled)
 
 				case p == 55: // not overline
-					style.ResetMode(ModeOverline)
+					style.Reset(ModeOverline)
 
 				case p >= 30 && p <= 37:
-					_ = style.SetColor256(ComponentFG, p-30)
+					_ = style.SetColor(ComponentFG, Color256(p-30))
 
 				case p == 39: // default color
-					_ = style.SetColorDefault(ComponentFG)
+					_ = style.SetColor(ComponentFG, DefaultColor())
 
 				case p >= 40 && p <= 47:
-					_ = style.SetColor256(ComponentBG, p-40)
+					_ = style.SetColor(ComponentBG, Color256(p-40))
 
 				case p == 49: // default color
-					_ = style.SetColorDefault(ComponentBG)
+					_ = style.SetColor(ComponentBG, DefaultColor())
 
 				case p == 38 || p == 48: // extended set color
 					if i+2 < len(params) {
@@ -500,7 +500,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 							if p == 48 {
 								component = ComponentBG
 							}
-							_ = style.SetColor256(component, params[i+2]&0xff)
+							_ = style.SetColor(component, Color256(params[i+2]&0xff))
 							i += 2
 						case 2: // RGB Color
 							if i+4 < len(params) {
@@ -508,7 +508,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 								if p == 48 {
 									component = ComponentBG
 								}
-								_ = style.SetColorRGB(component, params[i+2], params[i+3], params[i+4])
+								_ = style.SetColor(component, RGB(params[i+2], params[i+3], params[i+4]))
 								i += 4
 							}
 						default:
@@ -518,10 +518,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					}
 
 				case p >= 90 && p <= 97:
-					_ = style.SetColorBright(ComponentFG, int(p-90))
+					_ = style.SetColor(ComponentFG, BrightColor(int(p-90)))
 
 				case p >= 100 && p <= 107:
-					_ = style.SetColorBright(ComponentBG, int(p-100))
+					_ = style.SetColor(ComponentBG, BrightColor(int(p-100)))
 
 				default:
 					debugPrintln(debugTodo, "TODO: Unhandled set color: ", p)

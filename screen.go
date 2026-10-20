@@ -871,10 +871,10 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 			return
 		}
 		// Compare styles
-		spFG, _, _ := sp.Style.GetColor(ComponentFG)
-		insertFG, _, _ := insert.Style.GetColor(ComponentFG)
-		spBG, _, _ := sp.Style.GetColor(ComponentBG)
-		insertBG, _, _ := insert.Style.GetColor(ComponentBG)
+		spFG, _ := sp.Style.GetColor(ComponentFG)
+		insertFG, _ := insert.Style.GetColor(ComponentFG)
+		spBG, _ := sp.Style.GetColor(ComponentBG)
+		insertBG, _ := insert.Style.GetColor(ComponentBG)
 		if insert.Width == n && spFG == insertFG && spBG == insertBG {
 			if sp.Text == "" && insert.Text == "" && sp.Rune == insert.Rune {
 				return
