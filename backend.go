@@ -18,6 +18,7 @@ import (
 type Backend interface {
 	io.Reader
 	io.Writer
+	io.Closer
 	SetSize(w, h int) error
 }
 
@@ -28,10 +29,47 @@ type PTYBackend struct {
 	mu     sync.Mutex
 	master *os.File
 	slave  *os.File
+	closed bool
 
 	// reuse is signaled by Attach to wake Read when it is waiting for the
 	// next command after the previous one exited.
 	reuse chan struct{}
+}
+
+// Close shuts down the pty pair so a blocked Read returns promptly, and
+// prevents any later lazy reopen: subsequent Read/Write/Attach calls fail
+// with io.ErrClosedPipe. It is idempotent.
+func (p *PTYBackend) Close() error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	master, slave := p.master, p.slave
+	p.master, p.slave = nil, nil
+	reuse := p.reuse
+	if reuse == nil {
+		reuse = make(chan struct{}, 1)
+		p.reuse = reuse
+	}
+	p.mu.Unlock()
+
+	// Wake a Read that is waiting for the next command so it can observe
+	// the closed flag instead of sleeping out its backoff.
+	select {
+	case reuse <- struct{}{}:
+	default:
+	}
+
+	var err error
+	if master != nil {
+		err = master.Close()
+	}
+	if slave != nil {
+		err = errors.Join(err, slave.Close())
+	}
+	return err
 }
 
 // Open creates a new pty pair and returns the slave for external use.
@@ -48,6 +86,9 @@ func (p *PTYBackend) Open() (*os.File, error) {
 
 // openLocked creates the pty pair if it does not exist yet. Caller must hold p.mu.
 func (p *PTYBackend) openLocked() error {
+	if p.closed {
+		return io.ErrClosedPipe
+	}
 	if p.master != nil {
 		return nil
 	}
@@ -68,6 +109,11 @@ func (p *PTYBackend) masterFile() (*os.File, error) {
 		return nil, err
 	}
 	return p.master, nil
+}
+
+// isClosed reports whether Close has been called. Caller must hold p.mu.
+func (p *PTYBackend) isClosedLocked() bool {
+	return p.closed
 }
 
 // signalReuse wakes a Read that is waiting for the next attached command.
@@ -140,7 +186,8 @@ func (p *PTYBackend) Attach(c *exec.Cmd) error {
 
 // Read reads from the pty master. When the current child has exited the master
 // returns EIO; because the pty stays valid for the next attached command, Read
-// waits for one instead of surfacing that as EOF.
+// waits for one instead of surfacing that as EOF. After Close, Read returns
+// io.ErrClosedPipe instead of retrying.
 func (p *PTYBackend) Read(b []byte) (int, error) {
 	master, err := p.masterFile()
 	if err != nil {
@@ -153,6 +200,9 @@ func (p *PTYBackend) Read(b []byte) (int, error) {
 		if err == nil {
 			return n, nil
 		}
+		if p.isClosed() {
+			return 0, io.ErrClosedPipe
+		}
 		if !errors.Is(err, syscall.EIO) {
 			return n, err
 		}
@@ -161,6 +211,13 @@ func (p *PTYBackend) Read(b []byte) (int, error) {
 			backoff *= 2
 		}
 	}
+}
+
+// isClosed reports whether Close has been called.
+func (p *PTYBackend) isClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.isClosedLocked()
 }
 
 // maxReuseBackoff caps the idle polling interval for a pty with no live child.
@@ -271,4 +328,12 @@ func (t *TeeBackend) Write(p []byte) (int, error) {
 
 func (t *TeeBackend) SetSize(w, h int) error {
 	return t.backend.SetSize(w, h)
+}
+
+// Close forwards to the wrapped backend when it implements io.Closer.
+func (t *TeeBackend) Close() error {
+	if c, ok := t.backend.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
 }
