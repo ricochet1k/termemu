@@ -82,6 +82,11 @@ type terminal struct {
 	keyboardMain keyboardMode
 	keyboardAlt  keyboardMode
 
+	// hyperlink is the current OSC 8 hyperlink URI. Empty means no link.
+	// It is pushed to both screens via setLink so content written while a
+	// link is active carries it in Span.Link.
+	hyperlink string
+
 	scrollRows    []scrollRow
 	scrollNextID  ScrollID
 	scrollBaseIdx int
@@ -560,11 +565,21 @@ func (t *terminal) exitAltScreen() {
 	t.setAltScreen(false)
 }
 
+// setHyperlink updates the current OSC 8 hyperlink URI (empty ends the
+// link) and pushes it to both screens. Caller must hold t.Lock.
+func (t *terminal) setHyperlink(uri string) {
+	t.hyperlink = uri
+	t.mainScreen.setLink(uri)
+	t.altScreen.setLink(uri)
+}
+
 // resetTerminal implements RIS (ESC c): return to the main screen and reset
 // both screens to a clean default state (cleared, cursor homed, default
 // style, full scroll margins, auto-wrap on). Keyboard, pty, and view-flag
 // state beyond the screens is left untouched.
+// Any active OSC 8 hyperlink is ended.
 func (t *terminal) resetTerminal() {
+	t.setHyperlink("")
 	t.setAltScreen(false)
 	for _, s := range []screen{t.mainScreen, t.altScreen} {
 		size := s.Size()

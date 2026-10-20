@@ -3,9 +3,11 @@ package termemu
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 )
 
 // colorModes maps SGR codes 1-7 to their Mode values
@@ -883,6 +885,9 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				case 2004: // Bracketed paste
 					t.setViewFlag(VFBracketedPaste, value)
 
+				case 2026: // Synchronized output: expose only, no internal batching
+					t.setViewFlag(VFSynchronizedOutput, value)
+
 				default:
 					debugPrintf(debugTodo, "TODO: Unhandled flag: %#v %v, %v %#v\n", string(prefix), append([]int(nil), params...), p, string(b))
 				}
@@ -1031,10 +1036,22 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 		debugPrintf(debugTodo, "TODO: change color : %#v\n", string(param2))
 
 	case 6:
+		// Legacy nonstandard working-directory announcement; OSC 7 is the
+		// standard form. Both map to VSCurrentDirectory.
 		t.setViewString(VSCurrentDirectory, string(param2))
 
 	case 7:
-		t.setViewString(VSCurrentFile, string(param2))
+		// Standard working-directory URI advertised by shells (e.g.
+		// "file://host/path"). This previously (incorrectly) set
+		// VSCurrentFile; an OSC 7 payload alone never means a file, so it
+		// now sets VSCurrentDirectory. No OSC sequence sets VSCurrentFile.
+		t.setViewString(VSCurrentDirectory, string(param2))
+
+	case 8:
+		t.handleOSC8(param2)
+
+	case 52:
+		t.handleOSC52(param2)
 
 	case 10:
 		debugPrintln(debugTodo, "TODO: OSC foreground color: ", string(param2))
@@ -1058,6 +1075,56 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 	}
 
 	return true
+}
+
+// handleOSC8 implements OSC 8 hyperlinks. The payload is "params;URI": a
+// non-empty URI starts (or replaces) the current link, an empty URI ends
+// it. params (e.g. "id=...") is accepted and ignored; only the URI is
+// tracked. Content written while a link is active carries it in Span.Link.
+// Caller must hold t.Lock.
+func (t *terminal) handleOSC8(payload []byte) {
+	s := string(payload)
+	if s == "" {
+		t.setHyperlink("")
+		return
+	}
+	uri := s
+	if i := strings.IndexByte(s, ';'); i >= 0 {
+		uri = s[i+1:]
+	} else {
+		// Malformed: no params separator. Ignore without changing state.
+		debugPrintln(debugTodo, "TODO: malformed OSC 8 (missing params separator): ", s)
+		return
+	}
+	t.setHyperlink(uri)
+}
+
+// handleOSC52 implements the OSC 52 clipboard write path. The payload is
+// "<selection>;<base64-data>" (selection is usually "c"). If the frontend
+// implements ClipboardSink, the decoded bytes are forwarded to it; called
+// with the terminal lock held, so the sink must not call back into the
+// terminal. Clipboard queries (data == "?") are never answered or
+// forwarded, and malformed base64 is ignored.
+// Caller must hold t.Lock.
+func (t *terminal) handleOSC52(payload []byte) {
+	sel, data, ok := strings.Cut(string(payload), ";")
+	if !ok {
+		debugPrintln(debugTodo, "TODO: malformed OSC 52 (missing selection separator)")
+		return
+	}
+	if data == "?" {
+		// Clipboard query: do not answer or forward (security).
+		debugPrintln(debugTodo, "TODO: ignoring OSC 52 clipboard query")
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		debugPrintln(debugTodo, "TODO: ignoring OSC 52 with bad base64: ", err)
+		return
+	}
+	if sink, ok := t.frontend.(ClipboardSink); ok {
+		sink.Clipboard(sel, raw)
+	}
 }
 
 // consumeString discards an ESC-initiated string (APC, PM, SOS) up to its

@@ -252,6 +252,8 @@ func (t *TTYFrontend) renderCursorLocked() {
 	_, _ = t.out.Write([]byte(ansiMoveCursor(t.cursor.X, t.cursor.Y) + ansiCursorShow))
 }
 
+// renderStyledLineANSI renders a line's text and SGR styling. OSC 8
+// hyperlinks (Span.Link) are intentionally not re-emitted.
 func renderStyledLineANSI(line Line) []byte {
 	if len(line.Spans) == 0 {
 		return nil

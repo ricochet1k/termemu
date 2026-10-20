@@ -10,6 +10,9 @@ type Span struct {
 	Text  string
 	Rune  rune
 	Width int
+	// Link is the OSC 8 hyperlink URI active when the span was written.
+	// Empty means no link. Blank/erased spans never carry a link.
+	Link string
 }
 
 // Line holds a list of spans

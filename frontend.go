@@ -10,6 +10,11 @@ const (
 	VFBracketedPaste
 	VFAppCursorKeys
 	VFAppKeypad
+	// VFSynchronizedOutput tracks DECSET/DECRST 2026 (synchronized output).
+	// While set, the application is emitting a batch of updates and
+	// frontends may defer repaints until it is cleared. The core performs
+	// no batching itself; it only exposes the flag.
+	VFSynchronizedOutput
 	viewFlagCount
 )
 
@@ -95,6 +100,19 @@ type Frontend interface {
 	ViewFlagChanged(vs ViewFlag, value bool)
 	ViewIntChanged(vs ViewInt, value int)
 	ViewStringChanged(vs ViewString, value string)
+}
+
+// ClipboardSink is an optional Frontend extension for the OSC 52 clipboard
+// write path. If the Frontend implements it, the base64-decoded payload of
+// an OSC 52 sequence is forwarded via Clipboard with the requested
+// selection (usually "c") and the raw bytes.
+//
+// Clipboard is called with the terminal lock held, so implementations must
+// not call back into the terminal (including Scrollback methods, which take
+// the lock themselves). Clipboard queries (data == "?") are never answered
+// or forwarded.
+type ClipboardSink interface {
+	Clipboard(selection string, data []byte)
 }
 
 // EmptyFrontend is a simple frontend that does nothing

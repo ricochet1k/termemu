@@ -39,6 +39,9 @@ type screen interface {
 	decaln()
 	printScreen()
 	setScrollCapture(func(lines []spanLine, wrapped []bool))
+	// setLink records the OSC 8 hyperlink URI applied to subsequently
+	// written content spans. Internal only.
+	setLink(link string)
 }
 
 // Pos holds X/Y coordinates.
@@ -53,6 +56,11 @@ type spanScreen struct {
 	frontend Frontend
 
 	style Style
+
+	// link is the OSC 8 hyperlink URI stamped onto content spans
+	// written by writeString/rawWriteRune. Blank/erased spans (eraseRegion,
+	// scroll fill, resize padding, deleteChars padding) never carry it.
+	link string
 
 	size Pos
 
@@ -351,7 +359,7 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 			s.cursorPos.X = s.size.X - width
 		}
 	}
-	sp := Span{Style: s.style, Text: text, Width: width}
+	sp := Span{Style: s.style, Text: text, Width: width, Link: s.link}
 	s.rawWriteSpan(s.cursorPos.X, s.cursorPos.Y, sp, CRText)
 	s.moveCursor(width, 0, true, true)
 }
@@ -398,9 +406,9 @@ func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReas
 
 	var sp Span
 	if width == 1 && r == ' ' {
-		sp = Span{Style: s.style, Rune: ' ', Width: 1}
+		sp = Span{Style: s.style, Rune: ' ', Width: 1, Link: s.link}
 	} else {
-		sp = Span{Style: s.style, Text: string(r), Width: width}
+		sp = Span{Style: s.style, Text: string(r), Width: width, Link: s.link}
 	}
 
 	replaceRange(&s.lines[y], x, width, sp, s.textMode)
@@ -578,6 +586,10 @@ func (s *spanScreen) restoreCursorPos() {
 
 func (s *spanScreen) setScrollCapture(cb func(lines []spanLine, wrapped []bool)) {
 	s.scrollCapture = cb
+}
+
+func (s *spanScreen) setLink(link string) {
+	s.link = link
 }
 
 func (s *spanScreen) printScreen() {
@@ -947,7 +959,10 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		insertFG, _ := insert.Style.GetColor(ComponentFG)
 		spBG, _ := sp.Style.GetColor(ComponentBG)
 		insertBG, _ := insert.Style.GetColor(ComponentBG)
-		if insert.Width == n && spFG == insertFG && spBG == insertBG {
+		// Adjacent spans with different links must stay separate so the
+		// hyperlink boundary survives; likewise the in-place text swap
+		// below would otherwise keep the old span's link.
+		if insert.Width == n && spFG == insertFG && spBG == insertBG && sp.Link == insert.Link {
 			if sp.Text == "" && insert.Text == "" && sp.Rune == insert.Rune {
 				return
 			}
