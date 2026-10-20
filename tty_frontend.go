@@ -20,6 +20,12 @@ const (
 
 // TTYFrontend renders changed regions to a terminal (tty) output.
 // It can be attached to a region of the screen and detached to stop updates.
+//
+// Lock ordering: the terminal lock always ranks above the frontend mutex.
+// Callback methods (invoked with the terminal lock held) may take t.mu, but
+// public methods must never hold t.mu while taking the terminal lock.
+// Attach snapshots state under t.mu, releases it, then renders under the
+// terminal lock.
 type TTYFrontend struct {
 	mu       sync.Mutex
 	term     Terminal
@@ -48,22 +54,26 @@ func (t *TTYFrontend) SetTerminal(term Terminal) {
 }
 
 // Attach starts updating the provided region.
+//
+// Locking: this takes t.mu only to update fields and snapshot state, then
+// releases it before taking the terminal lock to render. It must never hold
+// t.mu while taking the terminal lock: RegionChanged runs with the terminal
+// lock held and takes t.mu, so the opposite order would deadlock.
 func (t *TTYFrontend) Attach(r Region) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	t.region = r
 	t.attached = true
-	if !t.showCur {
-		t.showCur = true
-	}
+	t.showCur = true
+	snap := t.snapshotLocked()
+	term := t.term
+	t.mu.Unlock()
 
-	if t.term == nil {
+	if term == nil || snap.out == nil {
 		return
 	}
 
-	t.term.WithLock(func() {
-		t.renderRegionLocked(t.region)
+	term.WithLock(func() {
+		renderSnapshotRegion(snap, term, r)
 	})
 }
 
@@ -146,7 +156,50 @@ func (t *TTYFrontend) renderRegionLocked(r Region) {
 		return
 	}
 
-	w, h := t.term.Size()
+	snap := ttySnapshot{
+		out:      t.out,
+		attached: t.attached,
+		region:   t.region,
+		cursor:   t.cursor,
+		showCur:  t.showCur,
+		focused:  t.focused,
+	}
+	renderSnapshotRegion(snap, t.term, r)
+	t.renderCursorLocked()
+}
+
+// ttySnapshot is a copy of the TTYFrontend state needed for rendering,
+// taken under t.mu so rendering can proceed without holding t.mu.
+type ttySnapshot struct {
+	out      io.Writer
+	attached bool
+	region   Region
+	cursor   Pos
+	showCur  bool
+	focused  bool
+}
+
+// snapshotLocked copies the render state. Caller must hold t.mu.
+func (t *TTYFrontend) snapshotLocked() ttySnapshot {
+	return ttySnapshot{
+		out:      t.out,
+		attached: t.attached,
+		region:   t.region,
+		cursor:   t.cursor,
+		showCur:  t.showCur,
+		focused:  t.focused,
+	}
+}
+
+// renderSnapshotRegion renders region r of term to snap.out using the
+// snapshotted frontend state. The caller must hold the terminal lock and
+// must not hold the TTYFrontend mutex (use a snapshot instead).
+func renderSnapshotRegion(snap ttySnapshot, term Terminal, r Region) {
+	if snap.out == nil || !snap.attached || term == nil {
+		return
+	}
+
+	w, h := term.Size()
 	r = clampRegion(r, w, h)
 	if r.Empty() {
 		return
@@ -157,15 +210,31 @@ func (t *TTYFrontend) renderRegionLocked(r Region) {
 	buf.WriteString(ansiWrapDisable)
 	for y := r.Y; y < r.Y2; y++ {
 		buf.WriteString(ansiMoveCursor(r.X, y))
-		line := t.term.StyledLine(r.X, r.X2-r.X, y)
+		line := term.StyledLine(r.X, r.X2-r.X, y)
 		buf.Write(renderStyledLineANSI(line))
 	}
 	buf.WriteString(ansiReset)
 	buf.WriteString(ansiWrapEnable)
 	buf.WriteString(ansiRestoreCursor)
 
-	_, _ = t.out.Write(buf.Bytes())
-	t.renderCursorLocked()
+	_, _ = snap.out.Write(buf.Bytes())
+	renderSnapshotCursor(snap, term)
+}
+
+// renderSnapshotCursor writes the cursor update for snap. It takes no locks.
+func renderSnapshotCursor(snap ttySnapshot, term Terminal) {
+	if term == nil || snap.out == nil {
+		return
+	}
+	if !snap.attached || !snap.showCur || !snap.focused {
+		_, _ = snap.out.Write([]byte(ansiCursorHide))
+		return
+	}
+	if snap.cursor.X < snap.region.X || snap.cursor.X >= snap.region.X2 || snap.cursor.Y < snap.region.Y || snap.cursor.Y >= snap.region.Y2 {
+		_, _ = snap.out.Write([]byte(ansiCursorHide))
+		return
+	}
+	_, _ = snap.out.Write([]byte(ansiMoveCursor(snap.cursor.X, snap.cursor.Y) + ansiCursorShow))
 }
 
 func (t *TTYFrontend) renderCursorLocked() {
