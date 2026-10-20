@@ -12,6 +12,8 @@ type ScrollPos struct {
 }
 
 // Row represents a single physical row from the scrollback buffer.
+// Spans is a copy owned by the caller: mutating it does not affect the
+// stored history.
 type Row struct {
 	Spans   []Span
 	Width   int
@@ -41,7 +43,13 @@ type scrollRow struct {
 func (s *Scrollback) scrollRowsLen() int { return len(s.t.scrollRows) }
 
 // Scrollback provides read access to the terminal's scrollback buffer.
-// All methods handle their own locking and are safe to call from any goroutine.
+// All methods handle their own locking and are safe to call from any goroutine,
+// except from within a Frontend callback: callbacks run with the terminal lock
+// already held, so calling any Scrollback method there deadlocks. Collect what
+// you need before/after instead.
+//
+// Rows handed out by Row and LogicalLine own their Spans slices (copies),
+// so callers may freely mutate the returned Rows.
 type Scrollback struct {
 	t *terminal
 }
@@ -56,7 +64,26 @@ func (s *Scrollback) Range() (base, next ScrollID) {
 	return
 }
 
+// Len returns the number of stored scrollback rows.
+func (s *Scrollback) Len() int {
+	var n int
+	s.t.WithLock(func() {
+		n = len(s.t.scrollRows)
+	})
+	return n
+}
+
+// Clear drops all stored scrollback rows. ScrollIDs stay monotonic: after
+// Clear, Range reports base == next == the current counter, and subsequently
+// captured rows continue from that counter (no ID is ever reused).
+func (s *Scrollback) Clear() {
+	s.t.WithLock(func() {
+		s.t.clearScrollbackLocked()
+	})
+}
+
 // Row returns the physical row with the given ID, or false if it has been evicted.
+// The returned Row owns a copy of the stored spans.
 func (s *Scrollback) Row(id ScrollID) (Row, bool) {
 	var row Row
 	var ok bool
@@ -70,6 +97,8 @@ func (s *Scrollback) Row(id ScrollID) (Row, bool) {
 // containing the given row ID. The rows are reflown at the terminal's
 // current width, so the number and sizes of returned rows may differ
 // from the captured storage. Returns nil if the ID has been evicted.
+// The returned Rows own their span slices; mutating them does not affect
+// the stored history.
 func (s *Scrollback) LogicalLine(id ScrollID) []Row {
 	var result []Row
 	s.t.WithLock(func() {
@@ -144,10 +173,11 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 		}
 	}
 	if allSameWidth && termW > 0 {
-		// No reflow needed.
+		// No reflow needed. Copy the span slices so callers cannot
+		// mutate the stored history through the returned Rows.
 		result := make([]Row, len(rawRows))
 		for i, r := range rawRows {
-			result[i] = Row{Spans: r.spans, Width: r.width, Wrapped: i < len(rawRows)-1, ID: r.id}
+			result[i] = Row{Spans: copySpans(r.spans), Width: r.width, Wrapped: i < len(rawRows)-1, ID: r.id}
 		}
 		return result
 	}
@@ -304,11 +334,25 @@ func (s *Scrollback) rowLocked(id ScrollID) (Row, bool) {
 	}
 	r := s.t.scrollRows[idx]
 	return Row{
-		Spans:   r.spans,
+		Spans:   copySpans(r.spans),
 		Width:   r.width,
 		Wrapped: r.wrapped,
 		ID:      r.id,
 	}, true
+}
+
+// copySpans returns a copy of the span slice for handing out through the
+// public API. Span values themselves are plain structs (style, string,
+// rune, width) with no shared mutable state, so a shallow copy suffices.
+// Only the public API paths copy; internal hot paths keep referencing the
+// stored slices.
+func copySpans(spans []Span) []Span {
+	if spans == nil {
+		return nil
+	}
+	cp := make([]Span, len(spans))
+	copy(cp, spans)
+	return cp
 }
 
 func (s *Scrollback) findRowLocked(id ScrollID) (scrollRow, int, bool) {

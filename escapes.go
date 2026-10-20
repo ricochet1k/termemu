@@ -662,6 +662,12 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					Y2: t.screen().Size().Y,
 				}, CRClear)
 				t.screen().setCursorPos(0, 0)
+			case params[0] == 3: // Erase scrollback (xterm ED extension).
+				// Clears only the scrollback buffer; the visible screen
+				// and cursor are left untouched. Lock is already held
+				// here, so use the locked helper (Scrollback.Clear
+				// would deadlock).
+				t.clearScrollbackLocked()
 			default:
 				// debugPrintln(debugTodo, "TODO: Unhandled J params: ", params)
 				return false

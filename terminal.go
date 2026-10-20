@@ -412,6 +412,15 @@ func (t *terminal) addScrollRow(spans []Span, width int, wrapped bool) {
 	t.scrollNextID++
 }
 
+// clearScrollbackLocked drops all stored scrollback rows while keeping
+// ScrollIDs monotonic: Range afterwards reports base == next == scrollNextID
+// and new rows continue from that counter. Caller must hold t.Lock.
+// The slice is truncated (not reallocated) so capacity is preserved.
+func (t *terminal) clearScrollbackLocked() {
+	t.scrollRows = t.scrollRows[:0]
+	t.scrollBaseIdx = 0
+}
+
 // returns screen and unlock fn, must defer the unlock fn
 func (t *terminal) screen() screen {
 	if t.onAltScreen {

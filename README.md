@@ -221,7 +221,18 @@ logical := sb.LogicalLine(ScrollID(3))
 for _, row := range logical {
     fmt.Println(row.PlainTextString())
 }
+
+// Row counts and clearing (CSI 3 J also clears; screen untouched):
+fmt.Println(sb.Len())
+sb.Clear()
 ```
+
+Only scrolls starting at the top of the screen enter scrollback;
+scrolling inside a mid-screen scroll region (CSI r margins) never does.
+Returned rows own copies of their spans, so mutating them is safe.
+ScrollIDs are monotonic across `Clear` (no ID is ever reused). Do not call
+scrollback methods from inside a `Frontend` callback (deadlock: callbacks
+already hold the terminal lock).
 
 ## API highlights
 

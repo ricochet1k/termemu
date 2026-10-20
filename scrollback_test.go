@@ -347,6 +347,213 @@ func TestScrollback_WithScrollbackOption(t *testing.T) {
 	t.Logf("WithScrollback(3): base=%d, next=%d, rows=%d", base, next, got)
 }
 
+// TestScrollback_MidRegionScrollNotCaptured verifies that scrolling inside a
+// mid-screen scroll region (CSI r margins) does not push interior rows into
+// scrollback, while a full-screen scroll still does.
+func TestScrollback_MidRegionScrollNotCaptured(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	fillScreen(t1, 16, func(i int) string {
+		return "Base" + string(rune('A'+i))
+	})
+
+	sb := t1.Scrollback()
+	baseBefore, nextBefore := sb.Range()
+	if nextBefore == baseBefore {
+		t.Fatal("expected baseline scrollback rows")
+	}
+
+	// Restrict scrolling to rows 5-10 (1-based).
+	if err := t1.testFeedTerminalInputFromBackend([]byte("\x1b[5;10r"), TextReadModeRune); err != nil {
+		t.Fatalf("feed margins: %v", err)
+	}
+	// Scroll up once inside the region.
+	if err := t1.testFeedTerminalInputFromBackend([]byte("\x1b[1S"), TextReadModeRune); err != nil {
+		t.Fatalf("feed scroll: %v", err)
+	}
+
+	baseAfter, nextAfter := sb.Range()
+	if baseAfter != baseBefore || nextAfter != nextBefore {
+		t.Errorf("mid-screen scroll leaked into scrollback: range %d-%d, want %d-%d",
+			baseAfter, nextAfter, baseBefore, nextBefore)
+	}
+	if got := sb.Len(); got != int(nextBefore-baseBefore) {
+		t.Errorf("Len() = %d, want %d", got, int(nextBefore-baseBefore))
+	}
+
+	// Sanity check: resetting to full-screen margins and scrolling captures.
+	if err := t1.testFeedTerminalInputFromBackend([]byte("\x1b[r\x1b[1S"), TextReadModeRune); err != nil {
+		t.Fatalf("feed reset+scroll: %v", err)
+	}
+	_, nextFull := sb.Range()
+	if nextFull != nextBefore+1 {
+		t.Errorf("full-screen scroll captured %d rows, want 1", nextFull-nextBefore)
+	}
+}
+
+// TestScrollback_RowReturnsCopy verifies that mutating the Spans of a
+// returned Row (or LogicalLine result) does not corrupt stored history.
+func TestScrollback_RowReturnsCopy(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	fillScreen(t1, 16, func(i int) string { return "CopyMe" })
+
+	sb := t1.Scrollback()
+	base, next := sb.Range()
+	if next == base {
+		t.Fatal("expected scrollback rows")
+	}
+
+	row, ok := sb.Row(base)
+	if !ok {
+		t.Fatalf("Row(%d) not found", base)
+	}
+	if len(row.Spans) == 0 {
+		t.Fatal("expected spans in row")
+	}
+	origText := row.PlainTextString()
+	for i := range row.Spans {
+		row.Spans[i].Text = "MUTATED"
+		row.Spans[i].Rune = 'X'
+	}
+
+	again, ok := sb.Row(base)
+	if !ok {
+		t.Fatalf("Row(%d) lost after mutation", base)
+	}
+	if again.PlainTextString() != origText {
+		t.Errorf("Row mutation leaked into history: got %q, want %q", again.PlainTextString(), origText)
+	}
+	if again.Width != row.Width || again.Wrapped != row.Wrapped || again.ID != row.ID {
+		t.Errorf("Row metadata changed after mutation: %+v vs %+v", again, row)
+	}
+
+	// Same for the no-reflow fast path of LogicalLine.
+	logical := sb.LogicalLine(base)
+	if len(logical) == 0 {
+		t.Fatal("expected logical line rows")
+	}
+	var wantAll string
+	for _, r := range logical {
+		wantAll += r.PlainTextString()
+	}
+	for i := range logical[0].Spans {
+		logical[0].Spans[i].Text = "MUT"
+		logical[0].Spans[i].Rune = 'Y'
+	}
+	logical2 := sb.LogicalLine(base)
+	var gotAll string
+	for _, r := range logical2 {
+		gotAll += r.PlainTextString()
+	}
+	if gotAll != wantAll {
+		t.Errorf("LogicalLine mutation leaked into history: got %q, want %q", gotAll, wantAll)
+	}
+}
+
+// TestScrollback_Clear verifies Clear empties the buffer while keeping
+// ScrollIDs monotonic, and that clearing an empty buffer is a no-op.
+func TestScrollback_Clear(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	fillScreen(t1, 16, func(i int) string { return "ClearMe" })
+
+	sb := t1.Scrollback()
+	_, nextBefore := sb.Range()
+	if sb.Len() == 0 {
+		t.Fatal("expected scrollback rows")
+	}
+
+	sb.Clear()
+	base, next := sb.Range()
+	if base != next {
+		t.Errorf("expected empty range after Clear, got base=%d next=%d", base, next)
+	}
+	if sb.Len() != 0 {
+		t.Errorf("Len() = %d after Clear, want 0", sb.Len())
+	}
+	if next != nextBefore {
+		t.Errorf("Clear broke monotonicity: next=%d, want %d", next, nextBefore)
+	}
+
+	// New rows continue from the counter (no ID reuse).
+	fillScreen(t1, 16, func(i int) string { return "AfterClear" })
+	base2, next2 := sb.Range()
+	if base2 != nextBefore {
+		t.Errorf("expected base %d after refill, got %d", nextBefore, base2)
+	}
+	if next2 <= nextBefore {
+		t.Errorf("expected next > %d after refill, got %d", nextBefore, next2)
+	}
+
+	// Clearing (twice) is safe on an empty or refilled buffer.
+	sb.Clear()
+	sb.Clear()
+	base3, next3 := sb.Range()
+	if base3 != next3 || sb.Len() != 0 {
+		t.Errorf("expected empty after double Clear, got base=%d next=%d len=%d", base3, next3, sb.Len())
+	}
+	if next3 != next2 {
+		t.Errorf("double Clear broke monotonicity: next=%d, want %d", next3, next2)
+	}
+}
+
+// TestScrollback_CSI3J verifies CSI 3 J clears the scrollback without
+// touching the visible screen, and that 0J/1J/2J behavior is unchanged.
+func TestScrollback_CSI3J(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	fillScreen(t1, 16, func(i int) string { return "KeepMe" })
+
+	sb := t1.Scrollback()
+	_, nextBefore := sb.Range()
+	if nextBefore == 0 {
+		t.Fatal("expected scrollback rows")
+	}
+
+	var before []string
+	t1.WithLock(func() {
+		_, h := t1.Size()
+		for y := 0; y < h; y++ {
+			before = append(before, t1.Line(y))
+		}
+	})
+
+	if err := t1.testFeedTerminalInputFromBackend([]byte("\x1b[3J"), TextReadModeRune); err != nil {
+		t.Fatalf("feed CSI 3 J: %v", err)
+	}
+
+	base, next := sb.Range()
+	if base != next || sb.Len() != 0 {
+		t.Errorf("CSI 3 J did not clear scrollback: base=%d next=%d len=%d", base, next, sb.Len())
+	}
+	if next != nextBefore {
+		t.Errorf("CSI 3 J broke monotonicity: next=%d, want %d", next, nextBefore)
+	}
+
+	t1.WithLock(func() {
+		_, h := t1.Size()
+		for y := 0; y < h; y++ {
+			if got := t1.Line(y); got != before[y] {
+				t.Errorf("CSI 3 J touched screen line %d: got %q, want %q", y, got, before[y])
+			}
+		}
+	})
+
+	// CSI 2 J still erases the visible screen and homes the cursor.
+	if err := t1.testFeedTerminalInputFromBackend([]byte("\x1b[2J"), TextReadModeRune); err != nil {
+		t.Fatalf("feed CSI 2 J: %v", err)
+	}
+	t1.WithLock(func() {
+		_, h := t1.Size()
+		for y := 0; y < h; y++ {
+			if got := strings.TrimSpace(t1.Line(y)); got != "" {
+				t.Errorf("CSI 2 J left content on line %d: %q", y, got)
+			}
+		}
+	})
+}
+
 // TestScrollback_RowEviction verifies Row returns false for evicted IDs.
 func TestScrollback_RowEviction(t *testing.T) {
 	t1 := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeRune)

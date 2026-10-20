@@ -477,8 +477,14 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 		s.frontend.RegionChanged(Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X}, CRScroll)
 	} else {
 		// dy < 0: content shifts up, lines at the top scroll off.
+		// Only capture when the scroll region starts at the top of the
+		// screen (y1 == 0, already clamped above). A mid-screen scroll
+		// region (e.g. CSI r margins with top > 1) recycles lines within
+		// the region, so pushing those interior rows into scrollback
+		// would corrupt history; xterm only scrolls into scrollback from
+		// the top of the screen.
 		captureCount := -dy
-		if s.scrollCapture != nil {
+		if s.scrollCapture != nil && y1 == 0 {
 			captured := make([]spanLine, captureCount)
 			capturedW := make([]bool, captureCount)
 			for i := 0; i < captureCount; i++ {

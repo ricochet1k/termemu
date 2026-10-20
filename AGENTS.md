@@ -239,12 +239,23 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   `NewWithMode(..., WithScrollback(rows))` (default `DefaultScrollbackRows`).
 - Rows that scroll off the top of the main screen are captured by
   `terminal.scrollCapture` (alt-screen output is never captured).
+  Only scrolls whose region starts at the top of the screen (`y1 == 0`,
+  checked in `spanScreen.scroll`) feed scrollback; mid-screen scroll
+  regions (CSI r margins, IL/DL) recycle lines in place and must not capture.
 - Storage is a ring buffer of physical rows. Each row keeps a monotonic
   `ScrollID` that stays stable as rows are added and evicted; `Range()` reports
   the valid IDs.
 - `LogicalLine(id)` walks backward/forward over `wrapped` rows to rebuild the
   logical line and reflows it at the terminal's current width.
 - `MovePos` moves by *stored* physical rows, not reflown rows.
+- `Row`/`LogicalLine` return copies of the stored span slices (public API
+  hands out copies; internal hot paths never copy).
+- `Len()` reports the stored row count; `Clear()` drops all rows while
+  keeping `ScrollID`s monotonic (`Range` then reports `base == next ==
+  nextScrollID`). `CSI 3 J` clears scrollback only, leaving the visible
+  screen and cursor untouched. `CSI 0J/1J/2J` behavior is unchanged.
+- Scrollback methods lock internally, so never call them from a `Frontend`
+  callback (lock already held there — deadlock).
 - `Row.PlainTextString()` is the convenience accessor (thin wrapper over
   `Line.PlainTextString`), keep it in `scrollback.go`, not in a test file.
 - Reading requires the terminal lock, so all `Scrollback` methods take it
