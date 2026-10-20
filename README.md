@@ -6,7 +6,10 @@ A small Go library for emulating a terminal and rendering output through a plugg
 
 - PTY-backed command execution with screen emulation
 - Pluggable `Frontend` interface for rendering or collecting output
+- Reusable PTY backend — run multiple commands through the same PTY
+- Scrollback buffer with stable row IDs and reflow-on-read
 - Screen accessors for plain text, ANSI output, and styled lines
+- `Color` value type with 256-color, bright, and RGB support
 - Minimal backend abstraction for PTY or no-PTY environments
 - Rune-per-cell or grapheme-cluster text tokenization
 - Mouse reporting (X10/UTF-8/SGR encodings)
@@ -41,8 +44,12 @@ func main() {
 	// Use the EmptyFrontend if you don't need UI callbacks.
 	backend := &termemu.PTYBackend{}
 	cmd := exec.Command("sh", "-c", "printf 'Hello World'")
-	if err := backend.StartCommand(cmd); err != nil {
-		fmt.Fprintln(os.Stderr, "StartCommand error:", err)
+	if err := backend.Attach(cmd); err != nil {
+		fmt.Fprintln(os.Stderr, "Attach error:", err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "cmd.Start error:", err)
 		return
 	}
 
@@ -55,7 +62,7 @@ func main() {
 	_ = cmd.Wait()
 
 	// Dump the screen contents to stdout.
-	term.PrintTerminal()
+	termemu.PrintTerminal(term)
 }
 ```
 
@@ -88,8 +95,12 @@ func (loggingFrontend) ViewStringChanged(v termemu.ViewString, v2 string) {}
 func main() {
 	backend := &termemu.PTYBackend{}
 	cmd := exec.Command("sh", "-c", "printf '\\e[31mred\\e[0m' && echo")
-	if err := backend.StartCommand(cmd); err != nil {
-		fmt.Fprintln(os.Stderr, "StartCommand error:", err)
+	if err := backend.Attach(cmd); err != nil {
+		fmt.Fprintln(os.Stderr, "Attach error:", err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "cmd.Start error:", err)
 		return
 	}
 	term := termemu.NewWithMode(loggingFrontend{}, backend, termemu.TextReadModeRune)
@@ -101,13 +112,126 @@ func main() {
 }
 ```
 
+### Interactive terminal with TTY frontend
+
+```go
+package main
+
+import (
+	"os"
+	"os/exec"
+	"os/signal"
+	"syscall"
+
+	"github.com/creack/pty"
+	"github.com/creack/termios/raw"
+	"github.com/ricochet1k/termemu"
+)
+
+func main() {
+	tios, err := raw.MakeRaw(os.Stdin.Fd())
+	if err != nil {
+		panic(err)
+	}
+	defer raw.TcSetAttr(os.Stdin.Fd(), tios)
+
+	tty := termemu.NewTTYFrontend(os.Stdout)
+	cmd := exec.Command("sh")
+	backend := &termemu.PTYBackend{}
+	backend.Attach(cmd)
+	cmd.Start()
+	term := termemu.NewWithMode(tty, backend, termemu.TextReadModeRune)
+
+	resize := func() {
+		ws, _ := pty.GetsizeFull(os.Stdout)
+		w, h := int(ws.Cols), int(ws.Rows)
+		term.Resize(w, h)
+		tty.Attach(termemu.Region{X: 0, Y: 0, X2: w, Y2: h})
+	}
+	resize()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGWINCH)
+
+	inputCh := make(chan []byte, 8)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				inputCh <- chunk
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- cmd.Wait() }()
+
+	for {
+		select {
+		case b := <-inputCh:
+			if len(b) > 0 {
+				term.Write(b)
+			}
+		case <-sigCh:
+			resize()
+		case <-doneCh:
+			tty.Detach()
+			return
+		}
+	}
+}
+```
+
+### Reusable PTY (multiple commands)
+
+```go
+backend := &termemu.PTYBackend{}
+
+cmd1 := exec.Command("sh", "-c", "echo first")
+backend.Attach(cmd1)
+cmd1.Start()
+cmd1.Wait()
+
+// Same PTY, same terminal state:
+cmd2 := exec.Command("sh", "-c", "echo second")
+backend.Attach(cmd2)
+cmd2.Start()
+```
+
+### Scrollback
+
+```go
+sb := term.Scrollback()
+base, next := sb.Range()
+for id := base; id < next; id++ {
+    row, ok := sb.Row(id)
+    if ok {
+        fmt.Println(row.PlainTextString())
+    }
+}
+
+// Reflown at current terminal width:
+logical := sb.LogicalLine(ScrollID(3))
+for _, row := range logical {
+    fmt.Println(row.PlainTextString())
+}
+```
+
 ## API highlights
 
-- `termemu.NewWithMode(frontend, backend, mode)` creates a terminal with the provided backend.
-- `termemu.NewNoPTYBackend(reader, writer)` creates a backend from provided pipes.
-- `PTYBackend.StartCommand(*exec.Cmd)` runs a command within a PTY backend.
-- `Terminal.Line(y)` and `Terminal.ANSILine(y)` read screen contents.
-- `Terminal.Resize(w, h)` updates the PTY and internal screen size.
+- `NewWithMode(frontend, backend, mode, opts...)` — creates a terminal. Supports `WithScrollback(rows)`.
+- `New(frontend, backend)` — shorthand for `NewWithMode(…, TextReadModeRune)`.
+- `NewNoPTYBackend(reader, writer)` — creates a backend from provided pipes.
+- `PTYBackend.Attach(*exec.Cmd)` — wires a command into the PTY. Reusable.
+- `Terminal.Scrollback()` — returns the scrollback buffer.
+- `PrintTerminal(t Terminal)` — debug printing of screen contents.
+- `NewTTYFrontend(out)` — terminal frontend that writes ANSI to output.
 
 ## Testing
 

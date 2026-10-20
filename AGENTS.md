@@ -13,6 +13,13 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
 - Core library code lives at repo root (package `termemu`).
 - Examples live under `examples/`.
 - Test helpers and benchmarks live in `_test.go` files at root.
+- `backend.go` holds `Backend`, `PTYBackend`, `NoPTYBackend`, `TeeBackend`.
+  `backend_unix.go` / `backend_other.go` hold `setControllingTTY` (the only
+  platform-specific child-session setup).
+- `terminal.go` (coordinator + scrollback wiring), `screen.go` (the only
+  screen implementation), `scrollback.go` (scrollback ring buffer + reflow),
+  `escapes.go` (ANSI parser), `style.go` (colors/modes), `keys.go` (input
+  encoding), `tty_frontend.go` (ANSI renderer frontend).
 
 ## Build, lint, and test commands
 Use these exact commands unless the user asks otherwise.
@@ -38,10 +45,12 @@ Use these exact commands unless the user asks otherwise.
 - Run a single benchmark: `go test ./path/to/pkg -run '^$' -bench '^BenchmarkName$'`
 
 ### Lint / static checks
-No dedicated linter is configured in the repo.
-When requested, use the Go toolchain defaults:
+CI (`.github/workflows/`) runs `gofmt -l .`, `go vet ./...`, `golangci-lint`
+and `go test -race ./...` on Linux, macOS and Windows. Locally use:
+- `gofmt -l .` (must print nothing) and `gofmt -w <files>`
 - `go vet ./...`
-- `gofmt -w <files>` (formatting only; see style section)
+- `GOOS=windows go build ./...` (the library must at least compile for
+  Windows even though `creack/pty` returns `ErrUnsupported` there at runtime)
 
 ## Code style guidelines
 Follow standard Go conventions and the patterns in this repo.
@@ -94,7 +103,10 @@ Frontend implementations can safely call terminal read methods (`Line`, `ANSILin
 without acquiring locks. See godoc on `Frontend` interface in `frontend.go`.
 
 **Methods requiring the lock** (check docstrings for "caller must lock"):
-- `ANSILine()`, `Line()`, `StyledLine()`, `StyledLines()`, `PrintTerminal()`
+- `ANSILine()`, `Line()`, `StyledLine()`, `StyledLines()`
+
+The `PrintTerminal(t Terminal)` debug helper takes the lock itself. Methods on
+`Scrollback` (`Range`, `Row`, `LogicalLine`, `MovePos`) also lock internally.
 
 **How to fix in tests:**
 ```go
@@ -143,12 +155,13 @@ Run `go test -race ./...` to detect races before merging.
 - Keep changes localized to the smallest necessary files.
 - Avoid adding new dependencies unless explicitly requested.
 - The codebase uses extensive bit-packing for performance (Style, Mode enums)
-- Span-based rendering (spanScreen) optimizes memory and reduces allocations for large screens
-- Grid-based rendering (gridScreen) may have simpler logic but higher memory overhead
+- Span-based rendering (`spanScreen`) is the only screen implementation; it
+  optimizes memory and allocations for large screens
 - Wide characters (CJK, emoji) need special handling (splitSpan)
 - Text merging (combining characters) requires careful cursor position handling
 - Frontend callbacks happen with lock held, keep them fast
-- PTY operations are platform-specific (uses creack/pty for portability)
+- PTY operations are platform-specific (uses creack/pty); cross-compile to
+  Windows after backend changes because `syscall.SysProcAttr` fields differ
 - When optimizing, focus on hot paths: writeString, replaceRange, eraseRegion, scroll
 
 ## Overview
@@ -167,8 +180,12 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 ### Key Abstractions
 
 **Backend** (backend.go): Provides I/O abstraction
-- `PTYBackend`: Real PTY using github.com/creack/pty
-- `NoPTYBackend`: Pipes for non-PTY environments
+- `PTYBackend`: Real PTY using github.com/creack/pty. One pty pair is opened
+  lazily and shared by every command, so commands can be run back-to-back on the
+  same terminal. `Attach(cmd)` wires stdio + `SysProcAttr`; the caller runs
+  `cmd.Start()`. `Read` treats `EIO` (current child exited) as "wait for the
+  next attached command" instead of EOF, which is what makes reuse work.
+- `NoPTYBackend`: Pipes for non-PTY environments (EOF is terminal)
 - `TeeBackend`: Wraps a backend to duplicate reads
 
 **Terminal** (terminal.go): Main coordinator
@@ -178,16 +195,18 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Provides locking (`Lock()`, `Unlock()`, `WithLock()`) for thread-safe access
 - Handles keyboard input via `SendKey()`
 
-**Screen** (screen.go, screen_grid.go): Character grid management
-- **TWO IMPLEMENTATIONS CURRENTLY EXIST** - comparing performance before deleting the slower one:
-  - `gridScreen`: Traditional cell-based grid (arrays of runes, styles, widths per cell)
-  - `spanScreen`: Optimized span-based representation (runs of styled text)
+**Screen** (screen.go): Character grid management
+- `spanScreen` is the only implementation (the old cell-based `gridScreen` was
+  deleted)
 - `spanScreen` represents the screen as a list of `spanLine`s, each containing `[]Span`
 - Spans optimize storage: `Span{Rune: ' ', Width: 80}` for 80 spaces vs storing 80 cells
-- `gridScreen` stores per-cell data: `chars[][]rune`, `cellStyles[][]Style`, `cellWidth[][]uint8`, `cellCont[][]bool`
-- Both implement the `screen` interface with identical public API
+- A parallel `wrapped []bool` marks rows that continue the previous row due to
+  auto-wrap; it feeds scrollback logical lines and is cleared by explicit cursor
+  positioning / full-width erase
 - Handles complex operations: scrolling, wide character overlaps, grapheme cluster splitting
 - Screen size, cursor position, scroll margins, auto-wrap behavior
+- `setScrollCapture` installs a callback invoked (with the terminal lock held)
+  before rows scroll off the top, passing the lost rows and their wrapped flags
 
 **Escape Sequence Parsing** (escapes.go):
 - `ptyReadLoop()` reads from backend via `GraphemeReader`
@@ -208,11 +227,28 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Handles combining characters, zero-width joiners, emoji sequences
 - Returns merge tokens for combining chars that should merge into previous cell
 
-**Line Representation** (line.go, screen_grid.go):
+**Line Representation** (line.go):
 - `Line` holds `[]Span` for external API access
 - `Span` can be text (`Text` field) or repeated rune (`Rune` + `Width`)
 - `spanLine` is internal representation with width tracking
 - Functions: `splitSpan()`, `replaceRange()`, `truncateLine()`, `mergeAdjacent()` handle complex span manipulation
+
+### Scrollback (scrollback.go)
+
+- `Terminal.Scrollback()` returns a `*Scrollback` reader; capacity is set with
+  `NewWithMode(..., WithScrollback(rows))` (default `DefaultScrollbackRows`).
+- Rows that scroll off the top of the main screen are captured by
+  `terminal.scrollCapture` (alt-screen output is never captured).
+- Storage is a ring buffer of physical rows. Each row keeps a monotonic
+  `ScrollID` that stays stable as rows are added and evicted; `Range()` reports
+  the valid IDs.
+- `LogicalLine(id)` walks backward/forward over `wrapped` rows to rebuild the
+  logical line and reflows it at the terminal's current width.
+- `MovePos` moves by *stored* physical rows, not reflown rows.
+- `Row.PlainTextString()` is the convenience accessor (thin wrapper over
+  `Line.PlainTextString`), keep it in `scrollback.go`, not in a test file.
+- Reading requires the terminal lock, so all `Scrollback` methods take it
+  themselves.
 
 ### Dual Screen Model
 
@@ -242,6 +278,13 @@ The library supports two text handling modes:
 
 Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
 
+### TTY Frontend
+
+`NewTTYFrontend(out)` needs no terminal argument: `NewWithMode` detects the
+`SetTerminal` interface and wires the terminal automatically. Callers use
+`Attach(Region)` before rendering and `Detach()` when done (see
+`examples/tty`).
+
 ## Testing Patterns
 
 **Unit Tests:**
@@ -249,10 +292,15 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
 - `MockFrontend` records all callbacks (regions, cursor moves, styles)
 - Check expectations against recorded calls
 
-**Integration Tests:**
-- Use real `PTYBackend` with slave writes to simulate command output
-- Give `time.Sleep()` for ptyReadLoop to process
-- Check MockFrontend received expected callbacks
+**Integration Tests (integration_test.go, `//go:build unix`):**
+- `TestIntegration_RunPrintf` starts a real child under a `PTYBackend`, so a
+  broken `Attach`/`SysProcAttr` setup fails the test
+- `TestIntegration_ReusePTY` runs two commands through one backend
+- `TestIntegration_BuildTerminalBeforeAttach` covers constructing the Terminal
+  before the pty exists (the backend opens lazily)
+- Output arrives asynchronously: poll with `waitForLine` instead of sleeping
+- `TestIntegration_WritesToSlave` covers the read loop without a child process
+- Always run these with `-race`
 
 **Table-Driven Tests:**
 - See escapes_test.go and screen_test.go for examples
@@ -292,20 +340,22 @@ Key functions in screen.go:
 - `scroll()`: Scroll region vertically
 - `deleteChars()`: Delete characters, shift remaining left
 
-## Screen Implementation Status
+## Screen Implementation Notes
 
-**IMPORTANT:** Two screen implementations currently coexist for performance comparison:
-- `gridScreen` in screen_grid.go (traditional cell-based)
-- `spanScreen` in screen.go (span-based optimization)
+`spanScreen` (screen.go) is the only `screen` implementation and `newScreen()`
+returns it directly. When changing the `screen` interface you only need to
+update `spanScreen`.
 
-Both implement the `screen` interface. The slower implementation will be deleted once optimization analysis is complete. When making changes:
-- Test both implementations if modifying screen interface
-- Performance-critical changes may need implementation in both
-- Use benchmarks in screen_bench_test.go to compare
-- The `newScreen()` factory function chooses which implementation to use
+`scrollCapture` is how scrollback stays decoupled from the screen: `terminal`
+wires it in `newTerminal`, and `spanScreen.scroll()` invokes it before overwriting
+lost rows. Keep the capture path allocation-light but correct: rows are copied
+because the screen reuses its `spanLine` storage.
+
+Use benchmarks in `screen_bench_test.go` to catch regressions.
 
 ## Dependencies
 
 - `github.com/creack/pty`: PTY creation and control
+- `github.com/creack/termios`: raw terminal mode (examples)
 - `github.com/rivo/uniseg`: Unicode grapheme cluster segmentation
 - `github.com/google/go-cmp`: Test comparisons
