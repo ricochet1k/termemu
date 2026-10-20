@@ -19,13 +19,16 @@ var colorModes = [7]Mode{
 	ModeInvisible, // SGR 8
 }
 
-func (t *terminal) ptyReadLoop() {
+// ptyReadLoop consumes backend output until a read fails, then reports the
+// terminal error: the first read error encountered. The caller normalizes
+// io.EOF to nil (clean shutdown).
+func (t *terminal) ptyReadLoop() error {
 	reader := bufio.NewReader(t.backend)
 	gr := NewGraphemeReaderWithMode(reader, t.textReadMode)
 
 	for {
 		if err := t.ptyReadOne(gr); err != nil {
-			return
+			return err
 		}
 	}
 }

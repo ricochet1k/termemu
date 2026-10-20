@@ -64,15 +64,24 @@ const (
 
 	// CRScreenSwitch means the screen has been switched between main and alt
 	CRScreenSwitch
+
+	// CRResize means the screen was resized. Content is preserved where
+	// possible (not cleared), so frontends must repaint the full region
+	// at the new dimensions. A dedicated reason (rather than reusing
+	// CRClear) lets frontends skip clear-specific work such as resetting
+	// scroll state.
+	CRResize
 )
 
 // Frontend is a type that can display data from a Terminal.
 //
 // All Frontend methods are called with the terminal lock held.
-// Implementations may safely call terminal read methods (Line, ANSILine,
-// StyledLine, StyledLines) without acquiring additional locks.
+// Implementations may safely call terminal read methods (Size, Line,
+// ANSILine, StyledLine, StyledLines) without acquiring additional locks.
 // Implementations must not call terminal write methods or attempt to
-// acquire the terminal lock, as this would cause deadlock.
+// acquire the terminal lock, as this would cause deadlock. For the same
+// reason they must not call Scrollback methods (which take the terminal
+// lock themselves); buffer scrollback rows from ScrollLines instead.
 type Frontend interface {
 	Bell()
 	RegionChanged(Region, ChangeReason)

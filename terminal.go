@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -22,13 +23,37 @@ type Terminal interface {
 	SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int) error
 	Size() (int, int)
 	Resize(int, int) error
+
+	// Line returns the plain text content of line y.
+	// The caller must hold the terminal lock (see Lock/WithLock).
 	Line(int) string
+	// ANSILine returns the ANSI-escaped content of line y.
+	// The caller must hold the terminal lock (see Lock/WithLock).
 	ANSILine(y int) string
+	// StyledLine returns the styled content of a line region.
+	// The caller must hold the terminal lock (see Lock/WithLock).
 	StyledLine(x, w, y int) Line
+	// StyledLines returns the styled content of multiple lines in a region.
+	// The caller must hold the terminal lock (see Lock/WithLock).
 	StyledLines(r Region) []Line
 
 	// Scrollback returns the terminal's scrollback buffer for reading.
+	// Unlike the line accessors above, Scrollback methods take the
+	// terminal lock themselves, so they must not be called from inside a
+	// Frontend callback (the lock is already held there; calling in would
+	// deadlock).
 	Scrollback() *Scrollback
+
+	// Close shuts down the terminal: it closes the backend (if it
+	// implements io.Closer) so a blocked Read returns and the read loop
+	// exits. It is idempotent and never blocks waiting for the loop.
+	Close() error
+	// Done is closed when the read loop exits.
+	Done() <-chan struct{}
+	// Err reports how the read loop terminated: nil for a clean EOF,
+	// otherwise the error that stopped the loop. It is only meaningful
+	// after Done is closed.
+	Err() error
 }
 
 type terminal struct {
@@ -47,7 +72,12 @@ type terminal struct {
 
 	readLoopStarted bool
 	readLoopDone    chan struct{}
+	readLoopErr     error
 	textReadMode    TextReadMode
+
+	closeOnce sync.Once
+	closeErr  error
+	closed    bool
 
 	keyboardMain keyboardMode
 	keyboardAlt  keyboardMode
@@ -177,6 +207,9 @@ func (t *terminal) Resize(w, h int) error {
 	t.WithLock(func() {
 		t.mainScreen.setSize(w, h)
 		t.altScreen.setSize(w, h)
+		// setSize preserves content and emits nothing, so tell frontends
+		// to repaint the full screen at the new dimensions.
+		t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: w, Y2: h}, CRResize)
 	})
 
 	t.Lock()
@@ -194,7 +227,7 @@ func (t *terminal) startReadLoop() {
 	t.Lock()
 	started := t.readLoopStarted
 	backend := t.backend
-	if started || backend == nil {
+	if started || backend == nil || t.closed {
 		t.Unlock()
 		return
 	}
@@ -205,9 +238,62 @@ func (t *terminal) startReadLoop() {
 	t.Unlock()
 
 	go func() {
-		defer close(t.readLoopDone)
-		t.ptyReadLoop()
+		err := t.ptyReadLoop()
+		t.Lock()
+		// io.EOF is a clean shutdown (e.g. NoPTYBackend at end of
+		// input); report it as nil so Err() == nil on success.
+		if errors.Is(err, io.EOF) {
+			err = nil
+		}
+		t.readLoopErr = err
+		t.Unlock()
+		close(t.readLoopDone)
 	}()
+}
+
+// Close shuts down the terminal: it closes the backend (if it implements
+// io.Closer) so a blocked Read returns and the read loop exits promptly.
+// It is idempotent and does not block waiting for the read loop; use Done
+// to wait for loop exit and Err to see how it terminated.
+func (t *terminal) Close() error {
+	t.closeOnce.Do(func() {
+		if c, ok := t.backend.(io.Closer); ok {
+			t.closeErr = c.Close()
+		}
+		t.Lock()
+		t.closed = true
+		// If the read loop was never started there is no goroutine to
+		// close the done channel, so close it here. When the loop is
+		// running the goroutine owns the close; startReadLoop refuses to
+		// start after Close so it can never double-close.
+		if !t.readLoopStarted {
+			if t.readLoopDone == nil {
+				t.readLoopDone = make(chan struct{})
+			}
+			close(t.readLoopDone)
+		}
+		t.Unlock()
+	})
+	return t.closeErr
+}
+
+// Done returns a channel that is closed when the read loop exits.
+func (t *terminal) Done() <-chan struct{} {
+	t.Lock()
+	defer t.Unlock()
+	if t.readLoopDone == nil {
+		t.readLoopDone = make(chan struct{})
+	}
+	return t.readLoopDone
+}
+
+// Err returns the read-loop termination error: nil for a clean EOF,
+// otherwise the error that stopped the loop. Only meaningful after Done
+// is closed.
+func (t *terminal) Err() error {
+	t.Lock()
+	defer t.Unlock()
+	return t.readLoopErr
 }
 
 // Line returns the plain text content of line y.
@@ -244,23 +330,29 @@ func (t *terminal) StyledLines(r Region) []Line {
 // PrintTerminal prints the terminal screen contents to stdout for debugging.
 // It uses only the public Terminal interface, with proper locking.
 func PrintTerminal(t Terminal) {
+	PrintTerminalTo(os.Stdout, t)
+}
+
+// PrintTerminalTo prints the terminal screen contents to w for debugging.
+// It uses only the public Terminal interface, with proper locking.
+func PrintTerminalTo(w io.Writer, t Terminal) {
 	t.WithLock(func() {
-		w, h := t.Size()
-		fmt.Print("+")
-		for i := 0; i < w; i++ {
-			fmt.Print("-")
+		ww, h := t.Size()
+		fmt.Fprint(w, "+")
+		for i := 0; i < ww; i++ {
+			fmt.Fprint(w, "-")
 		}
-		fmt.Println("+")
+		fmt.Fprintln(w, "+")
 		for i := 0; i < h; i++ {
 			lstr := t.ANSILine(i)
 			lstr = strings.ReplaceAll(lstr, "\000", " ")
-			fmt.Printf("\033[m|%s\033[m|\n", lstr)
+			fmt.Fprintf(w, "\033[m|%s\033[m|\n", lstr)
 		}
-		fmt.Print("+")
-		for i := 0; i < w; i++ {
-			fmt.Print("-")
+		fmt.Fprint(w, "+")
+		for i := 0; i < ww; i++ {
+			fmt.Fprint(w, "-")
 		}
-		fmt.Println("+")
+		fmt.Fprintln(w, "+")
 	})
 }
 
