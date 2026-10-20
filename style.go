@@ -363,12 +363,22 @@ func (s Style) ANSIEscapeFrom(prev Style) []byte {
 		bgChanged = true
 	}
 
-	// Only emit color changes if they changed
+	// Only emit color changes if they changed.
+	// A component returning to default needs an explicit reset (SGR 39/49)
+	// unless a full reset was already emitted for a mode change above.
 	if fgChanged {
-		seq = append(seq, ansiEscapeColor(Color(s.fg&^modeBitsMask), '3')...)
+		if Color(s.fg&^modeBitsMask).IsDefault() && !modesChanged {
+			seq = append(seq, ESC, '[', '3', '9', 'm')
+		} else {
+			seq = append(seq, ansiEscapeColor(Color(s.fg&^modeBitsMask), '3')...)
+		}
 	}
 	if bgChanged {
-		seq = append(seq, ansiEscapeColor(Color(s.bg&^modeBitsMask), '4')...)
+		if Color(s.bg&^modeBitsMask).IsDefault() && !modesChanged {
+			seq = append(seq, ESC, '[', '4', '9', 'm')
+		} else {
+			seq = append(seq, ansiEscapeColor(Color(s.bg&^modeBitsMask), '4')...)
+		}
 	}
 
 	return seq
