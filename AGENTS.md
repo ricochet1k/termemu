@@ -109,8 +109,7 @@ without acquiring locks. See godoc on `Frontend` interface in `frontend.go`.
   except a `Frontend` callback (where the lock is already held — calling in
   would deadlock, so buffer rows from `ScrollLines` instead).
 
-The `PrintTerminal(t Terminal)` debug helper takes the lock itself. Methods on
-`Scrollback` (`Range`, `Row`, `LogicalLine`, `MovePos`) also lock internally.
+The `PrintTerminal(t Terminal)` debug helper takes the lock itself.
 
 **How to fix in tests:**
 ```go
