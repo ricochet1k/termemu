@@ -69,14 +69,28 @@ var testSequences = []struct {
 	{"emoji_overwrite", "🐹a\n🐹b\x1b[Dz\n🐹c\x1b[D\x1b[Dy\n🐹c\x1b[D\x1b[D\x1b[Dx\n"},
 }
 
+// TestTTYFrontendNestedTerminalSpacing round-trips screen content through a
+// TTYFrontend (render to ANSI, re-parse) and compares span-for-span.
+//
+// History: this was blanket-skipped in Jan 2026 ("skip test for now", commit
+// eab7498) with no reason recorded. Re-running it shows the round-trip is
+// not span-lossless: trailing blank runs come back as Text spans instead of
+// Rune(' ') spans (same visible content, different encoding), so the exact
+// cmp.Diff on StyledLines fails. That is a renderer fidelity issue, out of
+// scope for the lifecycle batch; until it round-trips losslessly, the cases
+// that depend on exact span encoding are skipped per-case below.
 func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
-	t.SkipNow()
-
 	width, height := 40, 4
 	screenRegion := Region{X: 0, Y: 0, X2: width, Y2: height}
 
 	for _, test := range testSequences {
 		t.Run(test.name, func(t *testing.T) {
+			// Narrowest skip: this case fails only on span encoding, not
+			// visible content (see test doc comment). Skip it per-case so
+			// any other cases in testSequences still run.
+			if test.name == "emoji_overwrite" {
+				t.Skip("TTY round-trip is not span-lossless for trailing blanks")
+			}
 			r, w := io.Pipe()
 
 			outer := NewWithMode(&EmptyFrontend{}, NewNoPTYBackend(r, io.Discard), TextReadModeRune).(*terminal)
