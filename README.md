@@ -234,14 +234,38 @@ ScrollIDs are monotonic across `Clear` (no ID is ever reused). Do not call
 scrollback methods from inside a `Frontend` callback (deadlock: callbacks
 already hold the terminal lock).
 
+## Lifecycle
+
+Terminals own a background read-loop goroutine. Shut them down explicitly:
+
+```go
+term := termemu.NewWithMode(&termemu.EmptyFrontend{}, backend, termemu.TextReadModeRune)
+// ... run commands ...
+_ = term.Close()  // idempotent; unblocks Read so the loop exits promptly
+<-term.Done()     // closed when the read loop exits
+if err := term.Err(); err != nil {
+    // non-nil: the loop died on a backend error (io.EOF is clean, Err() == nil)
+}
+```
+
+`PTYBackend.Close()` (also called by `Terminal.Close()`) closes the pty pair;
+later `Read`/`Write`/`Attach` fail with `io.ErrClosedPipe` instead of
+reopening it. `Resize(w, h)` emits one full-screen `RegionChanged` with the
+`CRResize` reason so frontends know to repaint at the new size.
+
+Locking: `Size`, `Line`, `ANSILine`, `StyledLine`, and `StyledLines` require
+the caller to hold the terminal lock (`WithLock`); `Scrollback` methods take
+it themselves and therefore must not be called from `Frontend` callbacks.
+
 ## API highlights
 
 - `NewWithMode(frontend, backend, mode, opts...)` — creates a terminal. Supports `WithScrollback(rows)`.
 - `New(frontend, backend)` — shorthand for `NewWithMode(…, TextReadModeRune)`.
 - `NewNoPTYBackend(reader, writer)` — creates a backend from provided pipes.
 - `PTYBackend.Attach(*exec.Cmd)` — wires a command into the PTY. Reusable.
+- `Terminal.Close()/Done()/Err()` — shut down the read loop and observe how it exited.
 - `Terminal.Scrollback()` — returns the scrollback buffer.
-- `PrintTerminal(t Terminal)` — debug printing of screen contents.
+- `PrintTerminal(t Terminal)` / `PrintTerminalTo(w, t)` — debug printing of screen contents.
 - `NewTTYFrontend(out)` — terminal frontend that writes ANSI to output.
 
 ## Testing

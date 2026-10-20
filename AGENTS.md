@@ -103,7 +103,11 @@ Frontend implementations can safely call terminal read methods (`Line`, `ANSILin
 without acquiring locks. See godoc on `Frontend` interface in `frontend.go`.
 
 **Methods requiring the lock** (check docstrings for "caller must lock"):
-- `ANSILine()`, `Line()`, `StyledLine()`, `StyledLines()`
+- `Size()`, `ANSILine()`, `Line()`, `StyledLine()`, `StyledLines()`
+- `Scrollback()` methods (`Range`, `Row`, `LogicalLine`, `MovePos`, `Len`,
+  `Clear`) take the lock themselves instead. They are safe from any goroutine
+  except a `Frontend` callback (where the lock is already held — calling in
+  would deadlock, so buffer rows from `ScrollLines` instead).
 
 The `PrintTerminal(t Terminal)` debug helper takes the lock itself. Methods on
 `Scrollback` (`Range`, `Row`, `LogicalLine`, `MovePos`) also lock internally.
@@ -185,8 +189,12 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   same terminal. `Attach(cmd)` wires stdio + `SysProcAttr`; the caller runs
   `cmd.Start()`. `Read` treats `EIO` (current child exited) as "wait for the
   next attached command" instead of EOF, which is what makes reuse work.
-- `NoPTYBackend`: Pipes for non-PTY environments (EOF is terminal)
-- `TeeBackend`: Wraps a backend to duplicate reads
+  `Close()` closes master+slave, wakes blocked `Read`s with
+  `io.ErrClosedPipe`, and stops the EIO retry; later `Read`/`Write`/`Attach`
+  fail instead of reopening the pair.
+- `NoPTYBackend`: Pipes for non-PTY environments (EOF is terminal; still
+  ends the read loop cleanly with `Err() == nil`)
+- `TeeBackend`: Wraps a backend to duplicate reads (`Close` forwards)
 
 **Terminal** (terminal.go): Main coordinator
 - Owns main and alternate screens
@@ -194,6 +202,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Manages view flags/ints/strings (cursor visibility, mouse mode, window title, etc.)
 - Provides locking (`Lock()`, `Unlock()`, `WithLock()`) for thread-safe access
 - Handles keyboard input via `SendKey()`
+- Lifecycle: `Close()` closes the backend so the read loop exits (idempotent,
+  never blocks); `Done()` closes on loop exit; `Err()` reports the loop error
+  (nil for clean EOF). `Resize()` emits one full-screen `RegionChanged` with
+  `CRResize` so frontends repaint at the new size.
 
 **Screen** (screen.go): Character grid management
 - `spanScreen` is the only implementation (the old cell-based `gridScreen` was
