@@ -198,8 +198,37 @@ func (t *terminal) handleCommand(r escapeReader) bool {
 	// short commands
 	switch b {
 
-	case 'c': // reset
-		debugPrintln(debugTodo, "TODO: cmd: reset") // TODO
+	case '7': // DECSC: save cursor position (same as CSI s)
+		t.screen().saveCursorPos()
+
+	case '8': // DECRC: restore cursor position (same as CSI u)
+		t.screen().restoreCursorPos()
+
+	case 'c': // RIS: hard reset screen state
+		t.resetTerminal()
+
+	case '_', '^', 'X': // APC, PM, SOS: consume string until ST or BEL
+		return t.consumeString(r)
+
+	case '%', ' ', '-', '.', '/': // Two-byte sequences: consume the argument byte
+		if _, err := r.ReadByte(); err != nil {
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadByteESCarg:", err)
+			}
+			return false
+		}
+
+	case '#':
+		arg, err := r.ReadByte()
+		if err != nil {
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadByteESCHash:", err)
+			}
+			return false
+		}
+		if arg == '8' { // DECALN: fill screen with E
+			t.screen().decaln()
+		}
 
 	case 'D': // Index, scroll down if necessary
 		t.screen().moveCursor(0, 1, false, true)
@@ -819,8 +848,28 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				case 1034:
 					debugPrintf(debugTodo, "TODO: Interpret Meta key = %v\n", value)
 
-				case 1049: // Save/Restore cursor and alternate screen
-					t.switchScreen()
+				case 47, 1047: // Alternate screen without clear or cursor save/restore
+					t.setAltScreen(value)
+
+				case 1048: // Save/restore cursor only, no screen switch
+					if value {
+						t.screen().saveCursorPos()
+					} else {
+						t.screen().restoreCursorPos()
+					}
+
+				case 1049: // Save cursor, clear alt screen, switch; restore on reset
+					if value {
+						if !t.onAltScreen {
+							t.mainScreen.saveCursorPos()
+							t.enterAltScreen(true)
+						}
+					} else {
+						if t.onAltScreen {
+							t.exitAltScreen()
+							t.mainScreen.restoreCursorPos()
+						}
+					}
 
 				case 2004: // Bracketed paste
 					t.setViewFlag(VFBracketedPaste, value)
@@ -1000,6 +1049,28 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 	}
 
 	return true
+}
+
+// consumeString discards an ESC-initiated string (APC, PM, SOS) up to its
+// terminator: ST (ESC \ or 0x9C) or BEL. Payload bytes are never printed.
+func (t *terminal) consumeString(r escapeReader) bool {
+	prev := byte(0)
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadByteString:", err)
+			}
+			return false
+		}
+		if b == 0x07 || b == 0x9c { // BEL or 8-bit ST
+			return true
+		}
+		if prev == 27 && b == '\\' { // 7-bit ST
+			return true
+		}
+		prev = b
+	}
 }
 
 func (t *terminal) handleDCS(r escapeReader) bool {

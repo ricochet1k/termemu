@@ -36,6 +36,7 @@ type screen interface {
 	moveCursor(dx, dy int, wrap bool, scroll bool)
 	saveCursorPos()
 	restoreCursorPos()
+	decaln()
 	printScreen()
 	setScrollCapture(func(lines []spanLine, wrapped []bool))
 }
@@ -546,6 +547,18 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 		panic(fmt.Sprintf("moveCursor outside, %v %v  %v, %v, %v, %v", s.cursorPos, s.size, dx, dy, wrap, scroll))
 	}
 	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
+}
+
+// decaln implements DECALN (ESC # 8): fill the whole screen with 'E' using
+// the current style, clear wrap continuation flags, and home the cursor.
+func (s *spanScreen) decaln() {
+	for y := 0; y < s.size.Y; y++ {
+		s.rawWriteSpan(0, y, Span{Style: s.style, Rune: 'E', Width: s.size.X}, CRClear)
+		if y < len(s.wrapped) {
+			s.wrapped[y] = false
+		}
+	}
+	s.setCursorPos(0, 0)
 }
 
 func (s *spanScreen) saveCursorPos() {

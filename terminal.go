@@ -427,10 +427,52 @@ func (t *terminal) WithLock(f func()) {
 	f()
 }
 
-func (t *terminal) switchScreen() {
-	t.onAltScreen = !t.onAltScreen
+// setAltScreen switches to the alternate (wantAlt=true) or main screen.
+// It is idempotent: requesting the current screen is a no-op.
+func (t *terminal) setAltScreen(wantAlt bool) {
+	if t.onAltScreen == wantAlt {
+		return
+	}
+	t.onAltScreen = wantAlt
 	size := t.screen().Size()
 	t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRScreenSwitch)
+}
+
+// enterAltScreen switches to the alternate screen. When clear is true the
+// alt screen is erased and its cursor homed first (DECSET 1049 semantics);
+// otherwise alt content and cursor are preserved (DECSET 47/1047 semantics).
+// Re-entering the current screen is a no-op.
+func (t *terminal) enterAltScreen(clear bool) {
+	if t.onAltScreen {
+		return
+	}
+	if clear {
+		size := t.altScreen.Size()
+		t.altScreen.eraseRegion(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRClear)
+		t.altScreen.setCursorPos(0, 0)
+	}
+	t.setAltScreen(true)
+}
+
+// exitAltScreen switches back to the main screen (no-op if already there).
+func (t *terminal) exitAltScreen() {
+	t.setAltScreen(false)
+}
+
+// resetTerminal implements RIS (ESC c): return to the main screen and reset
+// both screens to a clean default state (cleared, cursor homed, default
+// style, full scroll margins, auto-wrap on). Keyboard, pty, and view-flag
+// state beyond the screens is left untouched.
+func (t *terminal) resetTerminal() {
+	t.setAltScreen(false)
+	for _, s := range []screen{t.mainScreen, t.altScreen} {
+		size := s.Size()
+		s.setStyle(NewStyle())
+		s.setScrollMarginTopBottom(0, size.Y-1)
+		s.SetAutoWrap(true)
+		s.eraseRegion(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRClear)
+		s.setCursorPos(0, 0)
+	}
 }
 
 // testHandleCommand is only for testing.
