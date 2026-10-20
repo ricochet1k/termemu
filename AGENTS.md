@@ -224,7 +224,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - `ptyReadLoop()` reads from backend via `GraphemeReader`
 - Distinguishes printable text runs from control codes
 - Parses CSI sequences (cursor movement, SGR colors, screen manipulation)
-- Parses OSC sequences (window title, working directory)
+- Parses OSC sequences: 0/2 window title, 6/7 working directory
+  (`VSCurrentDirectory`; OSC 7 no longer sets `VSCurrentFile`), 8 hyperlinks
+  (tracked URI pushed to both screens via internal `setLink`), 52 clipboard
+  writes (base64-decoded, forwarded to `ClipboardSink`; queries dropped)
+- `DECSET/DECRST 2026` sets/clears `VFSynchronizedOutput`
 - Parses keyboard protocol mode switches
 
 **Style System** (style.go):
@@ -232,6 +236,9 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Each uint32: bit 31 = color type (256-color vs RGB), bits 24-30 = mode bits, bits 0-23 = color data
 - Modes: Bold, Dim, Italic, Underline, Blink, Reverse, Invisible, Strike, Overline, DoubleUnderline, Framed, Encircled, RapidBlink
 - `ANSIEscape()` generates SGR sequences for rendering
+- `ANSIEscapeFrom(prev)` emits minimal diffs; a component returning to
+  default emits `SGR 39` (fg) / `SGR 49` (bg) unless a mode change already
+  forced a full reset
 
 **Grapheme Handling** (grapheme_reader.go):
 - `GraphemeReader` wraps an io.Reader and tokenizes text
@@ -242,8 +249,12 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 **Line Representation** (line.go):
 - `Line` holds `[]Span` for external API access
 - `Span` can be text (`Text` field) or repeated rune (`Rune` + `Width`)
+- `Span.Link` holds the OSC 8 hyperlink URI active when the span was written
+  (empty = no link); always check it alongside fg/bg when comparing spans,
+  and never set it on blank/erased spans
 - `spanLine` is internal representation with width tracking
 - Functions: `splitSpan()`, `replaceRange()`, `truncateLine()`, `mergeAdjacent()` handle complex span manipulation
+- `replaceRange()` must not merge/coalesce adjacent spans with different `Link` values
 
 ### Scrollback (scrollback.go)
 
@@ -270,6 +281,8 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   callback (lock already held there — deadlock).
 - `Row.PlainTextString()` is the convenience accessor (thin wrapper over
   `Line.PlainTextString`), keep it in `scrollback.go`, not in a test file.
+- Scrollback `Row`/`LogicalLine` copies preserve `Span.Link` (checked by
+  `TestOSC8_LinkPreservedInScrollback`).
 - Reading requires the terminal lock, so all `Scrollback` methods take it
   themselves.
 
@@ -288,7 +301,11 @@ Frontends receive callbacks:
 - `CursorMoved(x, y)`: Cursor position changed
 - `StyleChanged(Style)`: Current style changed
 - `ViewFlagChanged/ViewIntChanged/ViewStringChanged`: Terminal mode changed
+  (includes `VFSynchronizedOutput` for `DECSET/DECRST 2026`; frontends may
+  batch repaints while set — the core does no batching)
 - `ScrollLines(y)`: Lines scrolling off top (for scrollback buffer)
+- Optional `ClipboardSink.Clipboard(selection, data)`: OSC 52 write path;
+  only called if the frontend implements it (queries never forwarded)
 - `Bell()`: Bell character received
 
 `EmptyFrontend` is a no-op implementation for when no UI callbacks are needed.
@@ -373,6 +390,11 @@ update `spanScreen`.
 wires it in `newTerminal`, and `spanScreen.scroll()` invokes it before overwriting
 lost rows. Keep the capture path allocation-light but correct: rows are copied
 because the screen reuses its `spanLine` storage.
+
+`setLink` is the other screen-internal hook: `terminal.setHyperlink` (driven by
+OSC 8) pushes the URI to both screens; `writeString`/`rawWriteRune` stamp it
+onto content spans while erase/scroll/resize blanks stay link-free. `resetTerminal`
+(RIS) ends any active link.
 
 Use benchmarks in `screen_bench_test.go` to catch regressions.
 

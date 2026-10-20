@@ -14,6 +14,10 @@ A small Go library for emulating a terminal and rendering output through a plugg
 - Rune-per-cell or grapheme-cluster text tokenization
 - Mouse reporting (X10/UTF-8/SGR encodings)
 - Kitty keyboard protocol mode parsing and key encoding support
+- Synchronized output (`DECSET/DECRST 2026`) exposed as `VFSynchronizedOutput`
+- OSC 8 hyperlinks tracked per span (`Span.Link`)
+- OSC 52 clipboard write path via the optional `ClipboardSink` interface
+- OSC 6/7 working-directory announcements mapped to `VSCurrentDirectory`
 
 ## Requirements
 
@@ -256,6 +260,25 @@ reopening it. `Resize(w, h)` emits one full-screen `RegionChanged` with the
 Locking: `Size`, `Line`, `ANSILine`, `StyledLine`, and `StyledLines` require
 the caller to hold the terminal lock (`WithLock`); `Scrollback` methods take
 it themselves and therefore must not be called from `Frontend` callbacks.
+
+### Modern terminal features
+
+- **Synchronized output:** `DECSET/DECRST 2026` sets/clears the
+  `VFSynchronizedOutput` view flag. The core performs no batching itself;
+  frontends may defer repaints while the flag is set.
+- **Hyperlinks:** `OSC 8 ; params ; URI` starts a link, an empty URI ends
+  it. Spans written while a link is active carry it in `Span.Link`
+  (preserved through wrapping, scrollback, and line slicing; blank/erased
+  spans never carry a link). The TTY frontend does not re-emit OSC 8.
+- **Clipboard:** if the frontend implements
+  `ClipboardSink` (`Clipboard(selection string, data []byte)`), OSC 52
+  payloads are base64-decoded and forwarded with the requested selection.
+  Queries (`data == "?"`) are never answered or forwarded, and malformed
+  base64 is ignored. Called with the terminal lock held: do not call back
+  into the terminal from `Clipboard`.
+- **Working directory:** `OSC 7` (and legacy `OSC 6`) set
+  `VSCurrentDirectory`. `OSC 7` no longer sets `VSCurrentFile`; no OSC
+  sequence sets it.
 
 ## API highlights
 
