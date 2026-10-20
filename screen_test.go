@@ -17,7 +17,6 @@ type screenFactory struct {
 
 func screenFactories() []screenFactory {
 	return []screenFactory{
-		{name: "grid", new: func(f Frontend) screen { return newGridScreen(f) }},
 		{name: "span", new: func(f Frontend) screen { return newSpanScreen(f) }},
 	}
 }
