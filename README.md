@@ -232,6 +232,12 @@ for _, row := range logical {
 // Row counts and clearing (CSI 3 J also clears; screen untouched):
 fmt.Println(sb.Len())
 sb.Clear()
+
+// Scrollback has its own snapshot/restore, separate from Terminal.Snapshot:
+snap := sb.Snapshot()
+if err := sb.Restore(snap); err != nil {
+    // errors.Is(err, termemu.ErrScrollbackSnapshotInvalid)
+}
 ```
 
 Only scrolls starting at the top of the screen enter scrollback;
@@ -280,7 +286,9 @@ if err := term.Err(); err != nil {
 `PTYBackend.Close()` (also called by `Terminal.Close()`) closes the pty pair;
 later `Read`/`Write`/`Attach` fail with `io.ErrClosedPipe` instead of
 reopening it. `Resize(w, h)` emits one full-screen `RegionChanged` with the
-`CRResize` reason so frontends know to repaint at the new size.
+`CRResize` reason so frontends know to repaint at the new size. Shrinking the
+height on the main screen pushes the lost top rows into scrollback and shifts
+the surviving content up; resizing the alt screen only resizes it.
 
 `PTYBackend.Attach()` injects `TERM=xterm-256color` and `COLORTERM=truecolor`
 into the child environment by default. Truecolor is advertised via
@@ -329,7 +337,11 @@ if err := term.Restore(snap); err != nil {
 ```
 
 Restoring does not touch the scrollback buffer, and a snapshot stays
-independent of the terminal after it is taken.
+independent of the terminal after it is taken. Use `Scrollback.Snapshot()`
+and `Scrollback.Restore()` separately when scrollback history must be saved;
+they preserve row IDs and keep the ring's `Base`/`Next` monotonic.
+
+New screens start with auto-wrap (DECAWM, `CSI ? 7`) enabled, matching xterm.
 
 ### Modern terminal features
 
@@ -359,7 +371,8 @@ independent of the terminal after it is taken.
 - `PTYBackend.Attach(*exec.Cmd)` — wires a command into the PTY. Reusable.
 - `Terminal.Close()/Done()/Err()` — shut down the read loop and observe how it exited.
 - `Terminal.Scrollback()` — returns the scrollback buffer.
-- `Terminal.Snapshot()/Restore(Snapshot)` — deep-copy and restore terminal screen state (same size only).
+- `Scrollback.Snapshot()/Restore(ScrollbackSnapshot)` — deep-copy and restore scrollback history (separate from terminal snapshots).
+- `Terminal.Snapshot()/Restore(Snapshot)` — deep-copy and restore terminal screen state (same size only; scrollback excluded).
 - `PrintTerminal(t Terminal)` / `PrintTerminalTo(w, t)` — debug printing of screen contents.
 - `NewTTYFrontend(out)` — terminal frontend that writes ANSI to output.
 

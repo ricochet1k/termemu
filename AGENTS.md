@@ -227,7 +227,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Lifecycle: `Close()` closes the backend so the read loop exits (idempotent,
   never blocks); `Done()` closes on loop exit; `Err()` reports the loop error
   (nil for clean EOF). `Resize()` emits one full-screen `RegionChanged` with
-  `CRResize` so frontends repaint at the new size.
+  `CRResize` so frontends repaint at the new size. A height shrink on the main
+  screen pushes the top `oldH-newH` rows into scrollback (without extra scroll
+  callbacks) and shifts remaining content up; the alt screen only resizes and
+  never captures. Growing height does not pull rows back out of scrollback.
 
 **Screen** (screen.go): Character grid management
 - `spanScreen` is the only implementation (the old cell-based `gridScreen` was
@@ -238,7 +241,8 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   auto-wrap; it feeds scrollback logical lines and is cleared by explicit cursor
   positioning / full-width erase
 - Handles complex operations: scrolling, wide character overlaps, grapheme cluster splitting
-- Screen size, cursor position, scroll margins, auto-wrap behavior
+- Screen size, cursor position, scroll margins, auto-wrap behavior. Auto-wrap
+  (DECAWM) defaults to on, as in xterm.
 - `snapshotState()`/`restoreState()` implement the internal `screen` hooks used
   by `Terminal.Snapshot`/`Restore`: they deep-copy/rebuild `spanLine`s
   (including zero-width spans and links), the `wrapped` flags, cursor, saved
@@ -297,7 +301,14 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   `ScrollID` that stays stable as rows are added and evicted; `Range()` reports
   the valid IDs.
 - `LogicalLine(id)` walks backward/forward over `wrapped` rows to rebuild the
-  logical line and reflows it at the terminal's current width.
+  logical line and reflows it at the terminal's current width. Trailing blank
+  padding on the final physical row is dropped before reflow, so a 20-column
+  line of 50 cells returns rows of width 20/20/10.
+- `Scrollback.Snapshot()`/`Restore()` deep-copy and replace the ring contents
+  independently of `Terminal.Snapshot`/`Restore` (which exclude scrollback).
+  Restore preserves `Base`/`Next` IDs, keeps only the newest rows when the
+  snapshot exceeds capacity, and returns `ErrScrollbackSnapshotInvalid` for
+  malformed input.
 - `MovePos` moves by *stored* physical rows, not reflown rows.
 - `Row`/`LogicalLine` return copies of the stored span slices (public API
   hands out copies; internal hot paths never copy).

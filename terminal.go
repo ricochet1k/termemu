@@ -454,6 +454,18 @@ func (t *terminal) CursorPos() Pos {
 
 func (t *terminal) Resize(w, h int) error {
 	t.Lock()
+	// Shrinking the main screen would otherwise discard the top rows. Feed
+	// them to scrollback and shift the surviving content up so the newest
+	// output stays visible. The alt screen only resizes (as before). The
+	// single full-screen CRResize below covers the repaint.
+	oldH := t.mainScreen.Size().Y
+	if h < oldH && !t.onAltScreen {
+		delta := oldH - h
+		lines, wrapped := t.mainScreen.takeTopRows(delta)
+		t.captureScrollRows(lines, wrapped)
+		// Keep the cursor on the same content after the shift.
+		t.mainScreen.shiftCursorUp(delta)
+	}
 	t.mainScreen.setSize(w, h)
 	t.altScreen.setSize(w, h)
 	// setSize preserves content and emits nothing, so tell frontends
@@ -733,6 +745,14 @@ func (t *terminal) scrollCapture(lines []spanLine, wrapped []bool) {
 	if t.onAltScreen {
 		return
 	}
+	t.captureScrollRows(lines, wrapped)
+}
+
+// captureScrollRows appends rows to the scrollback buffer and notifies the
+// optional listener. Unlike scrollCapture it ignores the alt-screen flag:
+// resize captures belong to the main screen and must happen regardless of
+// which screen is currently active. Caller must hold t.Lock.
+func (t *terminal) captureScrollRows(lines []spanLine, wrapped []bool) {
 	first := t.scrollNextID
 	for i, sl := range lines {
 		if i >= len(wrapped) {

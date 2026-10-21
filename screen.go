@@ -35,6 +35,11 @@ type screen interface {
 	scroll(y1 int, y2 int, dy int)
 	setCursorPos(x, y int)
 	moveCursor(dx, dy int, wrap bool, scroll bool)
+	// takeTopRows removes the top n rows and shifts the rest up without
+	// emitting callbacks. shiftCursorUp moves the cursor up by n rows,
+	// clamping at the top. Both support scrollback-preserving resize.
+	takeTopRows(n int) ([]spanLine, []bool)
+	shiftCursorUp(n int)
 	saveCursorPos()
 	restoreCursorPos()
 	decaln()
@@ -103,6 +108,7 @@ func newSpanScreen(f Frontend) *spanScreen {
 		frontend: f,
 		textMode: TextReadModeGrapheme,
 		style:    NewStyle(),
+		autoWrap: true, // DECAWM (CSI ? 7) defaults to on, as in xterm
 	}
 	s.setSize(80, 14)
 	s.bottomMargin = s.size.Y - 1
@@ -323,6 +329,37 @@ func (s *spanScreen) setSize(w, h int) {
 	s.setStyle(s.style)
 }
 
+// takeTopRows removes the top n rows, shifts the remaining content up by n,
+// and blanks the freed bottom rows. It returns the removed rows and their
+// wrapped flags without emitting any frontend callbacks; the caller decides
+// how to capture them. n must be in [1, len(s.lines)].
+func (s *spanScreen) takeTopRows(n int) ([]spanLine, []bool) {
+	if n <= 0 || n > len(s.lines) {
+		return nil, nil
+	}
+	lines := make([]spanLine, n)
+	copy(lines, s.lines[:n])
+	wrapped := make([]bool, n)
+	copy(wrapped, s.wrapped[:n])
+
+	copy(s.lines, s.lines[n:])
+	copy(s.wrapped, s.wrapped[n:])
+	for y := len(s.lines) - n; y < len(s.lines); y++ {
+		s.lines[y] = blankSpanLine(s.size.X, s.style)
+		s.wrapped[y] = false
+	}
+	return lines, wrapped
+}
+
+// shiftCursorUp moves the cursor up by n rows without emitting callbacks,
+// clamping at the top of the screen.
+func (s *spanScreen) shiftCursorUp(n int) {
+	s.cursorPos.Y -= n
+	if s.cursorPos.Y < 0 {
+		s.cursorPos.Y = 0
+	}
+}
+
 func (s *spanScreen) eraseRegion(r Region, cr ChangeReason) {
 	r = s.clampRegion(r)
 
@@ -456,10 +493,13 @@ func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 }
 
 func (s *spanScreen) setCursorPos(x, y int) {
+	oldY := s.cursorPos.Y
 	s.cursorPos.X = clamp(x, 0, s.size.X-1)
 	s.cursorPos.Y = clamp(y, 0, s.size.Y-1)
-	// Explicit cursor positioning breaks any wrap continuation.
-	if s.cursorPos.Y < len(s.wrapped) {
+	// Moving to a different row breaks that row's wrap continuation. A
+	// same-row cursor move (e.g. the column reset part of LF) must not:
+	// the physical row is still a continuation of the one above it.
+	if s.cursorPos.Y != oldY && s.cursorPos.Y < len(s.wrapped) {
 		s.wrapped[s.cursorPos.Y] = false
 	}
 	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)

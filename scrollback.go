@@ -1,5 +1,7 @@
 package termemu
 
+import "errors"
+
 // ScrollID is a monotonically increasing identifier for a physical row
 // in the scrollback buffer. IDs are globally unique per terminal and
 // stable even as new lines are added or old lines are evicted.
@@ -28,6 +30,21 @@ func (r Row) PlainTextString() string {
 
 // DefaultScrollbackRows is the default capacity of the scrollback ring buffer.
 const DefaultScrollbackRows = 1000
+
+// ErrScrollbackSnapshotInvalid is returned by Scrollback.Restore when the
+// snapshot's row IDs are non-contiguous, its Next/Base range does not match
+// the row count, or it otherwise cannot describe a valid ring buffer.
+var ErrScrollbackSnapshotInvalid = errors.New("termemu: invalid scrollback snapshot")
+
+// ScrollbackSnapshot is a deep copy of a scrollback buffer. Rows are ordered
+// oldest to newest; Base is the ID of Rows[0] and Next is the next ID that
+// would be assigned. It is separate from Terminal.Snapshot/Restore, which
+// deliberately exclude the scrollback buffer.
+type ScrollbackSnapshot struct {
+	Rows []Row    // oldest -> newest, deep copies
+	Base ScrollID // ID of Rows[0]
+	Next ScrollID // next ID to assign
+}
 
 // scrollRow is the internal storage for a physical row in the scrollback.
 type scrollRow struct {
@@ -122,6 +139,84 @@ func (s *Scrollback) Clear() {
 	})
 }
 
+// Snapshot returns a deep copy of every stored row, oldest to newest, along
+// with the ID range. Mutating the snapshot does not affect the buffer.
+// Scrollback snapshots are independent of Terminal.Snapshot, which excludes
+// the scrollback buffer; use both when restoring a full terminal session.
+func (s *Scrollback) Snapshot() ScrollbackSnapshot {
+	var snap ScrollbackSnapshot
+	s.t.withLock(func() {
+		n := len(s.t.scrollRows)
+		snap.Rows = make([]Row, n)
+		for i := 0; i < n; i++ {
+			r := s.t.scrollRows[(s.t.scrollBaseIdx+i)%n]
+			snap.Rows[i] = Row{
+				Spans:   copySpans(r.spans),
+				Width:   r.width,
+				Wrapped: r.wrapped,
+				ID:      r.id,
+			}
+		}
+		snap.Base = s.scrollBaseIDLocked()
+		snap.Next = s.t.scrollNextID
+	})
+	return snap
+}
+
+// Restore replaces the scrollback contents with snap. The snapshot's Base and
+// Next IDs are preserved, so IDs continue monotonically from where the
+// snapshot left off. If snap has more rows than the current capacity, only
+// the newest rows are kept and Base is advanced accordingly. Restore returns
+// ErrScrollbackSnapshotInvalid without changing the buffer when the snapshot
+// is malformed (non-contiguous IDs, Next/Base inconsistent with the row
+// count, or a zero row ID).
+func (s *Scrollback) Restore(snap ScrollbackSnapshot) error {
+	var err error
+	s.t.withLock(func() {
+		err = s.restoreLocked(snap)
+	})
+	return err
+}
+
+// restoreLocked implements Restore with t.Lock held.
+func (s *Scrollback) restoreLocked(snap ScrollbackSnapshot) error {
+	if snap.Next < snap.Base || snap.Next == 0 {
+		return ErrScrollbackSnapshotInvalid
+	}
+	if uint64(snap.Next-snap.Base) != uint64(len(snap.Rows)) {
+		return ErrScrollbackSnapshotInvalid
+	}
+	for i, r := range snap.Rows {
+		if r.ID == 0 || r.ID != snap.Base+ScrollID(i) {
+			return ErrScrollbackSnapshotInvalid
+		}
+	}
+
+	rows := snap.Rows
+	maxRows := s.t.scrollMaxRows
+	if maxRows < 0 {
+		maxRows = 0
+	}
+	if len(rows) > maxRows {
+		// Keep the newest rows; Base advances with the dropped prefix.
+		rows = rows[len(rows)-maxRows:]
+	}
+
+	stored := make([]scrollRow, len(rows), maxRows)
+	for i, r := range rows {
+		stored[i] = scrollRow{
+			id:      r.ID,
+			spans:   copySpans(r.Spans),
+			width:   r.Width,
+			wrapped: r.Wrapped,
+		}
+	}
+	s.t.scrollRows = stored
+	s.t.scrollBaseIdx = 0
+	s.t.scrollNextID = snap.Next
+	return nil
+}
+
 // Row returns the physical row with the given ID, or false if it has been evicted.
 // The returned Row owns a copy of the stored spans.
 func (s *Scrollback) Row(id ScrollID) (Row, bool) {
@@ -159,54 +254,72 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 		return nil
 	}
 
-	// Walk backward to find the start of the logical line.
+	// Walk backward to find the start of the logical line. A row's
+	// Wrapped flag means "this row continues the previous row", so keep
+	// moving back while the current row is a continuation.
 	start := idx
-	for {
+	for steps := 0; steps < n-1 && s.t.scrollRows[start].wrapped; steps++ {
 		prevIdx := (start - 1 + n) % n
-		prev := s.t.scrollRows[prevIdx]
-		if prev.wrapped {
-			start = prevIdx
-		} else {
+		if s.t.scrollRows[prevIdx].id == 0 {
 			break
 		}
-		if start == idx {
-			break // wrapped all the way around
-		}
+		start = prevIdx
 	}
 
-	// Walk forward collecting all raw rows in the logical line.
+	// Walk forward collecting all raw rows in the logical line. The start
+	// row is always included; subsequent rows belong to the line only when
+	// they are flagged as a continuation of the row before them.
 	var rawRows []scrollRow
-	for i := start; ; i = (i + 1) % n {
+	for i, steps := start, 0; ; steps++ {
 		r := s.t.scrollRows[i]
 		if r.id == 0 {
 			break
 		}
 		rawRows = append(rawRows, r)
-		if !r.wrapped {
+		nextIdx := (i + 1) % n
+		if nextIdx == start || steps >= n-1 {
+			break // wrapped all the way around the ring
+		}
+		next := s.t.scrollRows[nextIdx]
+		if next.id == 0 || !next.wrapped {
 			break
 		}
-		if (i+1)%n == start {
-			break
-		}
+		i = nextIdx
 	}
 
 	if len(rawRows) == 0 {
 		return nil
 	}
 
+	// The final physical row of a wrapped line usually carries blank padding
+	// out to the full screen width. Trailing blank cells are not part of the
+	// logical line's content, so drop them before measuring/reflowing.
+	lastIdx := len(rawRows) - 1
+	lastSpans, lastWidth := trimTrailingBlankSpans(rawRows[lastIdx].spans)
+
 	// Compute total content width for the logical line.
-	totalWidth := 0
-	for _, r := range rawRows {
+	totalWidth := lastWidth
+	for _, r := range rawRows[:lastIdx] {
 		totalWidth += r.width
+	}
+
+	if totalWidth <= 0 {
+		// Purely blank logical line: preserve the stored rows rather than
+		// collapsing to nothing.
+		result := make([]Row, len(rawRows))
+		for i, r := range rawRows {
+			result[i] = Row{Spans: copySpans(r.spans), Width: r.width, Wrapped: i < lastIdx, ID: r.id}
+		}
+		return result
 	}
 
 	// Get the current terminal width for reflow.
 	termW := s.t.screen().Size().X
 
-	// If terminal width matches the stored rows and there's nothing
-	// unusual, return as-is to avoid unnecessary work.
-	allSameWidth := true
-	for _, r := range rawRows {
+	// If terminal width matches the stored rows (including the trimmed
+	// final row), return as-is to avoid unnecessary work.
+	allSameWidth := lastWidth == termW
+	for _, r := range rawRows[:lastIdx] {
 		if r.width != termW {
 			allSameWidth = false
 			break
@@ -217,18 +330,39 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 		// mutate the stored history through the returned Rows.
 		result := make([]Row, len(rawRows))
 		for i, r := range rawRows {
-			result[i] = Row{Spans: copySpans(r.spans), Width: r.width, Wrapped: i < len(rawRows)-1, ID: r.id}
+			result[i] = Row{Spans: copySpans(r.spans), Width: r.width, Wrapped: i < lastIdx, ID: r.id}
 		}
 		return result
 	}
 
 	// Reflow: concatenate all spans, re-split at termW.
 	allSpans := make([]Span, 0, totalWidth/2)
-	for _, r := range rawRows {
+	for _, r := range rawRows[:lastIdx] {
 		allSpans = append(allSpans, r.spans...)
 	}
+	allSpans = append(allSpans, lastSpans...)
 
 	return reflowRows(allSpans, totalWidth, termW)
+}
+
+// trimTrailingBlankSpans returns spans without trailing blank runs (spans
+// with no Text), along with their total cell width. The returned slice aliases
+// spans and must not be mutated.
+func trimTrailingBlankSpans(spans []Span) ([]Span, int) {
+	end := len(spans)
+	for end > 0 {
+		sp := spans[end-1]
+		if sp.Width == 0 || sp.Text == "" {
+			end--
+			continue
+		}
+		break
+	}
+	width := 0
+	for _, sp := range spans[:end] {
+		width += sp.Width
+	}
+	return spans[:end], width
 }
 
 // reflowRows splits a contiguous span list into physical rows at targetWidth.
