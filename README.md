@@ -259,10 +259,18 @@ later `Read`/`Write`/`Attach` fail with `io.ErrClosedPipe` instead of
 reopening it. `Resize(w, h)` emits one full-screen `RegionChanged` with the
 `CRResize` reason so frontends know to repaint at the new size.
 
-`PTYBackend.Attach()` sets `TERM=xterm-256color` and `COLORTERM=truecolor` in
-the child environment. Truecolor is advertised via `COLORTERM` because DA1
-has no truecolor parameter; existing `COLORTERM` values containing `truecolor`
-or `24bit` are preserved.
+`PTYBackend.Attach()` injects `TERM=xterm-256color` and `COLORTERM=truecolor`
+into the child environment by default. Truecolor is advertised via
+`COLORTERM` because DA1 has no truecolor parameter. Set `PTYBackend.AutoEnv`
+to override the list, or to an empty non-nil slice to disable injection:
+
+```go
+backend := &termemu.PTYBackend{AutoEnv: []string{"TERM=screen-256color"}}
+backend := &termemu.PTYBackend{AutoEnv: []string{}} // inject nothing
+```
+
+Injected entries replace same-key values already present in `cmd.Env`;
+other environment variables are left alone.
 
 Locking: `Size`, `Line`, `ANSILine`, `StyledLine`, and `StyledLines` require
 the caller to hold the terminal lock (`WithLock`); `Scrollback` methods take

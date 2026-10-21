@@ -34,7 +34,17 @@ type PTYBackend struct {
 	// reuse is signaled by Attach to wake Read when it is waiting for the
 	// next command after the previous one exited.
 	reuse chan struct{}
+
+	// AutoEnv lists the environment variables Attach injects into commands,
+	// in "KEY=VALUE" form. nil applies the defaults (TERM and COLORTERM);
+	// set it to an empty non-nil slice to inject nothing, or to a custom
+	// list to override the defaults and add your own variables. Injected
+	// values replace existing entries with the same key in cmd.Env.
+	AutoEnv []string
 }
+
+// defaultAutoEnv is applied by Attach when PTYBackend.AutoEnv is nil.
+var defaultAutoEnv = []string{termStr, "COLORTERM=truecolor"}
 
 // Close shuts down the pty pair so a blocked Read returns promptly, and
 // prevents any later lazy reopen: subsequent Read/Write/Attach calls fail
@@ -159,35 +169,12 @@ func (p *PTYBackend) Attach(c *exec.Cmd) error {
 	if c.Env == nil {
 		c.Env = os.Environ()
 	}
-	found := false
-	for i, v := range c.Env {
-		if strings.HasPrefix(v, "TERM=") {
-			found = true
-			c.Env[i] = termStr
-			break
-		}
+	autoEnv := p.AutoEnv
+	if autoEnv == nil {
+		autoEnv = defaultAutoEnv
 	}
-	if !found {
-		c.Env = append(c.Env, termStr)
-	}
-
-	// Advertise truecolor. DA1 has no truecolor parameter, so COLORTERM is
-	// the only way child programs learn that 38;2/48;2 is supported. Keep an
-	// existing truecolor/24bit value; otherwise replace or append one.
-	colortermFound := false
-	for i, v := range c.Env {
-		if !strings.HasPrefix(v, "COLORTERM=") {
-			continue
-		}
-		lower := strings.ToLower(v)
-		if !strings.Contains(lower, "truecolor") && !strings.Contains(lower, "24bit") {
-			c.Env[i] = "COLORTERM=truecolor"
-		}
-		colortermFound = true
-		break
-	}
-	if !colortermFound {
-		c.Env = append(c.Env, "COLORTERM=truecolor")
+	for _, kv := range autoEnv {
+		c.Env = setEnv(c.Env, kv)
 	}
 
 	c.Stdin = slave
@@ -201,6 +188,22 @@ func (p *PTYBackend) Attach(c *exec.Cmd) error {
 	// A previous child may have exited, leaving Read waiting for reuse.
 	p.signalReuse()
 	return nil
+}
+
+// setEnv sets KEY=VALUE in env, replacing an existing entry with the same
+// key, and returns the (possibly reallocated) slice.
+func setEnv(env []string, kv string) []string {
+	key, _, ok := strings.Cut(kv, "=")
+	if !ok || key == "" {
+		return env
+	}
+	for i, existing := range env {
+		if k, _, _ := strings.Cut(existing, "="); k == key {
+			env[i] = kv
+			return env
+		}
+	}
+	return append(env, kv)
 }
 
 // Read reads from the pty master. When the current child has exited the master
