@@ -27,7 +27,7 @@ func TestTraceReplaceRange(t *testing.T) {
 	t.Logf("Line after: spans=%d, width=%d", len(line.spans), line.width)
 	for i, sp := range line.spans[:min(5, len(line.spans))] {
 		if sp.Width > 0 {
-			t.Logf("  Span %d: Text=%q, Rune=%q, Width=%d", i, sp.Text, sp.Rune, sp.Width)
+			t.Logf("  Span %d: Text=%q, Width=%d", i, sp.Text, sp.Width)
 		}
 	}
 }

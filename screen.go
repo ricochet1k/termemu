@@ -142,7 +142,7 @@ func (s *spanScreen) Line(y int) string {
 			line.WriteString(sp.Text)
 		} else {
 			for range sp.Width {
-				line.WriteRune(sp.Rune)
+				line.WriteRune(' ')
 			}
 		}
 		pos += sp.Width
@@ -255,7 +255,7 @@ func (s *spanScreen) renderLineANSI(y int) string {
 		buf.Write(sp.Style.ANSIEscape())
 		if sp.Text == "" {
 			for i := 0; i < sp.Width; i++ {
-				buf.WriteRune(sp.Rune)
+				buf.WriteRune(' ')
 			}
 		} else {
 			buf.WriteString(sp.Text)
@@ -314,8 +314,8 @@ func (s *spanScreen) setSize(w, h int) {
 func (s *spanScreen) eraseRegion(r Region, cr ChangeReason) {
 	r = s.clampRegion(r)
 
-	// Fast path for clearing (using empty span with repeating rune)
-	emptySpan := Span{Style: s.style, Rune: ' ', Width: r.X2 - r.X}
+	// Fast path for clearing (using empty Text to represent spaces).
+	emptySpan := Span{Style: s.style, Width: r.X2 - r.X}
 
 	for i := r.Y; i < r.Y2; i++ {
 		debugPrintln(debugErase, "erase: ", r.X, i, emptySpan.Width)
@@ -376,7 +376,7 @@ func (s *spanScreen) insertRunes(b []rune) {
 
 	line := &s.lines[y]
 	truncateLine(line, s.size.X-n, s.textMode)
-	insertSpan(line, s.cursorPos.X, Span{Style: s.style, Rune: ' ', Width: n}, s.textMode)
+	insertSpan(line, s.cursorPos.X, Span{Style: s.style, Width: n}, s.textMode)
 
 	s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b[:n], CRText)
 }
@@ -406,7 +406,7 @@ func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReas
 
 	var sp Span
 	if width == 1 && r == ' ' {
-		sp = Span{Style: s.style, Rune: ' ', Width: 1, Link: s.link}
+		sp = Span{Style: s.style, Width: 1, Link: s.link}
 	} else {
 		sp = Span{Style: s.style, Text: string(r), Width: width, Link: s.link}
 	}
@@ -436,7 +436,7 @@ func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 	// Now append spaces to fill the end to width s.size.X
 	curWidth := lineCellWidth(line)
 	if curWidth < s.size.X {
-		line.spans = append(line.spans, Span{Style: s.style, Rune: ' ', Width: s.size.X - curWidth})
+		line.spans = append(line.spans, Span{Style: s.style, Width: s.size.X - curWidth})
 		line.width = s.size.X
 	}
 
@@ -567,7 +567,7 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 // the current style, clear wrap continuation flags, and home the cursor.
 func (s *spanScreen) decaln() {
 	for y := 0; y < s.size.Y; y++ {
-		s.rawWriteSpan(0, y, Span{Style: s.style, Rune: 'E', Width: s.size.X}, CRClear)
+		s.rawWriteSpan(0, y, Span{Style: s.style, Text: strings.Repeat("E", s.size.X), Width: s.size.X}, CRClear)
 		if y < len(s.wrapped) {
 			s.wrapped[y] = false
 		}
@@ -611,49 +611,8 @@ func (s *spanScreen) printScreen() {
 	fmt.Println("+")
 }
 
-// func fillLineFromSpan(line []rune, pos int, sp Span, mode TextReadMode) int {
-// 	if pos >= len(line) || sp.Width <= 0 {
-// 		return pos
-// 	}
-
-// 	if sp.Text == "" {
-// 		// Repeat mode
-// 		for i := 0; i < sp.Width && pos < len(line); i++ {
-// 			line[pos] = sp.Rune
-// 			pos++
-// 		}
-// 		return pos
-// 	}
-
-// 	// Text mode
-// 	idx := 0
-// 	state := -1
-// 	textBytes := []byte(sp.Text) // TODO: Avoid this cast if stepTextCluster supports string
-
-// 	for idx < len(textBytes) && pos < len(line) {
-// 		cluster, consumed, width, newState, ok := stepTextCluster(textBytes[idx:], state, mode)
-// 		if !ok || consumed <= 0 {
-// 			break
-// 		}
-// 		if width < 1 {
-// 			width = 0
-// 		}
-// 		if width > 0 {
-// 			r, _ := utf8.DecodeRune(cluster)
-// 			line[pos] = r
-// 			for i := 1; i < width && pos+i < len(line); i++ {
-// 				line[pos+i] = 0
-// 			}
-// 			pos += width
-// 		}
-// 		idx += consumed
-// 		state = newState
-// 	}
-// 	return pos
-// }
-
 func blankSpanLine(width int, style Style) spanLine {
-	return spanLine{spans: []Span{{Style: style, Rune: ' ', Width: width}}, width: width}
+	return spanLine{spans: []Span{{Style: style, Width: width}}, width: width}
 }
 
 func resizeLine(line *spanLine, width int, style Style, mode TextReadMode) {
@@ -663,7 +622,7 @@ func resizeLine(line *spanLine, width int, style Style, mode TextReadMode) {
 		return
 	}
 	if cur < width {
-		line.spans = append(line.spans, Span{Style: style, Rune: ' ', Width: width - cur})
+		line.spans = append(line.spans, Span{Style: style, Width: width - cur})
 	}
 	line.width = width
 }
@@ -694,7 +653,7 @@ func splitSpan(sp Span, cellOffset int, mode TextReadMode) (left Span, right Spa
 	}
 
 	if sp.Text == "" {
-		// Repeat mode - can't break a wide cluster
+		// Blank runs are made of single-cell spaces, so they never break a wide cluster.
 		left := sp
 		left.Width = cellOffset
 		right := sp
@@ -731,7 +690,7 @@ func splitSpan(sp Span, cellOffset int, mode TextReadMode) (left Span, right Spa
 		}
 
 		clusterEnd := cellPos + width
-		if cellOffset >= cellPos && cellOffset < clusterEnd {
+		if cellOffset > cellPos && cellOffset < clusterEnd {
 			// Split point is within this cluster
 			if width > 1 {
 				// We're breaking a wide cluster - return the wide char we're splitting
@@ -821,54 +780,6 @@ func findSpanAtX(line *spanLine, x int) (int, int) {
 	return len(line.spans), 0
 }
 
-// func mergeAdjacent(line *spanLine) {
-// 	if len(line.spans) < 2 {
-// 		return
-// 	}
-
-// 	writeIdx := 0
-// 	for i := 1; i < len(line.spans); i++ {
-// 		cur := line.spans[i]
-// 		prev := &line.spans[writeIdx]
-
-// 		// Compare styles by their color fields
-// 		curFG, _, _ := cur.Style.GetColor(ComponentFG)
-// 		prevFG, _, _ := prev.Style.GetColor(ComponentFG)
-// 		curBG, _, _ := cur.Style.GetColor(ComponentBG)
-// 		prevBG, _, _ := prev.Style.GetColor(ComponentBG)
-
-// 		canMerge := curFG == prevFG && curBG == prevBG
-// 		if canMerge {
-// 			// Check if mergeable types
-// 			if prev.Text == "" && cur.Text == "" && prev.Rune == cur.Rune {
-// 				// Both repeats of same rune
-// 				prev.Width += cur.Width
-// 				continue
-// 			}
-
-// 			// Convert both to text if mixing?
-// 			// Or if both text
-// 			if prev.Text != "" && cur.Text != "" {
-// 				prev.Text += cur.Text
-// 				prev.Width += cur.Width
-// 				continue
-// 			}
-
-// 			// If one is repeat and other is text, convert repeat to text
-// 			// But only if repeat is small? For now, let's keep them separate if different types
-// 			// to avoid allocating huge strings for spaces.
-// 			// Actually, better to merge if we can to reduce span count.
-// 			// But for space runs, keeping them as Rune=' ' is better.
-// 			// If we have "abc" and "   ", keep separate.
-// 			// If we have "   " and "   ", merge (handled above).
-// 		}
-
-// 		writeIdx++
-// 		line.spans[writeIdx] = cur
-// 	}
-// 	line.spans = line.spans[:writeIdx+1]
-// }
-
 func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) {
 	// Fast return for a no-op insert.
 	if n == 0 && insert.Width == 0 {
@@ -883,12 +794,52 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		return
 	}
 
-	// Clamp negative inputs and scan once to find boundaries.
+	// The line width is the sum of all span widths. Never derive it from the
+	// boundary scan below: the scan stops at the end of the replacement window,
+	// not at the end of the line.
+	totalWidth := 0
+	for _, sp := range spans {
+		totalWidth += sp.Width
+	}
+
+	// Clamp negative inputs.
 	if x < 0 {
 		x = 0
 	}
 	if n < 0 {
 		n = 0
+	}
+	if x > totalWidth {
+		x = totalWidth
+	}
+	if n > totalWidth-x {
+		n = totalWidth - x
+	}
+
+	// Expand the replacement window so it never covers only part of a wide
+	// grapheme cluster. The old wide character must be consumed exactly once;
+	// leaving half of it behind would corrupt both the span widths and the
+	// rendered line.
+	if x < totalWidth {
+		idx, off := findSpanAtX(line, x)
+		if idx < len(spans) && off > 0 && off < spans[idx].Width {
+			left, _, wide := splitSpan(spans[idx], off, mode)
+			if wide.Width > 0 {
+				wideStart := off - left.Width
+				x -= wideStart
+				n += wideStart
+			}
+		}
+	}
+	if end := x + n; end > 0 && end < totalWidth {
+		idx, off := findSpanAtX(line, end)
+		if idx < len(spans) && off > 0 && off < spans[idx].Width {
+			left, _, wide := splitSpan(spans[idx], off, mode)
+			if wide.Width > 0 {
+				wideEnd := left.Width + wide.Width
+				n += wideEnd - off
+			}
+		}
 	}
 
 	// Locate the spans that intersect the replacement window.
@@ -919,18 +870,6 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		pos = endPos
 	}
 
-	// Clamp to total width (tracked by pos after the scan).
-	totalWidth := pos
-	if x > totalWidth {
-		x = totalWidth
-	}
-	if x+n > totalWidth {
-		n = totalWidth - x
-		endIdx = len(spans) - 1
-		if endIdx >= 0 {
-			endOffset = spans[endIdx].Width
-		}
-	}
 	if x == 0 && n >= totalWidth {
 		line.spans = append(line.spans[:0], insert)
 		line.width = insert.Width
@@ -963,7 +902,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		// hyperlink boundary survives; likewise the in-place text swap
 		// below would otherwise keep the old span's link.
 		if insert.Width == n && spFG == insertFG && spBG == insertBG && sp.Link == insert.Link {
-			if sp.Text == "" && insert.Text == "" && sp.Rune == insert.Rune {
+			if sp.Text == "" && insert.Text == "" {
 				return
 			}
 			if sp.Text != "" && insert.Text != "" && mode == TextReadModeRune && sp.Width == len(sp.Text) && insert.Width == len(insert.Text) {
@@ -975,50 +914,22 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		}
 	}
 
-	// Split the boundary spans so we can keep the untouched parts.
+	// Split the boundary spans so we can keep the untouched parts. The window
+	// was expanded above, so these splits fall on cluster boundaries.
 	var left Span
 	hasLeft := false
-	var splitWideAtStart Span // The wide character we're splitting through, if any
 	if startIdx < len(spans) && startOffset > 0 {
-		left, _, splitWideAtStart = splitSpan(spans[startIdx], startOffset, mode)
+		left, _, _ = splitSpan(spans[startIdx], startOffset, mode)
 		hasLeft = left.Width > 0
 	}
 
 	var right Span
 	hasRight := false
-	var splitWideAtEnd Span // The wide character we're splitting through, if any
 	if endIdx >= 0 && endIdx < len(spans) {
 		if endOffset < spans[endIdx].Width {
-			_, right, splitWideAtEnd = splitSpan(spans[endIdx], endOffset, mode)
+			_, right, _ = splitSpan(spans[endIdx], endOffset, mode)
 			hasRight = right.Width > 0
 		}
-	}
-
-	// If we're splitting in the right cell of a wide character at the start,
-	// we should insert after the wide character rather than overwriting it
-	if splitWideAtStart.Width > 0 {
-		// splitSpan gave us the wide character - include it in the left part
-		// and insert after it
-		if hasLeft {
-			// Combine left with the wide character
-			combinedLeft := left
-			combinedLeft.Text = left.Text + splitWideAtStart.Text
-			combinedLeft.Width = left.Width + splitWideAtStart.Width
-			left = combinedLeft
-		} else {
-			// Just use the wide character as the left part
-			left = splitWideAtStart
-			hasLeft = true
-		}
-
-		// The right part already excludes the wide character, so we're good
-		// This effectively turns the operation into an insert after the wide character
-	}
-
-	// If we split a cell at the end, a space should fill in the gap
-	if splitWideAtEnd.Width > 0 {
-		insert.Text = insert.Text + " "
-		insert.Width += 1
 	}
 
 	// Compute the new slice length and where the suffix begins.
@@ -1142,7 +1053,7 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 	// Convert repeat to text if needed and merge
 	sp = &line.spans[idx]
 	if sp.Text == "" {
-		sp.Text = strings.Repeat(string(sp.Rune), sp.Width)
+		sp.Text = strings.Repeat(" ", sp.Width)
 	}
 	sp.Text += text
 	// Width doesn't change for merge

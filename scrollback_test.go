@@ -414,7 +414,6 @@ func TestScrollback_RowReturnsCopy(t *testing.T) {
 	origText := row.PlainTextString()
 	for i := range row.Spans {
 		row.Spans[i].Text = "MUTATED"
-		row.Spans[i].Rune = 'X'
 	}
 
 	again, ok := sb.Row(base)
@@ -439,7 +438,6 @@ func TestScrollback_RowReturnsCopy(t *testing.T) {
 	}
 	for i := range logical[0].Spans {
 		logical[0].Spans[i].Text = "MUT"
-		logical[0].Spans[i].Rune = 'Y'
 	}
 	logical2 := sb.LogicalLine(base)
 	var gotAll string

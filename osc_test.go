@@ -78,7 +78,7 @@ func TestOSC8_LinkSpansWrappedLine(t *testing.T) {
 		line := t1.screen().StyledLine(0, 10, y)
 		found := false
 		for _, sp := range line.Spans {
-			if sp.Text == "" && sp.Rune == ' ' {
+			if sp.Text == "" {
 				continue
 			}
 			found = true
@@ -113,7 +113,7 @@ func TestOSC8_LinkPreservedInScrollback(t *testing.T) {
 			t.Fatalf("Row(%d) not found", id)
 		}
 		for _, sp := range row.Spans {
-			if sp.Text == "" && sp.Rune == ' ' {
+			if sp.Text == "" {
 				continue
 			}
 			if sp.Link != "https://example.com" {

@@ -18,15 +18,15 @@ func TestLineEquivalent(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "text versus repeated rune content differs",
+			name: "text versus blank content differs",
 			a:    line(2, Span{Style: def, Text: "ab", Width: 2}),
-			b:    line(2, Span{Style: def, Rune: 'a', Width: 2}),
+			b:    line(2, Span{Style: def, Width: 2}),
 			want: false,
 		},
 		{
 			name: "blank packing differs but cells match",
 			a:    line(2, Span{Style: def, Text: "  ", Width: 2}),
-			b:    line(2, Span{Style: def, Rune: ' ', Width: 2}),
+			b:    line(2, Span{Style: def, Width: 2}),
 			want: true,
 		},
 		{
@@ -51,7 +51,7 @@ func TestLineEquivalent(t *testing.T) {
 			name: "wide character with trailing blank padding",
 			a: line(3,
 				Span{Style: def, Text: "🐹", Width: 2},
-				Span{Style: def, Rune: ' ', Width: 1},
+				Span{Style: def, Width: 1},
 			),
 			b:    line(3, Span{Style: def, Text: "🐹 ", Width: 3}),
 			want: true,
@@ -59,7 +59,7 @@ func TestLineEquivalent(t *testing.T) {
 		{
 			name: "wide character alignment differs",
 			a: line(3,
-				Span{Style: def, Rune: ' ', Width: 1},
+				Span{Style: def, Width: 1},
 				Span{Style: def, Text: "🐹", Width: 2},
 			),
 			b:    line(3, Span{Style: def, Text: " 🐹", Width: 3}),
@@ -84,18 +84,6 @@ func TestLineEquivalent(t *testing.T) {
 				Span{Style: def, Text: "\u0301", Width: 0},
 			),
 			b:    line(1, Span{Style: def, Text: "a\u0301", Width: 1}),
-			want: true,
-		},
-		{
-			name: "combining mark as zero-width rune span",
-			a: line(1,
-				Span{Style: def, Text: "a", Width: 1},
-				Span{Style: def, Rune: '\u0301', Width: 0},
-			),
-			b: line(1,
-				Span{Style: def, Text: "a", Width: 1},
-				Span{Style: def, Text: "\u0301", Width: 0},
-			),
 			want: true,
 		},
 		{
@@ -163,7 +151,7 @@ func TestLineEquivalent(t *testing.T) {
 func TestRowEquivalent(t *testing.T) {
 	def := NewStyle()
 	text := Row{Spans: []Span{{Style: def, Text: "  ", Width: 2}}, Width: 2, Wrapped: true, ID: 7}
-	blank := Row{Spans: []Span{{Style: def, Rune: ' ', Width: 2}}, Width: 2, ID: 9}
+	blank := Row{Spans: []Span{{Style: def, Width: 2}}, Width: 2, ID: 9}
 	if !text.Equivalent(blank) {
 		t.Fatal("rows with the same cells should be equivalent regardless of packing, Wrapped, or ID")
 	}

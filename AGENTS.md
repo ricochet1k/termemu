@@ -213,7 +213,7 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - `spanScreen` is the only implementation (the old cell-based `gridScreen` was
   deleted)
 - `spanScreen` represents the screen as a list of `spanLine`s, each containing `[]Span`
-- Spans optimize storage: `Span{Rune: ' ', Width: 80}` for 80 spaces vs storing 80 cells
+- Spans optimize storage: `Span{Width: 80}` (empty Text) for 80 spaces vs storing 80 cells
 - A parallel `wrapped []bool` marks rows that continue the previous row due to
   auto-wrap; it feeds scrollback logical lines and is cleared by explicit cursor
   positioning / full-width erase
@@ -250,7 +250,8 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 
 **Line Representation** (line.go):
 - `Line` holds `[]Span` for external API access
-- `Span` can be text (`Text` field) or repeated rune (`Rune` + `Width`)
+- `Span` is either text (`Text` + `Width`) or a blank run (empty `Text`,
+  `Width` spaces; `Width == 0` is empty)
 - `Span.Link` holds the OSC 8 hyperlink URI active when the span was written
   (empty = no link); always check it alongside fg/bg when comparing spans,
   and never set it on blank/erased spans
@@ -368,8 +369,7 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
 ### Working with Spans
 
 Spans optimize memory and rendering:
-- Use `Rune + Width` for repeated characters (spaces, dashes)
-- Use `Text + Width` for actual text content
+- Use empty `Text` + `Width` for blank runs; use `Text + Width` for actual text content
 - `replaceRange()` is the core function for modifying span lines
 - Always respect grapheme cluster boundaries (don't split wide chars)
 

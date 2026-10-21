@@ -266,7 +266,7 @@ func renderStyledLineANSI(line Line) []byte {
 			buf.WriteString(span.Text)
 		} else {
 			for i := 0; i < span.Width; i++ {
-				buf.WriteRune(span.Rune)
+				buf.WriteByte(' ')
 			}
 		}
 	}

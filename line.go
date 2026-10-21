@@ -8,12 +8,11 @@ import (
 )
 
 // Span represents a run of text with consistent styling.
-// If Text is not empty, it contains the text content.
-// If Text is empty, it represents Rune repeated Width times.
+// If Text is not empty, it contains the text content. If Text is empty, the
+// span represents Width spaces; a Width of zero (or less) is empty.
 type Span struct {
 	Style Style // Complete text styling (colors and modes)
 	Text  string
-	Rune  rune
 	Width int
 	// Link is the OSC 8 hyperlink URI active when the span was written.
 	// Empty means no link. Blank/erased spans never carry a link.
@@ -33,56 +32,20 @@ func (l Line) PlainTextString() string {
 			out.WriteString(sp.Text)
 			continue
 		}
-		if sp.Width <= 0 {
-			continue
-		}
 		for i := 0; i < sp.Width; i++ {
-			out.WriteRune(sp.Rune)
+			out.WriteRune(' ')
 		}
 	}
 	return out.String()
 }
 
-// func (l *Line) Append(text string, style Style) {
-// 	if len(text) == 0 {
-// 		return
-// 	}
-// 	// Note: this assumes width == rune count, which is only true for simple text.
-// 	// Real terminal logic should provide the width.
-// 	width := utf8.RuneCountInString(text)
-// 	l.Spans = append(l.Spans, Span{
-// 		Style: style,
-// 		Text:  text,
-// 		Width: width,
-// 	})
-// 	l.Width += width
-// }
-
-// func (l *Line) AppendRunes(runes []rune, style Style) {
-// 	if len(runes) == 0 {
-// 		return
-// 	}
-// 	l.Append(string(runes), style)
-// }
-
-// func (l *Line) Repeat(r rune, rep int, style Style) {
-// 	if rep <= 0 {
-// 		return
-// 	}
-// 	l.Spans = append(l.Spans, Span{
-// 		Style: style,
-// 		Rune:  r,
-// 		Width: rep,
-// 	})
-// 	l.Width += rep
-// }
-
 // Equivalent reports whether l and other cover the same cells with the same
 // content, style, and OSC 8 link. It is a semantic comparison: span packing is
-// ignored, so a run of blanks stored as Span{Rune: ' ', Width: n} is equivalent
-// to the same blanks stored as a single Text span. Wide characters occupy their
-// full cell width, and zero-width content (combining marks, for example) is
-// compared in order at the same cell position rather than being dropped.
+// ignored, so a run of blanks stored as Span{Width: n} (empty Text) is
+// equivalent to the same blanks stored as a Text span of spaces. Wide
+// characters occupy their full cell width, and zero-width content (combining
+// marks, for example) is compared in order at the same cell position rather
+// than being dropped.
 //
 // Equivalent does not compare the structural representation of the lines; use
 // reflect.DeepEqual or cmp for that.
@@ -127,9 +90,8 @@ type lineCellWalker struct {
 	started bool
 
 	// Current span state.
-	runeLeft    int
-	textOff     int
-	zeroEmitted bool
+	blankLeft int
+	textOff   int
 }
 
 func (w *lineCellWalker) next() (lineCell, bool) {
@@ -138,25 +100,19 @@ func (w *lineCellWalker) next() (lineCell, bool) {
 		if !w.started {
 			w.started = true
 			w.textOff = 0
-			w.zeroEmitted = false
-			w.runeLeft = sp.Width
-			if w.runeLeft < 0 {
-				w.runeLeft = 0
+			w.blankLeft = sp.Width
+			if w.blankLeft < 0 {
+				w.blankLeft = 0
 			}
 		}
 
 		if sp.Text == "" {
-			// Repeat spans contribute one cell per unit of Width.
-			if w.runeLeft > 0 {
-				w.runeLeft--
-				cell := lineCell{pos: w.pos, width: 1, text: string(sp.Rune), style: sp.Style, link: sp.Link}
+			// Empty Text means a run of spaces, one cell per unit of Width.
+			if w.blankLeft > 0 {
+				w.blankLeft--
+				cell := lineCell{pos: w.pos, width: 1, text: " ", style: sp.Style, link: sp.Link}
 				w.pos++
 				return cell, true
-			}
-			// Width <= 0 still carries content (typically a combining mark).
-			if !w.zeroEmitted && sp.Width <= 0 && sp.Rune != 0 {
-				w.zeroEmitted = true
-				return lineCell{pos: w.pos, text: string(sp.Rune), style: sp.Style, link: sp.Link}, true
 			}
 			w.idx++
 			w.started = false

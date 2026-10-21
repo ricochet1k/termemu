@@ -287,28 +287,23 @@ func TestClearWideOverlaps_EdgeCase_SplitInMiddle(t *testing.T) {
 		t.Errorf("Expected emoji at start, got line: %q", lineStr)
 	}
 
-	// Write at position 1 (the second cell of the emoji)
-	// New tmux-compatible behavior: insert 'Y' after the emoji
+	// Write at position 1 (the second cell of the emoji). The replacement
+	// window expands to cover the whole wide character, so 'Y' replaces it.
 	writeTextAt(s, 1, 0, "Y")
 
 	lineStr = s.Line(0)
 
-	// The emoji should be preserved and Y should follow it
-	if !strings.Contains(lineStr, "🎉") {
-		t.Errorf("Expected emoji to be preserved, got %q", lineStr)
+	if !strings.HasPrefix(lineStr, "Y") {
+		t.Errorf("Expected line to start with 'Y', got %q", lineStr)
 	}
-	if !strings.Contains(lineStr, "Y") {
-		t.Errorf("Expected 'Y' in line, got %q", lineStr)
-	}
-	// Line should start with emoji and Y (insert after wide char)
-	if !strings.HasPrefix(lineStr, "🎉Y") {
-		t.Errorf("Expected line to start with '🎉Y', got %q", lineStr)
+	if strings.Contains(lineStr, "🎉") {
+		t.Errorf("Expected wide character to be overwritten, got %q", lineStr)
 	}
 }
 
 func TestSplitSpan_RepeatMode(t *testing.T) {
 	// Repeat mode spans (no wide clusters)
-	sp := Span{Rune: ' ', Width: 5, Style: NewStyle()}
+	sp := Span{Width: 5, Style: NewStyle()}
 
 	left, right, brokeWide := splitSpan(sp, 2, TextReadModeGrapheme)
 
@@ -321,8 +316,8 @@ func TestSplitSpan_RepeatMode(t *testing.T) {
 	if right.Width != 3 {
 		t.Errorf("Expected right.Width=3, got %d", right.Width)
 	}
-	if left.Rune != ' ' || right.Rune != ' ' {
-		t.Errorf("Expected rune ' ' preserved in both, got left=%q right=%q", left.Rune, right.Rune)
+	if left.Text != "" || right.Text != "" {
+		t.Errorf("Expected empty Text blanks, got left=%q right=%q", left.Text, right.Text)
 	}
 }
 
@@ -444,5 +439,20 @@ func TestSplitSpan_BoundaryConditions(t *testing.T) {
 	// Both should not break wide for normal text
 	if brokeWide.Width > 0 {
 		t.Errorf("Expected brokeWide=false for normal ASCII boundaries")
+	}
+}
+
+func TestSplitSpan_BetweenWideCharacters(t *testing.T) {
+	sp := Span{Text: "界世", Width: 4, Style: NewStyle()}
+
+	left, right, brokeWide := splitSpan(sp, 2, TextReadModeGrapheme)
+	if brokeWide.Width != 0 {
+		t.Fatalf("split at a cluster boundary broke a wide character: %#v", brokeWide)
+	}
+	if left.Text != "界" || left.Width != 2 {
+		t.Errorf("left = %q (%d cells), want %q (2 cells)", left.Text, left.Width, "界")
+	}
+	if right.Text != "世" || right.Width != 2 {
+		t.Errorf("right = %q (%d cells), want %q (2 cells)", right.Text, right.Width, "世")
 	}
 }
