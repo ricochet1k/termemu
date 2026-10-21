@@ -730,11 +730,18 @@ func (t *terminal) scrollCapture(lines []spanLine, wrapped []bool) {
 	if t.onAltScreen {
 		return
 	}
+	first := t.scrollNextID
 	for i, sl := range lines {
 		if i >= len(wrapped) {
 			break
 		}
 		t.addScrollRow(sl.spans, sl.width, wrapped[i])
+	}
+	if t.scrollNextID == first {
+		return
+	}
+	if listener, ok := t.frontend.(ScrollbackListener); ok {
+		listener.ScrollbackRowsAppended(LockedView{t: t}, first, t.scrollNextID)
 	}
 }
 

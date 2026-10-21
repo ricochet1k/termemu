@@ -314,6 +314,26 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   `TestOSC8_LinkPreservedInScrollback`).
 - Reading requires the terminal lock, so all `*Scrollback` methods take it
   themselves; `LockedScrollback` methods assume it is already held.
+- Frontends that do not want to poll `Len()`/`Range()` can implement the
+  optional `ScrollbackListener` extension. `scrollCapture` calls
+  `ScrollbackRowsAppended(v, first, next)` once per capture batch, with the
+  terminal lock held and IDs `[first, next)` matching the rows just appended.
+  Read them through `v.Scrollback()`; do not call the locking `*Scrollback`
+  methods. Alt-screen output and `Clear()` never fire it.
+
+  ```go
+  type myFrontend struct{ *termemu.EmptyFrontend }
+
+  func (f *myFrontend) ScrollbackRowsAppended(v termemu.LockedView, first, next termemu.ScrollID) {
+      sb := v.Scrollback() // no-lock view; callback already holds the lock
+      for id := first; id < next; id++ {
+          row, ok := sb.Row(id)
+          if ok {
+              _ = row.PlainTextString()
+          }
+      }
+  }
+  ```
 
 ### Dual Screen Model
 
@@ -335,6 +355,10 @@ Frontends receive callbacks:
 - `ScrollLines(y)`: Lines scrolling off top (for scrollback buffer)
 - Optional `ClipboardSink.Clipboard(selection, data)`: OSC 52 write path;
   only called if the frontend implements it (queries never forwarded)
+- Optional `ScrollbackListener.ScrollbackRowsAppended(v, first, next)`: one
+  call per scrollback capture batch, with the lock held; IDs are the newly
+  appended range. Read rows via `v.Scrollback()`; not fired for alt-screen
+  output or `Clear()`
 - `Bell()`: Bell character received
 
 `EmptyFrontend` is a no-op implementation for when no UI callbacks are needed.

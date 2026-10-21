@@ -243,6 +243,26 @@ callbacks already hold the terminal lock). Inside a callback use
 `v.Scrollback()`, which returns the no-lock `LockedScrollback`
 (`Range`, `Row`, `LogicalLine`, `MovePos`, `Len`).
 
+To avoid polling, implement the optional `termemu.ScrollbackListener`
+extension on your frontend. It is called once per capture batch, with the
+terminal lock held, and receives the newly appended `[first, next)` IDs:
+
+```go
+type myFrontend struct{ *termemu.EmptyFrontend }
+
+func (f *myFrontend) ScrollbackRowsAppended(v termemu.LockedView, first, next termemu.ScrollID) {
+    sb := v.Scrollback() // callback already holds the lock
+    for id := first; id < next; id++ {
+        if row, ok := sb.Row(id); ok {
+            fmt.Println(row.PlainTextString())
+        }
+    }
+}
+```
+
+Alternate-screen output never produces rows and `Clear()` does not call the
+listener. Do not retain the view beyond the callback.
+
 ## Lifecycle
 
 Terminals own a background read-loop goroutine. Shut them down explicitly:

@@ -119,6 +119,16 @@ type ClipboardSink interface {
 	Clipboard(v LockedView, selection string, data []byte)
 }
 
+// ScrollbackListener is an optional Frontend extension. When rows are
+// appended to the main-screen scrollback, ScrollbackRowsAppended is called
+// once per capture batch with the terminal lock held and the range
+// [first, next) of newly assigned ScrollIDs. Use the LockedView (including
+// v.Scrollback()) to read the rows; do not retain the view. Alternate-screen
+// output never produces rows. Scrollback.Clear() does not call this.
+type ScrollbackListener interface {
+	ScrollbackRowsAppended(v LockedView, first, next ScrollID)
+}
+
 // EmptyFrontend is a simple frontend that does nothing
 type EmptyFrontend struct{}
 
