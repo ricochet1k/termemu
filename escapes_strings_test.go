@@ -289,3 +289,37 @@ func TestESC_RIS(t *testing.T) {
 		t.Fatalf("screen not cleared after RIS: %q", got)
 	}
 }
+
+func TestOSC_Title_UTF8ContinuationIsNotST(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	// Ü is 0xC3 0x9C. The 0x9C is a UTF-8 continuation byte and must not be
+	// mistaken for an 8-bit ST terminator.
+	feedESC(t, t1, "\x1b]2;A\xc3\x9cB\x1b\\")
+	if got := mf.ViewStrings[VSWindowTitle]; got != "AÜB" {
+		t.Fatalf("window title = %q, want %q", got, "AÜB")
+	}
+}
+
+func TestDCS_UTF8ContinuationIsNotST(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	// The payload contains 0xC3 0x9C. With correct continuation tracking the
+	// whole DCS (through ESC \) is consumed and nothing is printed.
+	feedESC(t, t1, "\x1bPpayload\xc3\x9cstill-payload\x1b\\")
+	if got := lineBlank(t, t1, 0); strings.TrimSpace(got) != "" {
+		t.Fatalf("DCS payload leaked to the screen: %q", got)
+	}
+}
+
+func TestOSC_Standalone8BitSTStillTerminates(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	feedESC(t, t1, "\x1b]2;TITLE\x9cTAIL")
+	if got := mf.ViewStrings[VSWindowTitle]; got != "TITLE" {
+		t.Fatalf("window title = %q, want %q", got, "TITLE")
+	}
+	if got := lineBlank(t, t1, 0); !strings.Contains(got, "TAIL") {
+		t.Fatalf("text after standalone 0x9C ST was lost, line = %q", got)
+	}
+}

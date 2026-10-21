@@ -8,6 +8,9 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
 - Module: `github.com/ricochet1k/termemu`
 - Go version: 1.24+ (see `go.mod`)
 - Primary language: Go
+- `PTYBackend.Attach` sets the child `TERM=xterm-256color` and
+  `COLORTERM=truecolor`. Truecolor is advertised via `COLORTERM` because DA1
+  has no truecolor parameter; the emulator itself renders SGR 38;2/48;2 RGB.
 
 ## Repository layout
 - Core library code lives at repo root (package `termemu`).

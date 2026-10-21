@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 )
+
+// Version is the emulator version reported by XTVERSION (CSI > q).
+const Version = "0.1"
 
 // colorModes maps SGR codes 1-7 to their Mode values
 var colorModes = [7]Mode{
@@ -19,6 +23,28 @@ var colorModes = [7]Mode{
 	ModeBlink,     // SGR 5
 	ModeReverse,   // SGR 7 (skipping 6 which is RapidBlink in BG)
 	ModeInvisible, // SGR 8
+}
+
+// writeReply writes an escape-handler reply directly to the backend without
+// taking the terminal lock. ptyReadOne calls handleCommand with the lock held,
+// so reply handlers must not use the public, locking Write method (that would
+// self-deadlock). The caller must hold t.Lock.
+func (t *terminal) writeReply(b []byte) error {
+	backend := t.backend
+	if backend == nil {
+		return errors.New("backend is nil")
+	}
+	for len(b) > 0 {
+		n, err := backend.Write(b)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		b = b[n:]
+	}
+	return nil
 }
 
 // ptyReadLoop consumes backend output until a read fails, then reports the
@@ -397,13 +423,13 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 		case 'c': // Send Device Attributes
 			if paramCount == 0 {
-				paramStore[0] = 1
+				paramStore[0] = 0
 				paramCount = 1
 				params = paramStore[:paramCount]
 			}
 			switch params[0] {
 			case 0:
-				_, _ = t.Write([]byte("\033[?1;2c"))
+				_ = t.writeReply([]byte("\033[?1;2c"))
 			}
 
 		case 'd': // Line Position Absolute
@@ -751,11 +777,11 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 			switch params[0] {
 			case 5:
-				_, _ = t.Write([]byte("\033[0n"))
+				_ = t.writeReply([]byte("\033[0n"))
 			case 6:
 				row := t.screen().CursorPos().Y + 1
 				col := t.screen().CursorPos().X + 1
-				_, _ = fmt.Fprintf(t, "\033[%d;%dR", row, col)
+				_ = t.writeReply([]byte(fmt.Sprintf("\033[%d;%dR", row, col)))
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled DSR params: ", append([]int(nil), params...))
 			}
@@ -776,7 +802,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		switch b {
 		case 'u': // Query keyboard mode
 			flags := t.keyboardFlags()
-			_, _ = fmt.Fprintf(t, "\033[?%du", flags)
+			_ = t.writeReply([]byte(fmt.Sprintf("\033[?%du", flags)))
 			return true
 		case 'm': // Private SGR (ignored)
 			if *debugCmd {
@@ -900,8 +926,13 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		switch b {
 		case 'c': // Send Device Attributes
 			attrs := "\x1b[>1;4402;0c"
-			if _, err := t.Write([]byte(attrs)); err != nil {
+			if err := t.writeReply([]byte(attrs)); err != nil {
 				debugPrintln(debugErrors, "Error sending device attrs:", err)
+			}
+
+		case 'q': // XTVERSION: DCS > | name(version) ST
+			if len(params) == 0 || (len(params) == 1 && params[0] == 0) {
+				_ = t.writeReply([]byte(fmt.Sprintf("\x1bP>|termemu(%s)\x1b\\", Version)))
 			}
 
 		case 'm': // modifyOtherKeys
@@ -1002,6 +1033,7 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 
 	if b == ';' {
 		// skip the ';'
+		var scanner stringTermScanner
 		for {
 			b, err = r.ReadByte()
 			if err != nil {
@@ -1010,11 +1042,14 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 				}
 				return false
 			}
-			if b == 7 || b == 0x9c { // BEL , ST
+			if b == 7 { // BEL
 				break
 			}
-			if len(param2) > 0 && param2[len(param2)-1] == 27 && b == '\\' { // ESC \ is also ST
-				param2 = param2[:len(param2)-1]
+			if scanner.isST(b) {
+				// ESC \ is ST; drop the ESC we appended as payload.
+				if len(param2) > 0 && b == '\\' && param2[len(param2)-1] == 27 {
+					param2 = param2[:len(param2)-1]
+				}
 				break
 			}
 
@@ -1064,6 +1099,16 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 
 	case 112:
 		debugPrintln(debugTodo, "TODO: Reset Cursor Color", string(param2))
+
+	case 7501:
+		// Program Status Protocol feature detection.
+		// https://www.superlogical.com/rex/docs/build/program-status
+		// Only the query is supported; status reports are ignored for now.
+		if strings.TrimSpace(string(param2)) == "?" {
+			_ = t.writeReply([]byte("\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\"))
+		} else {
+			debugPrintln(debugTodo, "TODO: ignoring OSC 7501 report: ", string(param2))
+		}
 
 	default:
 		debugPrintln(debugTodo, "TODO: Unhandled OSC Command: ", param, string(b))
@@ -1127,10 +1172,46 @@ func (t *terminal) handleOSC52(payload []byte) {
 	}
 }
 
+// stringTermScanner detects a string terminator while respecting UTF-8
+// continuation bytes: 0x9C is a valid continuation byte, so it only acts as
+// an 8-bit ST when it is not consumed by a preceding UTF-8 lead byte.
+type stringTermScanner struct {
+	prev byte
+	cont int
+}
+
+// isST reports whether b terminates the string. Feed it one payload byte at a
+// time; it must see the ESC of an ESC \ terminator before the backslash.
+func (s *stringTermScanner) isST(b byte) bool {
+	if s.prev == 0x1b && b == '\\' { // 7-bit ST
+		s.prev = b
+		return true
+	}
+	if s.cont > 0 {
+		s.cont--
+		s.prev = b
+		return false
+	}
+	if b == 0x9c { // 8-bit ST, not part of a UTF-8 sequence
+		s.prev = b
+		return true
+	}
+	switch {
+	case b >= 0xc2 && b <= 0xdf:
+		s.cont = 1
+	case b >= 0xe0 && b <= 0xef:
+		s.cont = 2
+	case b >= 0xf0 && b <= 0xf4:
+		s.cont = 3
+	}
+	s.prev = b
+	return false
+}
+
 // consumeString discards an ESC-initiated string (APC, PM, SOS) up to its
 // terminator: ST (ESC \ or 0x9C) or BEL. Payload bytes are never printed.
 func (t *terminal) consumeString(r escapeReader) bool {
-	prev := byte(0)
+	var scanner stringTermScanner
 	for {
 		b, err := r.ReadByte()
 		if err != nil {
@@ -1139,18 +1220,17 @@ func (t *terminal) consumeString(r escapeReader) bool {
 			}
 			return false
 		}
-		if b == 0x07 || b == 0x9c { // BEL or 8-bit ST
+		if b == 0x07 { // BEL
 			return true
 		}
-		if prev == 27 && b == '\\' { // 7-bit ST
+		if scanner.isST(b) {
 			return true
 		}
-		prev = b
 	}
 }
 
 func (t *terminal) handleDCS(r escapeReader) bool {
-	prev := byte(0)
+	var scanner stringTermScanner
 	var payload []byte
 	for {
 		b, err := r.ReadByte()
@@ -1160,15 +1240,9 @@ func (t *terminal) handleDCS(r escapeReader) bool {
 			}
 			return false
 		}
-		if b == 0x9c {
+		if scanner.isST(b) {
 			if *debugCmd {
-				debugPrintf(debugCmd, "DCS payload: %q\n", string(payload))
-			}
-			return true
-		}
-		if prev == 27 && b == '\\' {
-			if *debugCmd {
-				if len(payload) > 0 && payload[len(payload)-1] == 27 {
+				if len(payload) > 0 && b == '\\' && payload[len(payload)-1] == 27 {
 					payload = payload[:len(payload)-1]
 				}
 				debugPrintf(debugCmd, "DCS payload: %q\n", string(payload))
@@ -1178,6 +1252,5 @@ func (t *terminal) handleDCS(r escapeReader) bool {
 		if *debugCmd {
 			payload = append(payload, b)
 		}
-		prev = b
 	}
 }

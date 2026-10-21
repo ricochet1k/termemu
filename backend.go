@@ -171,6 +171,25 @@ func (p *PTYBackend) Attach(c *exec.Cmd) error {
 		c.Env = append(c.Env, termStr)
 	}
 
+	// Advertise truecolor. DA1 has no truecolor parameter, so COLORTERM is
+	// the only way child programs learn that 38;2/48;2 is supported. Keep an
+	// existing truecolor/24bit value; otherwise replace or append one.
+	colortermFound := false
+	for i, v := range c.Env {
+		if !strings.HasPrefix(v, "COLORTERM=") {
+			continue
+		}
+		lower := strings.ToLower(v)
+		if !strings.Contains(lower, "truecolor") && !strings.Contains(lower, "24bit") {
+			c.Env[i] = "COLORTERM=truecolor"
+		}
+		colortermFound = true
+		break
+	}
+	if !colortermFound {
+		c.Env = append(c.Env, "COLORTERM=truecolor")
+	}
+
 	c.Stdin = slave
 	c.Stdout = slave
 	c.Stderr = slave

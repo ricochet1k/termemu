@@ -9,7 +9,9 @@ A small Go library for emulating a terminal and rendering output through a plugg
 - Reusable PTY backend — run multiple commands through the same PTY
 - Scrollback buffer with stable row IDs and reflow-on-read
 - Screen accessors for plain text, ANSI output, and styled lines
-- `Color` value type with 256-color, bright, and RGB support
+- `Color` value type with 256-color, bright, and RGB support; truecolor is
+  advertised to children via `COLORTERM=truecolor` (DA1 has no truecolor
+  parameter)
 - Minimal backend abstraction for PTY or no-PTY environments
 - Rune-per-cell or grapheme-cluster text tokenization
 - Mouse reporting (X10/UTF-8/SGR encodings)
@@ -256,6 +258,11 @@ if err := term.Err(); err != nil {
 later `Read`/`Write`/`Attach` fail with `io.ErrClosedPipe` instead of
 reopening it. `Resize(w, h)` emits one full-screen `RegionChanged` with the
 `CRResize` reason so frontends know to repaint at the new size.
+
+`PTYBackend.Attach()` sets `TERM=xterm-256color` and `COLORTERM=truecolor` in
+the child environment. Truecolor is advertised via `COLORTERM` because DA1
+has no truecolor parameter; existing `COLORTERM` values containing `truecolor`
+or `24bit` are preserved.
 
 Locking: `Size`, `Line`, `ANSILine`, `StyledLine`, and `StyledLines` require
 the caller to hold the terminal lock (`WithLock`); `Scrollback` methods take

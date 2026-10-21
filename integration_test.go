@@ -157,3 +157,50 @@ func TestIntegration_AttachSetsTerm(t *testing.T) {
 		t.Errorf("expected KEEP=me preserved in child env, got %v", cmd.Env)
 	}
 }
+
+// TestIntegration_AttachSetsColorterm verifies Attach advertises truecolor to
+// the child via COLORTERM while preserving unrelated environment variables.
+// DA1 has no truecolor parameter, so COLORTERM is the only advertisement.
+func TestIntegration_AttachSetsColorterm(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{name: "absent", env: []string{"TERM=dumb", "KEEP=me"}, want: "COLORTERM=truecolor"},
+		{name: "other value overwritten", env: []string{"COLORTERM=256"}, want: "COLORTERM=truecolor"},
+		{name: "truecolor preserved", env: []string{"COLORTERM=truecolor"}, want: "COLORTERM=truecolor"},
+		{name: "24bit preserved", env: []string{"COLORTERM=24bit"}, want: "COLORTERM=24bit"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &PTYBackend{}
+			defer func() { _ = backend.Close() }()
+			cmd := exec.Command("true")
+			cmd.Env = append([]string(nil), tt.env...)
+			if err := backend.Attach(cmd); err != nil {
+				t.Fatalf("attach failed: %v", err)
+			}
+
+			var got []string
+			for _, v := range cmd.Env {
+				if strings.HasPrefix(v, "COLORTERM=") {
+					got = append(got, v)
+				}
+			}
+			if len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("COLORTERM entries = %v, want exactly [%q]", got, tt.want)
+			}
+			foundKeep := false
+			for _, v := range cmd.Env {
+				if v == "KEEP=me" {
+					foundKeep = true
+				}
+			}
+			if tt.name == "absent" && !foundKeep {
+				t.Errorf("unrelated env var KEEP=me was not preserved: %v", cmd.Env)
+			}
+		})
+	}
+}
