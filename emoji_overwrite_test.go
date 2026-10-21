@@ -90,11 +90,8 @@ func TestCaptureANSILikeIntegrationTest(t *testing.T) {
 	// Give time for processing
 	time.Sleep(50 * time.Millisecond)
 
-	// Get ANSI output line by line (must hold lock due to background ptyReadLoop)
-	var line0 string
-	term.WithLock(func() {
-		line0 = term.ANSILine(0)
-	})
+	// Get ANSI output line by line (the read loop is still running)
+	line0 := term.ANSILine(0)
 	t.Logf("ANSILine(0): %q", line0)
 
 	if line0 == "" {
@@ -126,11 +123,8 @@ func TestEmojiOverwriteThroughTTY(t *testing.T) {
 	// Give it time to process
 	time.Sleep(10 * time.Millisecond)
 
-	// Check what the outer terminal has (must hold lock due to background ptyReadLoop)
-	var line string
-	outer.WithLock(func() {
-		line = outer.Line(0)
-	})
+	// Check what the outer terminal has (the read loop is still running)
+	line := outer.Line(0)
 	t.Logf("Outer line 0: %q", line)
 
 	if len(line) < 3 || line[0:3] != " yc" {

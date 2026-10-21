@@ -15,19 +15,11 @@ func feedESC(t *testing.T, t1 *terminal, data string) {
 
 func lineBlank(t *testing.T, t1 *terminal, y int) string {
 	t.Helper()
-	var s string
-	t1.WithLock(func() {
-		s = t1.Line(y)
-	})
-	return s
+	return t1.Line(y)
 }
 
 func cursorPos(t1 *terminal) Pos {
-	var pos Pos
-	t1.WithLock(func() {
-		pos = t1.screen().CursorPos()
-	})
-	return pos
+	return t1.CursorPos()
 }
 
 func TestESC_AltScreen_1049_SetReset(t *testing.T) {

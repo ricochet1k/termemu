@@ -37,6 +37,13 @@ type MockFrontend struct {
 	ViewFlags   map[ViewFlag]bool
 	ViewInts    map[ViewInt]int
 	ViewStrings map[ViewString]string
+
+	// ViewSize and ViewShowCursor are captured from the LockedView passed to
+	// RegionChanged, when it is backed by a terminal. ViewValid reports
+	// whether a usable view was observed.
+	ViewSize       Pos
+	ViewShowCursor bool
+	ViewValid      bool
 }
 
 func NewMockFrontend() *MockFrontend {
@@ -47,27 +54,34 @@ func NewMockFrontend() *MockFrontend {
 	}
 }
 
-func (m *MockFrontend) Bell() {
+func (m *MockFrontend) Bell(v LockedView) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.BellCount++
 }
 
-func (m *MockFrontend) RegionChanged(r Region, c ChangeReason) {
+func (m *MockFrontend) RegionChanged(v LockedView, r Region, c ChangeReason) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Regions = append(m.Regions, struct {
 		R Region
 		C ChangeReason
 	}{r, c})
+	if v.t != nil {
+		w, h := v.Size()
+		m.ViewSize = Pos{X: w, Y: h}
+		m.ViewShowCursor = v.GetViewFlag(VFShowCursor)
+		m.ViewValid = true
+	}
 }
 
-func (m *MockFrontend) ScrollLines(y int) {
+func (m *MockFrontend) ScrollLines(v LockedView, y int) {
 	// no-op for now
+	_ = v
 	_ = y
 }
 
-func (m *MockFrontend) CursorMoved(x, y int) {
+func (m *MockFrontend) CursorMoved(v LockedView, x, y int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.CursorX = x
@@ -75,13 +89,13 @@ func (m *MockFrontend) CursorMoved(x, y int) {
 	m.CursorMovedCount++
 }
 
-func (m *MockFrontend) StyleChanged(s Style) {
+func (m *MockFrontend) StyleChanged(v LockedView, s Style) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Styles = append(m.Styles, s)
 }
 
-func (m *MockFrontend) ViewFlagChanged(vs ViewFlag, value bool) {
+func (m *MockFrontend) ViewFlagChanged(v LockedView, vs ViewFlag, value bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ViewFlags[vs] = value
@@ -94,13 +108,13 @@ func (m *MockFrontend) RegionCount() int {
 	return len(m.Regions)
 }
 
-func (m *MockFrontend) ViewIntChanged(vs ViewInt, value int) {
+func (m *MockFrontend) ViewIntChanged(v LockedView, vs ViewInt, value int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ViewInts[vs] = value
 }
 
-func (m *MockFrontend) ViewStringChanged(vs ViewString, value string) {
+func (m *MockFrontend) ViewStringChanged(v LockedView, vs ViewString, value string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ViewStrings[vs] = value

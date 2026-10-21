@@ -4,24 +4,24 @@ import (
 	"testing"
 )
 
-func BenchmarkManualLock(b *testing.B) {
+func BenchmarkPlainRead(b *testing.B) {
 	backend := NewNoPTYBackend(nil, nil)
 	term := New(&EmptyFrontend{}, backend)
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		term.Lock()
 		_, _ = term.Size()
-		term.Unlock()
 	}
 }
 
-func BenchmarkWithLock(b *testing.B) {
+func BenchmarkView(b *testing.B) {
 	backend := NewNoPTYBackend(nil, nil)
 	term := New(&EmptyFrontend{}, backend)
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		term.WithLock(func() {
-			_, _ = term.Size()
+		term.View(func(v LockedView) {
+			_, _ = v.Size()
 		})
 	}
 }

@@ -171,10 +171,7 @@ func TestResizeEmitsSingleFullRegion(t *testing.T) {
 		t.Fatalf("expected reason CRResize, got %v", got.C)
 	}
 
-	var w, h int
-	term.WithLock(func() {
-		w, h = term.Size()
-	})
+	w, h := term.Size()
 	if w != 100 || h != 30 {
 		t.Fatalf("expected size 100x30, got %dx%d", w, h)
 	}

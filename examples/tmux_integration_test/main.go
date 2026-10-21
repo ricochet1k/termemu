@@ -265,12 +265,11 @@ func captureTermemuThroughTmux(seq string, width, height int) (string, error) {
 
 	// Get ANSI output line by line
 	var lines []string
-	term.Lock()
-	for y := 0; y < height; y++ {
-		line := term.ANSILine(y)
-		lines = append(lines, line)
-	}
-	term.Unlock()
+	term.View(func(v termemu.LockedView) {
+		for y := 0; y < height; y++ {
+			lines = append(lines, v.ANSILine(y))
+		}
+	})
 	ansiOutput := strings.Join(lines, "\n")
 
 	// Switch to alternate screen

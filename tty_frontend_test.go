@@ -97,13 +97,8 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			inner.Lock()
 			innerLines := inner.StyledLines(screenRegion)
-			inner.Unlock()
-
-			outer.Lock()
 			outerLines := outer.StyledLines(screenRegion)
-			outer.Unlock()
 
 			if len(innerLines) != len(outerLines) {
 				t.Fatalf("line count differs: raw=%d TTYFrontend=%d", len(innerLines), len(outerLines))

@@ -54,10 +54,50 @@ type Scrollback struct {
 	t *terminal
 }
 
+// LockedScrollback is the no-lock counterpart of *Scrollback, obtained from
+// LockedView.Scrollback. It is valid only for the duration of the callback
+// or View that produced the view. Its methods do not lock, so they are safe
+// to call from a Frontend callback (unlike *Scrollback methods).
+type LockedScrollback struct {
+	t *terminal
+}
+
+// scrollback returns the locking helper view used to share implementations.
+func (s LockedScrollback) scrollback() *Scrollback {
+	return &Scrollback{t: s.t}
+}
+
+// Range returns the IDs of the oldest and next-to-be-assigned rows.
+func (s LockedScrollback) Range() (base, next ScrollID) {
+	sb := s.scrollback()
+	return sb.scrollBaseIDLocked(), s.t.scrollNextID
+}
+
+// Len returns the number of stored scrollback rows.
+func (s LockedScrollback) Len() int {
+	return len(s.t.scrollRows)
+}
+
+// Row returns the physical row with the given ID, or false if it has been evicted.
+func (s LockedScrollback) Row(id ScrollID) (Row, bool) {
+	return s.scrollback().rowLocked(id)
+}
+
+// LogicalLine returns all physical rows that form the logical line
+// containing the given row ID.
+func (s LockedScrollback) LogicalLine(id ScrollID) []Row {
+	return s.scrollback().logicalLineLocked(id)
+}
+
+// MovePos returns a new ScrollPos offset by delta physical rows from pos.
+func (s LockedScrollback) MovePos(pos ScrollPos, delta int) ScrollPos {
+	return s.scrollback().movePosLocked(pos, delta)
+}
+
 // Range returns the IDs of the oldest and next-to-be-assigned rows.
 // Valid IDs satisfy base <= id < next.
 func (s *Scrollback) Range() (base, next ScrollID) {
-	s.t.WithLock(func() {
+	s.t.withLock(func() {
 		base = s.scrollBaseIDLocked()
 		next = s.t.scrollNextID
 	})
@@ -67,7 +107,7 @@ func (s *Scrollback) Range() (base, next ScrollID) {
 // Len returns the number of stored scrollback rows.
 func (s *Scrollback) Len() int {
 	var n int
-	s.t.WithLock(func() {
+	s.t.withLock(func() {
 		n = len(s.t.scrollRows)
 	})
 	return n
@@ -77,7 +117,7 @@ func (s *Scrollback) Len() int {
 // Clear, Range reports base == next == the current counter, and subsequently
 // captured rows continue from that counter (no ID is ever reused).
 func (s *Scrollback) Clear() {
-	s.t.WithLock(func() {
+	s.t.withLock(func() {
 		s.t.clearScrollbackLocked()
 	})
 }
@@ -87,7 +127,7 @@ func (s *Scrollback) Clear() {
 func (s *Scrollback) Row(id ScrollID) (Row, bool) {
 	var row Row
 	var ok bool
-	s.t.WithLock(func() {
+	s.t.withLock(func() {
 		row, ok = s.rowLocked(id)
 	})
 	return row, ok
@@ -101,7 +141,7 @@ func (s *Scrollback) Row(id ScrollID) (Row, bool) {
 // the stored history.
 func (s *Scrollback) LogicalLine(id ScrollID) []Row {
 	var result []Row
-	s.t.WithLock(func() {
+	s.t.withLock(func() {
 		result = s.logicalLineLocked(id)
 	})
 	return result
@@ -161,7 +201,7 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 	}
 
 	// Get the current terminal width for reflow.
-	termW, _ := s.t.Size()
+	termW := s.t.screen().Size().X
 
 	// If terminal width matches the stored rows and there's nothing
 	// unusual, return as-is to avoid unnecessary work.
@@ -289,33 +329,36 @@ func reflowRows(spans []Span, totalWidth, targetWidth int) []Row {
 // rows. Use LogicalLine to discover how a stored row expands at the current width.
 func (s *Scrollback) MovePos(pos ScrollPos, delta int) ScrollPos {
 	var result ScrollPos
-	s.t.WithLock(func() {
-		_, idx, found := s.findRowLocked(pos.ID)
-		if !found {
-			result = pos
-			return
-		}
-
-		n := s.scrollRowsLen()
-		if n == 0 {
-			result = pos
-			return
-		}
-		baseIdx := s.t.scrollBaseIdx
-		count := len(s.t.scrollRows)
-		lastIdx := (baseIdx + count - 1) % n
-
-		target := idx + delta
-		if target < baseIdx {
-			target = baseIdx
-		}
-		if target > lastIdx {
-			target = lastIdx
-		}
-
-		result.ID = s.t.scrollRows[target].id
+	s.t.withLock(func() {
+		result = s.movePosLocked(pos, delta)
 	})
 	return result
+}
+
+// movePosLocked implements MovePos with t.Lock held.
+func (s *Scrollback) movePosLocked(pos ScrollPos, delta int) ScrollPos {
+	_, idx, found := s.findRowLocked(pos.ID)
+	if !found {
+		return pos
+	}
+
+	n := s.scrollRowsLen()
+	if n == 0 {
+		return pos
+	}
+	baseIdx := s.t.scrollBaseIdx
+	count := len(s.t.scrollRows)
+	lastIdx := (baseIdx + count - 1) % n
+
+	target := idx + delta
+	if target < baseIdx {
+		target = baseIdx
+	}
+	if target > lastIdx {
+		target = lastIdx
+	}
+
+	return ScrollPos{ID: s.t.scrollRows[target].id}
 }
 
 // --- internal helpers (caller must hold t.Lock) ---

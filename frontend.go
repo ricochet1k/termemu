@@ -80,26 +80,26 @@ const (
 
 // Frontend is a type that can display data from a Terminal.
 //
-// All Frontend methods are called with the terminal lock held.
-// Implementations may safely call terminal read methods (Size, Line,
-// ANSILine, StyledLine, StyledLines) without acquiring additional locks.
-// Implementations must not call terminal write methods or attempt to
-// acquire the terminal lock, as this would cause deadlock. For the same
-// reason they must not call Scrollback methods (which take the terminal
-// lock themselves); buffer scrollback rows from ScrollLines instead.
+// All Frontend methods are called with the terminal lock held and receive a
+// LockedView as their first argument. The view is read-only and valid only
+// for the duration of the callback: use it to read terminal state (Size,
+// Line, Scrollback, ...) without locking. Do not retain it, and do not call
+// Terminal write methods or read methods that take the lock themselves
+// (plain Size/Line/... or the Terminal.Scrollback reader) from a callback,
+// as that would deadlock.
 type Frontend interface {
-	Bell()
-	RegionChanged(Region, ChangeReason)
+	Bell(v LockedView)
+	RegionChanged(v LockedView, r Region, c ChangeReason)
 
 	// ScrollLines is called when lines are about to be scrolled off the
 	// top of the main (not alternate) screen. If you want to save to a scrollback
 	// buffer, do it now.
-	ScrollLines(y int)
-	CursorMoved(x, y int)
-	StyleChanged(s Style)
-	ViewFlagChanged(vs ViewFlag, value bool)
-	ViewIntChanged(vs ViewInt, value int)
-	ViewStringChanged(vs ViewString, value string)
+	ScrollLines(v LockedView, y int)
+	CursorMoved(v LockedView, x, y int)
+	StyleChanged(v LockedView, s Style)
+	ViewFlagChanged(v LockedView, vs ViewFlag, value bool)
+	ViewIntChanged(v LockedView, vs ViewInt, value int)
+	ViewStringChanged(v LockedView, vs ViewString, value string)
 }
 
 // ClipboardSink is an optional Frontend extension for the OSC 52 clipboard
@@ -107,22 +107,22 @@ type Frontend interface {
 // an OSC 52 sequence is forwarded via Clipboard with the requested
 // selection (usually "c") and the raw bytes.
 //
-// Clipboard is called with the terminal lock held, so implementations must
-// not call back into the terminal (including Scrollback methods, which take
-// the lock themselves). Clipboard queries (data == "?") are never answered
-// or forwarded.
+// Clipboard is called with the terminal lock held and receives a LockedView,
+// so implementations should read terminal state through the view and must
+// not call back into the terminal with locking methods. Clipboard queries
+// (data == "?") are never answered or forwarded.
 type ClipboardSink interface {
-	Clipboard(selection string, data []byte)
+	Clipboard(v LockedView, selection string, data []byte)
 }
 
 // EmptyFrontend is a simple frontend that does nothing
 type EmptyFrontend struct{}
 
-func (d *EmptyFrontend) Bell()                                         {}
-func (d *EmptyFrontend) RegionChanged(r Region, c ChangeReason)        {}
-func (d *EmptyFrontend) CursorMoved(x, y int)                          {}
-func (d *EmptyFrontend) ScrollLines(y int)                             {}
-func (d *EmptyFrontend) StyleChanged(s Style)                          {}
-func (d *EmptyFrontend) ViewFlagChanged(vs ViewFlag, value bool)       {}
-func (d *EmptyFrontend) ViewIntChanged(vs ViewInt, value int)          {}
-func (d *EmptyFrontend) ViewStringChanged(vs ViewString, value string) {}
+func (d *EmptyFrontend) Bell(v LockedView)                                           {}
+func (d *EmptyFrontend) RegionChanged(v LockedView, r Region, c ChangeReason)        {}
+func (d *EmptyFrontend) CursorMoved(v LockedView, x, y int)                          {}
+func (d *EmptyFrontend) ScrollLines(v LockedView, y int)                             {}
+func (d *EmptyFrontend) StyleChanged(v LockedView, s Style)                          {}
+func (d *EmptyFrontend) ViewFlagChanged(v LockedView, vs ViewFlag, value bool)       {}
+func (d *EmptyFrontend) ViewIntChanged(v LockedView, vs ViewInt, value int)          {}
+func (d *EmptyFrontend) ViewStringChanged(v LockedView, vs ViewString, value string) {}

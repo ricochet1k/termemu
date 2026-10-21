@@ -67,7 +67,7 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 	})
 	if useBytes {
 		maxWidth := 0
-		t.WithLock(func() {
+		t.withLock(func() {
 			if t.screen().AutoWrap() {
 				maxWidth = t.screen().Size().X - t.screen().CursorPos().X
 				if maxWidth < 1 {
@@ -83,7 +83,7 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 			return err
 		}
 		if len(data) > 0 {
-			t.WithLock(func() {
+			t.withLock(func() {
 				bw.writeString(data, width, merge, t.textReadMode)
 			})
 			if *debugTxt {
@@ -100,7 +100,7 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 			return err
 		}
 		if len(tokens) > 0 {
-			t.WithLock(func() {
+			t.withLock(func() {
 				t.screen().writeTokens(tokens)
 			})
 			if *debugTxt {
@@ -130,24 +130,24 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 	case 5: // ENQ ^E Return Terminal Status
 		debugPrintln(debugTodo, "TODO: ENQ")
 	case 7: // BEL ^G Bell
-		t.WithLock(func() {
-			t.frontend.Bell()
+		t.withLock(func() {
+			t.frontend.Bell(LockedView{t: t})
 		})
 
 	case 8: // BS ^H Backspace
-		t.WithLock(func() {
+		t.withLock(func() {
 			t.screen().moveCursor(-1, 0, false, false)
 		})
 
 	case 9: // HT ^I Horizontal TAB
-		t.WithLock(func() {
+		t.withLock(func() {
 			cursorPos := t.screen().CursorPos()
 			cursorPos.X = ((cursorPos.X >> 3) + 1) << 3
 			t.screen().setCursorPos(cursorPos.X, cursorPos.Y)
 		})
 
 	case 10: // LF ^J Linefeed (newline)
-		t.WithLock(func() {
+		t.withLock(func() {
 			cursorPos := t.screen().CursorPos()
 			t.screen().setCursorPos(0, cursorPos.Y)
 			t.screen().moveCursor(0, 1, true, true)
@@ -157,18 +157,18 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 		debugPrintln(debugTodo, "TODO: vtab")
 
 	case 12: // FF ^L Formfeed (also: New page NP)
-		t.WithLock(func() {
+		t.withLock(func() {
 			t.screen().moveCursor(0, 1, false, true)
 		})
 
 	case 13: // CR ^M Carriage Return
-		t.WithLock(func() {
+		t.withLock(func() {
 			t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
 		})
 
 	case 27: // ESC ^[ Escape Character
 
-		t.WithLock(func() {
+		t.withLock(func() {
 			if *debugCmd || *debugTodo {
 				var cmdBytes bytes.Buffer
 				cmdReader := &captureReader{r: gr, buf: &cmdBytes}
@@ -186,7 +186,7 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 		})
 
 	case 127: // DEL  Delete Character (treat as backspace)
-		t.WithLock(func() {
+		t.withLock(func() {
 			t.screen().moveCursor(-1, 0, false, false)
 		})
 	default:
@@ -1168,7 +1168,7 @@ func (t *terminal) handleOSC52(payload []byte) {
 		return
 	}
 	if sink, ok := t.frontend.(ClipboardSink); ok {
-		sink.Clipboard(sel, raw)
+		sink.Clipboard(LockedView{t: t}, sel, raw)
 	}
 }
 

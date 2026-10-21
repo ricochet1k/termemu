@@ -510,10 +510,10 @@ func TestScrollback_CSI3J(t *testing.T) {
 	}
 
 	var before []string
-	t1.WithLock(func() {
-		_, h := t1.Size()
+	t1.View(func(v LockedView) {
+		_, h := v.Size()
 		for y := 0; y < h; y++ {
-			before = append(before, t1.Line(y))
+			before = append(before, v.Line(y))
 		}
 	})
 
@@ -529,10 +529,10 @@ func TestScrollback_CSI3J(t *testing.T) {
 		t.Errorf("CSI 3 J broke monotonicity: next=%d, want %d", next, nextBefore)
 	}
 
-	t1.WithLock(func() {
-		_, h := t1.Size()
+	t1.View(func(v LockedView) {
+		_, h := v.Size()
 		for y := 0; y < h; y++ {
-			if got := t1.Line(y); got != before[y] {
+			if got := v.Line(y); got != before[y] {
 				t.Errorf("CSI 3 J touched screen line %d: got %q, want %q", y, got, before[y])
 			}
 		}
@@ -542,10 +542,10 @@ func TestScrollback_CSI3J(t *testing.T) {
 	if err := t1.testFeedTerminalInputFromBackend([]byte("\x1b[2J"), TextReadModeRune); err != nil {
 		t.Fatalf("feed CSI 2 J: %v", err)
 	}
-	t1.WithLock(func() {
-		_, h := t1.Size()
+	t1.View(func(v LockedView) {
+		_, h := v.Size()
 		for y := 0; y < h; y++ {
-			if got := strings.TrimSpace(t1.Line(y)); got != "" {
+			if got := strings.TrimSpace(v.Line(y)); got != "" {
 				t.Errorf("CSI 2 J left content on line %d: %q", y, got)
 			}
 		}

@@ -14,34 +14,47 @@ import (
 type Terminal interface {
 	SetFrontend(f Frontend)
 
-	Lock()
-	Unlock()
-	WithLock(func())
+	// View runs fn with a read-only view of terminal state while holding
+	// the terminal lock. Use it for atomic multi-reads. The view is only
+	// valid for the duration of fn; do not retain it. Do not call the
+	// locking read methods (Size, Line, Scrollback, ...) from fn.
+	View(func(LockedView))
 
 	Write(b []byte) (int, error)
 	SendKey(KeyEvent) (int, error)
 	SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int) error
-	Size() (int, int)
 	Resize(int, int) error
 
-	// Line returns the plain text content of line y.
-	// The caller must hold the terminal lock (see Lock/WithLock).
+	// Size returns the terminal width and height. It takes the terminal
+	// lock itself, so it is safe from any goroutine but must not be called
+	// from inside View or a Frontend callback (use the view there).
+	Size() (int, int)
+	// CursorPos returns the cursor position. It locks internally; use the
+	// view from callbacks.
+	CursorPos() Pos
+	// Line returns the plain text content of line y. It locks internally;
+	// use the view from callbacks.
 	Line(int) string
-	// ANSILine returns the ANSI-escaped content of line y.
-	// The caller must hold the terminal lock (see Lock/WithLock).
+	// ANSILine returns the ANSI-escaped content of line y. It locks
+	// internally; use the view from callbacks.
 	ANSILine(y int) string
-	// StyledLine returns the styled content of a line region.
-	// The caller must hold the terminal lock (see Lock/WithLock).
+	// StyledLine returns the styled content of a line region. It locks
+	// internally; use the view from callbacks.
 	StyledLine(x, w, y int) Line
 	// StyledLines returns the styled content of multiple lines in a region.
-	// The caller must hold the terminal lock (see Lock/WithLock).
+	// It locks internally; use the view from callbacks.
 	StyledLines(r Region) []Line
 
-	// Scrollback returns the terminal's scrollback buffer for reading.
-	// Unlike the line accessors above, Scrollback methods take the
-	// terminal lock themselves, so they must not be called from inside a
-	// Frontend callback (the lock is already held there; calling in would
-	// deadlock).
+	// GetViewFlag, GetViewInt and GetViewString return terminal view
+	// settings. They lock internally; use the view from callbacks.
+	GetViewFlag(ViewFlag) bool
+	GetViewInt(ViewInt) int
+	GetViewString(ViewString) string
+
+	// Scrollback returns the terminal's scrollback buffer for ordinary
+	// code. Its methods take the terminal lock themselves, so they must
+	// not be called from inside View or a Frontend callback. Use
+	// LockedView.Scrollback there instead.
 	Scrollback() *Scrollback
 
 	// Close shuts down the terminal: it closes the backend (if it
@@ -54,6 +67,95 @@ type Terminal interface {
 	// otherwise the error that stopped the loop. It is only meaningful
 	// after Done is closed.
 	Err() error
+}
+
+// LockedView is a read-only handle to terminal state. It is valid only for
+// the duration of the call that received it (a Frontend callback or
+// Terminal.View); do not retain it. Its methods do not lock.
+type LockedView struct {
+	t *terminal
+}
+
+// Size returns the terminal width and height.
+func (v LockedView) Size() (w, h int) {
+	if v.t == nil {
+		return 0, 0
+	}
+	size := v.t.screen().Size()
+	return size.X, size.Y
+}
+
+// CursorPos returns the cursor position.
+func (v LockedView) CursorPos() Pos {
+	if v.t == nil {
+		return Pos{}
+	}
+	return v.t.screen().CursorPos()
+}
+
+// Line returns the plain text content of line y.
+func (v LockedView) Line(y int) string {
+	if v.t == nil || y < 0 {
+		return ""
+	}
+	size := v.t.screen().Size()
+	if y >= size.Y {
+		return ""
+	}
+	return v.t.screen().StyledLine(0, size.X, y).PlainTextString()
+}
+
+// ANSILine returns the ANSI-escaped content of line y.
+func (v LockedView) ANSILine(y int) string {
+	if v.t == nil || y < 0 || y >= v.t.screen().Size().Y {
+		return ""
+	}
+	return v.t.screen().renderLineANSI(y)
+}
+
+// StyledLine returns the styled content of a line region.
+func (v LockedView) StyledLine(x, w, y int) Line {
+	if v.t == nil {
+		return Line{}
+	}
+	return v.t.screen().StyledLine(x, w, y)
+}
+
+// StyledLines returns the styled content of multiple lines in a region.
+func (v LockedView) StyledLines(r Region) []Line {
+	if v.t == nil {
+		return nil
+	}
+	return v.t.screen().StyledLines(r)
+}
+
+// GetViewFlag returns the value of a boolean terminal flag.
+func (v LockedView) GetViewFlag(f ViewFlag) bool {
+	if v.t == nil {
+		return false
+	}
+	return v.t.viewFlags[f]
+}
+
+// GetViewInt returns the value of an integer terminal setting.
+func (v LockedView) GetViewInt(i ViewInt) int {
+	if v.t == nil {
+		return 0
+	}
+	return v.t.viewInts[i]
+}
+
+// GetViewString returns the value of a string terminal setting.
+func (v LockedView) GetViewString(s ViewString) string {
+	if v.t == nil {
+		return ""
+	}
+	return v.t.viewStrings[s]
+}
+
+// Scrollback returns a no-lock scrollback reader for use inside callbacks.
+func (v LockedView) Scrollback() LockedScrollback {
+	return LockedScrollback{t: v.t}
 }
 
 type terminal struct {
@@ -141,15 +243,21 @@ func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 	t.mainScreen.setScrollCapture(t.scrollCapture)
 	t.altScreen.setScrollCapture(t.scrollCapture)
 
+	// Give screens a view so their frontend callbacks can read terminal
+	// state without taking the lock again.
+	view := LockedView{t: t}
+	t.mainScreen.setView(view)
+	t.altScreen.setView(view)
+
 	return t
 }
 
 func (t *terminal) SetFrontend(f Frontend) {
-	t.WithLock(func() {
-		t.frontend = f
-		t.mainScreen.SetFrontend(f)
-		t.altScreen.SetFrontend(f)
-	})
+	t.Lock()
+	defer t.Unlock()
+	t.frontend = f
+	t.mainScreen.SetFrontend(f)
+	t.altScreen.SetFrontend(f)
 }
 
 // func NewNoPTY(f Frontend) Terminal {
@@ -201,21 +309,36 @@ func (t *terminal) Write(b []byte) (int, error) {
 	return total, nil
 }
 
-// Size returns the terminal width and height.
-// The caller must ensure the terminal is locked before calling this method.
+// View runs fn with a read-only view of terminal state while holding the
+// terminal lock.
+func (t *terminal) View(fn func(LockedView)) {
+	t.Lock()
+	defer t.Unlock()
+	fn(LockedView{t: t})
+}
+
+// Size returns the terminal width and height. It locks internally.
 func (t *terminal) Size() (w, h int) {
-	size := t.screen().Size()
-	return size.X, size.Y
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.Size()
+}
+
+// CursorPos returns the cursor position. It locks internally.
+func (t *terminal) CursorPos() Pos {
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.CursorPos()
 }
 
 func (t *terminal) Resize(w, h int) error {
-	t.WithLock(func() {
-		t.mainScreen.setSize(w, h)
-		t.altScreen.setSize(w, h)
-		// setSize preserves content and emits nothing, so tell frontends
-		// to repaint the full screen at the new dimensions.
-		t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: w, Y2: h}, CRResize)
-	})
+	t.Lock()
+	t.mainScreen.setSize(w, h)
+	t.altScreen.setSize(w, h)
+	// setSize preserves content and emits nothing, so tell frontends
+	// to repaint the full screen at the new dimensions.
+	t.frontend.RegionChanged(LockedView{t: t}, Region{X: 0, Y: 0, X2: w, Y2: h}, CRResize)
+	t.Unlock()
 
 	t.Lock()
 	backend := t.backend
@@ -301,35 +424,33 @@ func (t *terminal) Err() error {
 	return t.readLoopErr
 }
 
-// Line returns the plain text content of line y.
-// The caller must lock the terminal before calling this method.
+// Line returns the plain text content of line y. It locks internally.
 func (t *terminal) Line(y int) string {
-	size := t.screen().Size()
-	if y >= size.Y {
-		return ""
-	}
-	return t.screen().StyledLine(0, size.X, y).PlainTextString()
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.Line(y)
 }
 
-// ANSILine returns the ANSI-escaped content of line y.
-// The caller must lock the terminal before calling this method.
+// ANSILine returns the ANSI-escaped content of line y. It locks internally.
 func (t *terminal) ANSILine(y int) string {
-	if y >= t.screen().Size().Y {
-		return ""
-	}
-	return t.screen().renderLineANSI(y)
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.ANSILine(y)
 }
 
-// StyledLine returns the styled content of a line region.
-// The caller must lock the terminal before calling this method.
+// StyledLine returns the styled content of a line region. It locks internally.
 func (t *terminal) StyledLine(x, w, y int) Line {
-	return t.screen().StyledLine(x, w, y)
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.StyledLine(x, w, y)
 }
 
-// StyledLines returns the styled content of multiple lines in a region.
-// The caller must lock the terminal before calling this method.
+// StyledLines returns the styled content of multiple lines in a region. It
+// locks internally.
 func (t *terminal) StyledLines(r Region) []Line {
-	return t.screen().StyledLines(r)
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.StyledLines(r)
 }
 
 // PrintTerminal prints the terminal screen contents to stdout for debugging.
@@ -341,15 +462,15 @@ func PrintTerminal(t Terminal) {
 // PrintTerminalTo prints the terminal screen contents to w for debugging.
 // It uses only the public Terminal interface, with proper locking.
 func PrintTerminalTo(w io.Writer, t Terminal) {
-	t.WithLock(func() {
-		ww, h := t.Size()
+	t.View(func(v LockedView) {
+		ww, h := v.Size()
 		fmt.Fprint(w, "+")
 		for i := 0; i < ww; i++ {
 			fmt.Fprint(w, "-")
 		}
 		fmt.Fprintln(w, "+")
 		for i := 0; i < h; i++ {
-			lstr := t.ANSILine(i)
+			lstr := v.ANSILine(i)
 			lstr = strings.ReplaceAll(lstr, "\000", " ")
 			fmt.Fprintf(w, "\033[m|%s\033[m|\n", lstr)
 		}
@@ -446,24 +567,38 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 
 func (t *terminal) setViewFlag(flag ViewFlag, value bool) {
 	t.viewFlags[flag] = value
-	t.frontend.ViewFlagChanged(flag, value)
+	t.frontend.ViewFlagChanged(LockedView{t: t}, flag, value)
 }
+
+// GetViewFlag returns a boolean terminal flag. It locks internally.
 func (t *terminal) GetViewFlag(flag ViewFlag) bool {
-	return t.viewFlags[flag]
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.GetViewFlag(flag)
 }
+
 func (t *terminal) setViewInt(flag ViewInt, value int) {
 	t.viewInts[flag] = value
-	t.frontend.ViewIntChanged(flag, value)
+	t.frontend.ViewIntChanged(LockedView{t: t}, flag, value)
 }
+
+// GetViewInt returns an integer terminal setting. It locks internally.
 func (t *terminal) GetViewInt(flag ViewInt) int {
-	return t.viewInts[flag]
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.GetViewInt(flag)
 }
+
 func (t *terminal) setViewString(flag ViewString, value string) {
 	t.viewStrings[flag] = value
-	t.frontend.ViewStringChanged(flag, value)
+	t.frontend.ViewStringChanged(LockedView{t: t}, flag, value)
 }
+
+// GetViewString returns a string terminal setting. It locks internally.
 func (t *terminal) GetViewString(flag ViewString) string {
-	return t.viewStrings[flag]
+	t.Lock()
+	defer t.Unlock()
+	return LockedView{t: t}.GetViewString(flag)
 }
 
 // Scrollback returns the terminal's scrollback buffer.
@@ -526,8 +661,8 @@ func (t *terminal) screen() screen {
 	return t.mainScreen
 }
 
-// calls f with screen locked
-func (t *terminal) WithLock(f func()) {
+// withLock calls f with the terminal locked. Internal use only.
+func (t *terminal) withLock(f func()) {
 	t.Lock()
 	defer t.Unlock()
 	f()
@@ -541,7 +676,7 @@ func (t *terminal) setAltScreen(wantAlt bool) {
 	}
 	t.onAltScreen = wantAlt
 	size := t.screen().Size()
-	t.frontend.RegionChanged(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRScreenSwitch)
+	t.frontend.RegionChanged(LockedView{t: t}, Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRScreenSwitch)
 }
 
 // enterAltScreen switches to the alternate screen. When clear is true the

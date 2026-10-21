@@ -189,7 +189,7 @@ type clipboardRecorder struct {
 	calls int
 }
 
-func (c *clipboardRecorder) Clipboard(sel string, data []byte) {
+func (c *clipboardRecorder) Clipboard(v LockedView, sel string, data []byte) {
 	c.sel = sel
 	c.data = append([]byte(nil), data...)
 	c.calls++

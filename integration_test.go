@@ -15,10 +15,7 @@ func waitForLine(t *testing.T, term Terminal, y int, want string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		var line string
-		term.WithLock(func() {
-			line = term.Line(y)
-		})
+		line := term.Line(y)
 		if strings.Contains(line, want) {
 			return
 		}

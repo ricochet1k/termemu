@@ -42,9 +42,7 @@ func TestDataRace_Frontend(t *testing.T) {
 
 	go func() {
 		for i := 0; i < 1000; i++ {
-			term.WithLock(func() {
-				term.Line(0)
-			})
+			_ = term.Line(0)
 		}
 		done <- true
 	}()
@@ -71,9 +69,7 @@ func TestDataRace_Write(t *testing.T) {
 
 	go func() {
 		for i := 0; i < 1000; i++ {
-			term.WithLock(func() {
-				term.Line(0)
-			})
+			_ = term.Line(0)
 		}
 		done <- true
 	}()
@@ -100,9 +96,7 @@ func TestDataRace_Resize(t *testing.T) {
 
 	go func() {
 		for i := 0; i < 1000; i++ {
-			term.WithLock(func() {
-				term.Line(0)
-			})
+			_ = term.Line(0)
 		}
 		done <- true
 	}()

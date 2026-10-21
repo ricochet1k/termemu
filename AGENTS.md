@@ -91,12 +91,17 @@ Keep changes minimal and consistent with existing code.
 
 ### Concurrency and locking
 - Terminal state uses a mutex; lock/unlock around shared state access.
-- Use `WithLock` helpers where available instead of manual lock plumbing.
+- Plain terminal read methods (`Size`, `CursorPos`, `Line`, `ANSILine`,
+  `StyledLine`, `StyledLines`, `GetViewFlag/Int/String`) lock themselves and
+  are safe from any goroutine.
+- Use `Terminal.View(func(LockedView) { ... })` for atomic multi-reads. The
+  view is valid only inside the call; do not retain it.
 - Avoid launching goroutines that outlive their owners unless required.
 
 #### Data race prevention (critical!)
 The terminal has a background read loop goroutine (`ptyReadLoop`) that continuously writes to screen state.
-Calling read methods from test/main goroutines without locks causes data races.
+Tests and applications may read state concurrently because the plain read
+methods take the lock themselves.
 
 **Why `ptyReadOne` can't hold the lock for its entire duration:**
 The function does blocking I/O reads (`ReadPrintableBytes`, `ReadByte`, `handleCommand`).
@@ -104,34 +109,39 @@ Holding the lock during blocking reads would deadlock if anyone tries to access 
 Instead, it acquires the lock around each state mutation, then releases before the next read.
 
 **Frontend callback contract:**
-All `Frontend` interface methods are called with the terminal lock already held.
-Frontend implementations can safely call terminal read methods (`Line`, `ANSILine`, etc.)
-without acquiring locks. See godoc on `Frontend` interface in `frontend.go`.
+All `Frontend` interface methods are called with the terminal lock already held
+and receive a `LockedView` as their first argument. Read terminal state through
+that view (`Size`, `Line`, `Scrollback`, ...); its methods do not lock. See
+godoc on `Frontend` interface in `frontend.go`.
+Never call the locking read methods (plain `Size`/`Line`/... or the
+`Terminal.Scrollback` reader) from a callback or `View`; that would deadlock.
 
-**Methods requiring the lock** (check docstrings for "caller must lock"):
-- `Size()`, `ANSILine()`, `Line()`, `StyledLine()`, `StyledLines()`
-- `Scrollback()` methods (`Range`, `Row`, `LogicalLine`, `MovePos`, `Len`,
-  `Clear`) take the lock themselves instead. They are safe from any goroutine
-  except a `Frontend` callback (where the lock is already held — calling in
-  would deadlock, so buffer rows from `ScrollLines` instead).
+**Reading scrollback:**
+- Ordinary code uses `term.Scrollback()`; its methods (`Range`, `Row`,
+  `LogicalLine`, `MovePos`, `Len`, `Clear`) take the lock themselves.
+- Callbacks use `v.Scrollback()`, which returns the no-lock
+  `LockedScrollback` counterpart (`Range`, `Row`, `LogicalLine`, `MovePos`,
+  `Len`). Use it only for the duration of the callback.
 
-The `PrintTerminal(t Terminal)` debug helper takes the lock itself.
+The `PrintTerminal(t Terminal)` debug helper uses `View` itself.
 
-**How to fix in tests:**
+**How to read in tests:**
 ```go
-// WRONG - races with ptyReadLoop:
+// Plain single reads lock internally:
 line := term.Line(0)
 
-// CORRECT - use WithLock:
+// Atomic multi-read: use View.
 var line string
-term.WithLock(func() {
-    line = term.Line(0)
+var w, h int
+term.View(func(v LockedView) {
+    line = v.Line(0)
+    w, h = v.Size()
 })
 ```
 
 **When adding new terminal read methods:**
-1. Either document that caller must hold lock, OR
-2. Create a `*Safe()` variant that acquires the lock internally
+1. Add a matching `LockedView` method that does not lock, and
+2. Make the plain `Terminal` method lock and delegate to the view.
 
 Run `go test -race ./...` to detect races before merging.
 
@@ -168,7 +178,7 @@ Run `go test -race ./...` to detect races before merging.
   optimizes memory and allocations for large screens
 - Wide characters (CJK, emoji) need special handling (splitSpan)
 - Text merging (combining characters) requires careful cursor position handling
-- Frontend callbacks happen with lock held, keep them fast
+- Frontend callbacks happen with lock held and get a `LockedView`; keep them fast
 - PTY operations are platform-specific (uses creack/pty); cross-compile to
   Windows after backend changes because `syscall.SysProcAttr` fields differ
 - When optimizing, focus on hot paths: writeString, replaceRange, eraseRegion, scroll
@@ -205,7 +215,7 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Owns main and alternate screens
 - Runs `ptyReadLoop()` goroutine to read from backend
 - Manages view flags/ints/strings (cursor visibility, mouse mode, window title, etc.)
-- Provides locking (`Lock()`, `Unlock()`, `WithLock()`) for thread-safe access
+- Provides self-locking read methods plus `View(func(LockedView))` for atomic reads
 - Handles keyboard input via `SendKey()`
 - Lifecycle: `Close()` closes the backend so the read loop exits (idempotent,
   never blocks); `Done()` closes on loop exit; `Err()` reports the loop error
@@ -283,14 +293,15 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   keeping `ScrollID`s monotonic (`Range` then reports `base == next ==
   nextScrollID`). `CSI 3 J` clears scrollback only, leaving the visible
   screen and cursor untouched. `CSI 0J/1J/2J` behavior is unchanged.
-- Scrollback methods lock internally, so never call them from a `Frontend`
-  callback (lock already held there — deadlock).
+- `Scrollback` methods lock internally, so never call them from a `Frontend`
+  callback (lock already held there — deadlock). Use `v.Scrollback()`, the
+  `LockedScrollback` variant, inside callbacks instead.
 - `Row.PlainTextString()` is the convenience accessor (thin wrapper over
   `Line.PlainTextString`), keep it in `scrollback.go`, not in a test file.
 - Scrollback `Row`/`LogicalLine` copies preserve `Span.Link` (checked by
   `TestOSC8_LinkPreservedInScrollback`).
-- Reading requires the terminal lock, so all `Scrollback` methods take it
-  themselves.
+- Reading requires the terminal lock, so all `*Scrollback` methods take it
+  themselves; `LockedScrollback` methods assume it is already held.
 
 ### Dual Screen Model
 

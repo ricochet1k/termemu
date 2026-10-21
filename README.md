@@ -87,16 +87,16 @@ import (
 
 type loggingFrontend struct{}
 
-func (loggingFrontend) Bell() {}
-func (loggingFrontend) RegionChanged(r termemu.Region, _ termemu.ChangeReason) {
+func (loggingFrontend) Bell(v termemu.LockedView) {}
+func (loggingFrontend) RegionChanged(v termemu.LockedView, r termemu.Region, _ termemu.ChangeReason) {
 	fmt.Printf("region changed: (%d,%d)-(%d,%d)\n", r.X, r.Y, r.X2, r.Y2)
 }
-func (loggingFrontend) ScrollLines(y int) {}
-func (loggingFrontend) CursorMoved(x, y int) {}
-func (loggingFrontend) StyleChanged(s termemu.Style) {}
-func (loggingFrontend) ViewFlagChanged(v termemu.ViewFlag, v2 bool) {}
-func (loggingFrontend) ViewIntChanged(v termemu.ViewInt, v2 int) {}
-func (loggingFrontend) ViewStringChanged(v termemu.ViewString, v2 string) {}
+func (loggingFrontend) ScrollLines(v termemu.LockedView, y int) {}
+func (loggingFrontend) CursorMoved(v termemu.LockedView, x, y int) {}
+func (loggingFrontend) StyleChanged(v termemu.LockedView, s termemu.Style) {}
+func (loggingFrontend) ViewFlagChanged(v termemu.LockedView, flag termemu.ViewFlag, value bool) {}
+func (loggingFrontend) ViewIntChanged(v termemu.LockedView, flag termemu.ViewInt, value int) {}
+func (loggingFrontend) ViewStringChanged(v termemu.LockedView, flag termemu.ViewString, value string) {}
 
 func main() {
 	backend := &termemu.PTYBackend{}
@@ -237,8 +237,10 @@ Only scrolls starting at the top of the screen enter scrollback;
 scrolling inside a mid-screen scroll region (CSI r margins) never does.
 Returned rows own copies of their spans, so mutating them is safe.
 ScrollIDs are monotonic across `Clear` (no ID is ever reused). Do not call
-scrollback methods from inside a `Frontend` callback (deadlock: callbacks
-already hold the terminal lock).
+`Terminal.Scrollback` methods from inside a `Frontend` callback (deadlock:
+callbacks already hold the terminal lock). Inside a callback use
+`v.Scrollback()`, which returns the no-lock `LockedScrollback`
+(`Range`, `Row`, `LogicalLine`, `MovePos`, `Len`).
 
 ## Lifecycle
 
@@ -272,9 +274,21 @@ backend := &termemu.PTYBackend{AutoEnv: []string{}} // inject nothing
 Injected entries replace same-key values already present in `cmd.Env`;
 other environment variables are left alone.
 
-Locking: `Size`, `Line`, `ANSILine`, `StyledLine`, and `StyledLines` require
-the caller to hold the terminal lock (`WithLock`); `Scrollback` methods take
-it themselves and therefore must not be called from `Frontend` callbacks.
+Locking: plain read methods (`Size`, `CursorPos`, `Line`, `ANSILine`,
+`StyledLine`, `StyledLines`, `GetViewFlag/Int/String`) take the terminal lock
+themselves, so they are safe from any goroutine. For atomic multi-reads use
+`term.View(func(v termemu.LockedView) { ... })`. Every `Frontend` callback
+also receives a `LockedView` as its first argument; read state through it
+(including `v.Scrollback()`) instead of the locking methods, which would
+deadlock from a callback.
+
+```go
+term.View(func(v termemu.LockedView) {
+    w, h := v.Size()
+    line := v.Line(0)
+    _, _ = w, h, line
+})
+```
 
 ### Modern terminal features
 
@@ -286,11 +300,12 @@ it themselves and therefore must not be called from `Frontend` callbacks.
   (preserved through wrapping, scrollback, and line slicing; blank/erased
   spans never carry a link). The TTY frontend does not re-emit OSC 8.
 - **Clipboard:** if the frontend implements
-  `ClipboardSink` (`Clipboard(selection string, data []byte)`), OSC 52
+  `ClipboardSink` (`Clipboard(v LockedView, selection string, data []byte)`), OSC 52
   payloads are base64-decoded and forwarded with the requested selection.
   Queries (`data == "?"`) are never answered or forwarded, and malformed
-  base64 is ignored. Called with the terminal lock held: do not call back
-  into the terminal from `Clipboard`.
+  base64 is ignored. Called with the terminal lock held and a `LockedView`:
+  read through the view, do not call locking terminal methods from
+  `Clipboard`.
 - **Working directory:** `OSC 7` (and legacy `OSC 6`) set
   `VSCurrentDirectory`. `OSC 7` no longer sets `VSCurrentFile`; no OSC
   sequence sets it.

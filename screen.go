@@ -16,6 +16,7 @@ type screen interface {
 	TopMargin() int
 	BottomMargin() int
 	SetFrontend(f Frontend)
+	setView(v LockedView)
 
 	Line(y int) string
 	StyledLine(x, w, y int) Line
@@ -54,6 +55,7 @@ type spanScreen struct {
 	lines    []spanLine
 	wrapped  []bool // wrapped[y] is true when line y is a continuation of the previous line due to auto-wrap
 	frontend Frontend
+	view     LockedView
 
 	style Style
 
@@ -132,6 +134,10 @@ func (s *spanScreen) BottomMargin() int {
 
 func (s *spanScreen) SetFrontend(f Frontend) {
 	s.frontend = f
+}
+
+func (s *spanScreen) setView(v LockedView) {
+	s.view = v
 }
 
 func (s *spanScreen) Line(y int) string {
@@ -266,7 +272,7 @@ func (s *spanScreen) renderLineANSI(y int) string {
 
 func (s *spanScreen) setStyle(style Style) {
 	s.style = style
-	s.frontend.StyleChanged(style)
+	s.frontend.StyleChanged(s.view, style)
 }
 
 func (s *spanScreen) setSize(w, h int) {
@@ -393,7 +399,7 @@ func (s *spanScreen) rawWriteSpan(x int, y int, sp Span, cr ChangeReason) {
 		panic(fmt.Sprintf("rawWriteSpan out of range: %v  %v,%v,%v %v\n", s.size, x, y, x+sp.Width, sp.Width))
 	}
 	replaceRange(&s.lines[y], x, sp.Width, sp, s.textMode)
-	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + sp.Width}, cr)
+	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: x + sp.Width}, cr)
 }
 
 func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) {
@@ -412,7 +418,7 @@ func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReas
 	}
 
 	replaceRange(&s.lines[y], x, width, sp, s.textMode)
-	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: x + width}, cr)
+	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: x + width}, cr)
 }
 
 func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
@@ -440,7 +446,7 @@ func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 		line.width = s.size.X
 	}
 
-	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
+	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
 }
 
 func (s *spanScreen) setCursorPos(x, y int) {
@@ -450,7 +456,7 @@ func (s *spanScreen) setCursorPos(x, y int) {
 	if s.cursorPos.Y < len(s.wrapped) {
 		s.wrapped[s.cursorPos.Y] = false
 	}
-	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
+	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
 }
 
 func (s *spanScreen) setScrollMarginTopBottom(top, bottom int) {
@@ -480,9 +486,9 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 				s.wrapped[y] = false
 			}
 		}
-		s.frontend.RegionChanged(Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
+		s.frontend.RegionChanged(s.view, Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 		debugPrintln(debugScroll, "scroll changed region:", Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
-		s.frontend.RegionChanged(Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X}, CRScroll)
+		s.frontend.RegionChanged(s.view, Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X}, CRScroll)
 	} else {
 		// dy < 0: content shifts up, lines at the top scroll off.
 		// Only capture when the scroll region starts at the top of the
@@ -516,8 +522,8 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 				s.wrapped[y] = false
 			}
 		}
-		s.frontend.RegionChanged(Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X}, CRScroll)
-		s.frontend.RegionChanged(Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
+		s.frontend.RegionChanged(s.view, Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X}, CRScroll)
+		s.frontend.RegionChanged(s.view, Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 	}
 }
 
@@ -560,7 +566,7 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 	if s.cursorPos.Y >= s.size.Y {
 		panic(fmt.Sprintf("moveCursor outside, %v %v  %v, %v, %v, %v", s.cursorPos, s.size, dx, dy, wrap, scroll))
 	}
-	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
+	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
 }
 
 // decaln implements DECALN (ESC # 8): fill the whole screen with 'E' using
@@ -581,7 +587,7 @@ func (s *spanScreen) saveCursorPos() {
 
 func (s *spanScreen) restoreCursorPos() {
 	s.cursorPos = s.savedCursorPos
-	s.frontend.CursorMoved(s.cursorPos.X, s.cursorPos.Y)
+	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
 }
 
 func (s *spanScreen) setScrollCapture(cb func(lines []spanLine, wrapped []bool)) {
@@ -1087,7 +1093,7 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 	sp.Text += text
 	// Width doesn't change for merge
 
-	s.frontend.RegionChanged(Region{Y: y, Y2: y + 1, X: cell, X2: cell + 1}, CRText)
+	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: cell, X2: cell + 1}, CRText)
 }
 
 func max(a, b int) int {

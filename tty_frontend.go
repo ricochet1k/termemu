@@ -72,8 +72,8 @@ func (t *TTYFrontend) Attach(r Region) {
 		return
 	}
 
-	term.WithLock(func() {
-		renderSnapshotRegion(snap, term, r)
+	term.View(func(v LockedView) {
+		renderSnapshotRegion(snap, v, r)
 	})
 }
 
@@ -116,9 +116,9 @@ func (t *TTYFrontend) SetFocus(focused bool) {
 	}
 }
 
-func (t *TTYFrontend) Bell() {}
+func (t *TTYFrontend) Bell(v LockedView) {}
 
-func (t *TTYFrontend) RegionChanged(r Region, _ ChangeReason) {
+func (t *TTYFrontend) RegionChanged(view LockedView, r Region, _ ChangeReason) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.attached || t.term == nil || t.out == nil {
@@ -128,19 +128,19 @@ func (t *TTYFrontend) RegionChanged(r Region, _ ChangeReason) {
 	r = r.Intersect(t.region)
 
 	// RegionChanged is invoked while the terminal is already locked.
-	t.renderRegionLocked(r)
+	t.renderRegionLocked(view, r)
 }
 
-func (t *TTYFrontend) ScrollLines(y int) {}
-func (t *TTYFrontend) CursorMoved(x, y int) {
+func (t *TTYFrontend) ScrollLines(v LockedView, y int) {}
+func (t *TTYFrontend) CursorMoved(v LockedView, x, y int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.cursor = Pos{X: x, Y: y}
 	t.renderCursorLocked()
 }
-func (t *TTYFrontend) StyleChanged(s Style) {}
-func (t *TTYFrontend) ViewFlagChanged(v ViewFlag, value bool) {
-	if v != VFShowCursor {
+func (t *TTYFrontend) StyleChanged(v LockedView, s Style) {}
+func (t *TTYFrontend) ViewFlagChanged(v LockedView, flag ViewFlag, value bool) {
+	if flag != VFShowCursor {
 		return
 	}
 	t.mu.Lock()
@@ -148,10 +148,10 @@ func (t *TTYFrontend) ViewFlagChanged(v ViewFlag, value bool) {
 	t.showCur = value
 	t.renderCursorLocked()
 }
-func (t *TTYFrontend) ViewIntChanged(v ViewInt, value int)          {}
-func (t *TTYFrontend) ViewStringChanged(v ViewString, value string) {}
+func (t *TTYFrontend) ViewIntChanged(v LockedView, flag ViewInt, value int)          {}
+func (t *TTYFrontend) ViewStringChanged(v LockedView, flag ViewString, value string) {}
 
-func (t *TTYFrontend) renderRegionLocked(r Region) {
+func (t *TTYFrontend) renderRegionLocked(view LockedView, r Region) {
 	if t.out == nil || !t.attached {
 		return
 	}
@@ -164,7 +164,7 @@ func (t *TTYFrontend) renderRegionLocked(r Region) {
 		showCur:  t.showCur,
 		focused:  t.focused,
 	}
-	renderSnapshotRegion(snap, t.term, r)
+	renderSnapshotRegion(snap, view, r)
 	t.renderCursorLocked()
 }
 
@@ -191,15 +191,15 @@ func (t *TTYFrontend) snapshotLocked() ttySnapshot {
 	}
 }
 
-// renderSnapshotRegion renders region r of term to snap.out using the
-// snapshotted frontend state. The caller must hold the terminal lock and
-// must not hold the TTYFrontend mutex (use a snapshot instead).
-func renderSnapshotRegion(snap ttySnapshot, term Terminal, r Region) {
-	if snap.out == nil || !snap.attached || term == nil {
+// renderSnapshotRegion renders region r to snap.out using the snapshotted
+// frontend state and the callback's view. The caller must hold the terminal
+// lock and must not hold the TTYFrontend mutex (use a snapshot instead).
+func renderSnapshotRegion(snap ttySnapshot, view LockedView, r Region) {
+	if snap.out == nil || !snap.attached {
 		return
 	}
 
-	w, h := term.Size()
+	w, h := view.Size()
 	r = clampRegion(r, w, h)
 	if r.Empty() {
 		return
@@ -210,7 +210,7 @@ func renderSnapshotRegion(snap ttySnapshot, term Terminal, r Region) {
 	buf.WriteString(ansiWrapDisable)
 	for y := r.Y; y < r.Y2; y++ {
 		buf.WriteString(ansiMoveCursor(r.X, y))
-		line := term.StyledLine(r.X, r.X2-r.X, y)
+		line := view.StyledLine(r.X, r.X2-r.X, y)
 		buf.Write(renderStyledLineANSI(line))
 	}
 	buf.WriteString(ansiReset)
@@ -218,12 +218,12 @@ func renderSnapshotRegion(snap ttySnapshot, term Terminal, r Region) {
 	buf.WriteString(ansiRestoreCursor)
 
 	_, _ = snap.out.Write(buf.Bytes())
-	renderSnapshotCursor(snap, term)
+	renderSnapshotCursor(snap)
 }
 
 // renderSnapshotCursor writes the cursor update for snap. It takes no locks.
-func renderSnapshotCursor(snap ttySnapshot, term Terminal) {
-	if term == nil || snap.out == nil {
+func renderSnapshotCursor(snap ttySnapshot) {
+	if snap.out == nil {
 		return
 	}
 	if !snap.attached || !snap.showCur || !snap.focused {
