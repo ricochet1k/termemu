@@ -26,6 +26,19 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
   screen implementation), `scrollback.go` (scrollback ring buffer + reflow),
   `escapes.go` (ANSI parser), `style.go` (colors/modes), `keys.go` (input
   encoding), `tty_frontend.go` (ANSI renderer frontend).
+- `serialize_test.go` covers JSON/gob round-trips for the public value types.
+
+## Serialization
+All public value types (`Style`, `Span`, `Line`, `Region`, `Pos`, `Row`,
+`ScrollbackSnapshot`, `ScreenState`, `Snapshot`) round-trip through
+`encoding/json` and `encoding/gob`. `Style` and `keyboardMode` implement
+custom `MarshalJSON`/`UnmarshalJSON` and `GobEncode`/`GobDecode` over exported
+shadow structs, so `Snapshot.KeyboardMain/KeyboardAlt` serialize even though
+their type is unexported. `Style` encodes its three packed uint32 components
+(`fg`, `bg`, `underlineColor`) losslessly; those numbers are the internal
+representation, not palette indexes. Keep the in-memory layout unchanged when
+touching these types, and extend `serialize_test.go` when adding new public
+value types or fields.
 
 ## Build, lint, and test commands
 Use these exact commands unless the user asks otherwise.

@@ -1,5 +1,11 @@
 package termemu
 
+import (
+	"bytes"
+	"encoding/gob"
+	"encoding/json"
+)
+
 const keyboardStackMax = 32
 
 type keyboardMode struct {
@@ -58,4 +64,52 @@ func (t *terminal) popKeyboardFlags(n int) {
 		km.flags = km.stack[len(km.stack)-1]
 		km.stack = km.stack[:len(km.stack)-1]
 	}
+}
+
+// keyboardModeJSON is the exported shadow type used for JSON and gob encoding
+// of keyboardMode. Flags is the current Kitty keyboard flags value and Stack
+// holds the saved flag values pushed by CSI > u / CSI < u.
+type keyboardModeJSON struct {
+	Flags int   `json:"flags"`
+	Stack []int `json:"stack,omitempty"`
+}
+
+// MarshalJSON encodes the keyboard mode as its flags plus the saved stack.
+func (k keyboardMode) MarshalJSON() ([]byte, error) {
+	return json.Marshal(keyboardModeJSON{Flags: k.flags, Stack: k.stack})
+}
+
+// UnmarshalJSON decodes a keyboard mode previously produced by MarshalJSON.
+// A JSON null leaves the mode unchanged.
+func (k *keyboardMode) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	var sh keyboardModeJSON
+	if err := json.Unmarshal(data, &sh); err != nil {
+		return err
+	}
+	k.flags = sh.Flags
+	k.stack = sh.Stack
+	return nil
+}
+
+// GobEncode encodes the keyboard mode as its flags plus the saved stack.
+func (k keyboardMode) GobEncode() ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(keyboardModeJSON{Flags: k.flags, Stack: k.stack}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// GobDecode decodes a keyboard mode previously produced by GobEncode.
+func (k *keyboardMode) GobDecode(data []byte) error {
+	var sh keyboardModeJSON
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&sh); err != nil {
+		return err
+	}
+	k.flags = sh.Flags
+	k.stack = sh.Stack
+	return nil
 }

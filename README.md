@@ -343,6 +343,15 @@ they preserve row IDs and keep the ring's `Base`/`Next` monotonic.
 
 New screens start with auto-wrap (DECAWM, `CSI ? 7`) enabled, matching xterm.
 
+### Serialization
+
+All public value types (`Style`, `Span`, `Line`, `Region`, `Pos`, `Row`,
+`ScrollbackSnapshot`, `ScreenState`, and `Snapshot`) round-trip through both
+`encoding/json` and `encoding/gob`. `Style` and the keyboard-mode state inside
+`Snapshot` use custom JSON/gob encoders; `Style`'s JSON shape is
+`{"fg":<uint32>,"bg":<uint32>,"underlineColor":<uint32>}`, where the numbers
+are the packed internal representation (not palette indexes), not `{}`.
+
 ### Modern terminal features
 
 - **Synchronized output:** `DECSET/DECRST 2026` sets/clears the

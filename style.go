@@ -1,6 +1,9 @@
 package termemu
 
 import (
+	"bytes"
+	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"strconv"
 )
@@ -382,4 +385,64 @@ func (s Style) ANSIEscapeFrom(prev Style) []byte {
 	}
 
 	return seq
+}
+
+// styleJSON is the exported shadow type used for JSON and gob encoding of
+// Style. Its fields hold Style's packed internal uint32 representation
+// verbatim: bits 0-23 are color data, bits 24-30 are mode bits, and bit 31
+// selects RGB (256-color) versus palette/default colors.
+type styleJSON struct {
+	FG             uint32 `json:"fg"`
+	BG             uint32 `json:"bg"`
+	UnderlineColor uint32 `json:"underlineColor"`
+}
+
+func (s Style) shadow() styleJSON {
+	return styleJSON{FG: s.fg, BG: s.bg, UnderlineColor: s.underlineColor}
+}
+
+func (s *Style) fromShadow(sh styleJSON) {
+	s.fg = sh.FG
+	s.bg = sh.BG
+	s.underlineColor = sh.UnderlineColor
+}
+
+// MarshalJSON encodes the style as its packed internal representation.
+// The numbers are not palette indexes: they are Style's raw uint32 fields
+// (color data in bits 0-23, modes in bits 24-30, RGB flag in bit 31).
+func (s Style) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.shadow())
+}
+
+// UnmarshalJSON decodes a style previously produced by MarshalJSON.
+// A JSON null leaves the style unchanged.
+func (s *Style) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	var sh styleJSON
+	if err := json.Unmarshal(data, &sh); err != nil {
+		return err
+	}
+	s.fromShadow(sh)
+	return nil
+}
+
+// GobEncode encodes the style as its packed internal representation.
+func (s Style) GobEncode() ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(s.shadow()); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// GobDecode decodes a style previously produced by GobEncode.
+func (s *Style) GobDecode(data []byte) error {
+	var sh styleJSON
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&sh); err != nil {
+		return err
+	}
+	s.fromShadow(sh)
+	return nil
 }
