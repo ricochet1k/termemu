@@ -167,21 +167,26 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 		})
 
 	case 27: // ESC ^[ Escape Character
+		// Read the whole command before taking the lock: handleCommand
+		// parses from memory, so a child that stops mid-sequence cannot
+		// block Snapshot/Restore (which need the lock) behind a pending
+		// ReadByte on the backend.
+		cmd, err := readEscapeCommand(gr)
+		if err != nil {
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR readEscapeCommand:", err)
+			}
+			return err
+		}
 
 		t.withLock(func() {
+			success := t.handleCommand(bytes.NewReader(cmd))
 			if *debugCmd || *debugTodo {
-				var cmdBytes bytes.Buffer
-				cmdReader := &captureReader{r: gr, buf: &cmdBytes}
-				success := t.handleCommand(cmdReader)
-				cmd := cmdBytes.Bytes()
-
 				if success {
 					debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
 				} else {
 					debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
 				}
-			} else {
-				_ = t.handleCommand(gr)
 			}
 		})
 
@@ -197,26 +202,75 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 
 type escapeReader interface {
 	ReadByte() (byte, error)
-	// Buffered() int
 }
 
-type captureReader struct {
-	r   escapeReader
-	buf *bytes.Buffer
-}
-
-func (c *captureReader) ReadByte() (byte, error) {
-	b, err := c.r.ReadByte()
-	if err == nil && c.buf != nil {
-		c.buf.WriteByte(b)
+// readEscapeCommand reads one complete ESC-initiated command from r, whose
+// leading ESC has already been consumed. It returns the command bytes (not
+// including the ESC) so the caller can dispatch them under the terminal lock
+// from an in-memory reader instead of blocking on backend I/O while locked.
+//
+// CSI commands end at a final byte in 0x40-0x7E. OSC, DCS, APC, PM and SOS
+// strings end at ST (ESC \\ or 0x9C) or BEL, honoring UTF-8 continuation bytes.
+// Two-byte commands consume their argument, and everything else is a single
+// command byte. The bytes are buffered even when debugging is off; the debug
+// capture uses the returned slice directly.
+func readEscapeCommand(r escapeReader) ([]byte, error) {
+	var buf []byte
+	read := func() (byte, error) {
+		b, err := r.ReadByte()
+		if err == nil {
+			buf = append(buf, b)
+		}
+		return b, err
 	}
-	return b, err
+
+	b, err := read()
+	if err != nil {
+		return nil, err
+	}
+
+	switch b {
+	case '[': // CSI: parameter/intermediate bytes then a final byte
+		for {
+			b, err := read()
+			if err != nil {
+				return buf, err
+			}
+			if b >= 0x40 && b <= 0x7e {
+				return buf, nil
+			}
+			if b < 0x20 || b > 0x3f {
+				// Malformed (not a parameter, intermediate, or final
+				// byte): stop here and let the handler treat it as the
+				// final byte instead of swallowing following text.
+				return buf, nil
+			}
+		}
+
+	case ']', 'P', '_', '^', 'X': // OSC, DCS, APC, PM, SOS
+		var scanner stringTermScanner
+		for {
+			b, err := read()
+			if err != nil {
+				return buf, err
+			}
+			if b == 0x07 { // BEL
+				return buf, nil
+			}
+			if scanner.isST(b) {
+				return buf, nil
+			}
+		}
+
+	case '%', ' ', '-', '.', '/', '(', ')', '*', '+', '#':
+		// Two-byte commands with one argument byte.
+		if _, err := read(); err != nil {
+			return buf, err
+		}
+	}
+
+	return buf, nil
 }
-
-// func (c *captureReader) Buffered() int {
-// 	return c.r.Buffered()
-// }
-
 func (t *terminal) handleCommand(r escapeReader) bool {
 	b, err := r.ReadByte()
 	if err != nil {

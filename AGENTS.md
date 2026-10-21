@@ -206,7 +206,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   next attached command" instead of EOF, which is what makes reuse work.
   `Close()` closes master+slave, wakes blocked `Read`s with
   `io.ErrClosedPipe`, and stops the EIO retry; later `Read`/`Write`/`Attach`
-  fail instead of reopening the pair.
+  fail instead of reopening the pair. Treats both `syscall.EIO` (Linux) and
+  `io.EOF` (Darwin) from the master as "current child exited", waiting for
+  the next `Attach`; `NoPTYBackend` EOF stays terminal. `PID()` and `Wait()`
+  expose the most recently attached command (never also call `cmd.Wait()`).
 - `NoPTYBackend`: Pipes for non-PTY environments (EOF is terminal; still
   ends the read loop cleanly with `Err() == nil`)
 - `TeeBackend`: Wraps a backend to duplicate reads (`Close` forwards)
@@ -253,6 +256,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 
 **Escape Sequence Parsing** (escapes.go):
 - `ptyReadLoop()` reads from backend via `GraphemeReader`
+- `ptyReadOne()` buffers one complete ESC command with `readEscapeCommand`
+  *before* taking the terminal lock, then dispatches `handleCommand` from an
+  in-memory `bytes.Reader`. A child that stops mid-sequence therefore never
+  blocks `Snapshot`/`Restore` (or any other lock user) on backend I/O.
 - Distinguishes printable text runs from control codes
 - Parses CSI sequences (cursor movement, SGR colors, screen manipulation)
 - Parses OSC sequences: 0/2 window title, 6/7 working directory

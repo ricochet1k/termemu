@@ -31,6 +31,9 @@ type PTYBackend struct {
 	slave  *os.File
 	closed bool
 
+	// cmd is the most recently attached command, used by PID and Wait.
+	cmd *exec.Cmd
+
 	// reuse is signaled by Attach to wake Read when it is waiting for the
 	// next command after the previous one exited.
 	reuse chan struct{}
@@ -185,9 +188,43 @@ func (p *PTYBackend) Attach(c *exec.Cmd) error {
 	// (an fd number in the child's table, not the parent's).
 	setControllingTTY(c)
 
+	p.mu.Lock()
+	p.cmd = c
+	p.mu.Unlock()
+
 	// A previous child may have exited, leaving Read waiting for reuse.
 	p.signalReuse()
 	return nil
+}
+
+// PID returns the process ID of the most recently attached command, or 0 if
+// no command has been attached or it has not been started yet. It is safe to
+// call from any goroutine.
+func (p *PTYBackend) PID() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd == nil || p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
+// Wait waits for the most recently attached command to exit and returns the
+// error from (*exec.Cmd).Wait. It errors if no command has been attached.
+//
+// The caller must not also call cmd.Wait() on the attached command: like
+// os/exec, only one Wait may consume the process result. A second call to
+// PTYBackend.Wait returns an "exec: Wait was already called" error. Wait may
+// be called after Close (the child still needs reaping) and after a later
+// Attach, in which case it waits for that newer command.
+func (p *PTYBackend) Wait() error {
+	p.mu.Lock()
+	cmd := p.cmd
+	p.mu.Unlock()
+	if cmd == nil {
+		return errors.New("PTYBackend: no command attached")
+	}
+	return cmd.Wait()
 }
 
 // setEnv sets KEY=VALUE in env, replacing an existing entry with the same
@@ -206,29 +243,43 @@ func setEnv(env []string, kv string) []string {
 	return append(env, kv)
 }
 
-// Read reads from the pty master. When the current child has exited the master
-// returns EIO; because the pty stays valid for the next attached command, Read
-// waits for one instead of surfacing that as EOF. After Close, Read returns
-// io.ErrClosedPipe instead of retrying.
+// Read reads from the pty master. When the current child has exited the
+// master returns syscall.EIO on Linux and io.EOF on some platforms (Darwin);
+// because the pty stays valid for the next attached command, Read waits for
+// one instead of surfacing that as EOF. After Close, Read returns
+// io.ErrClosedPipe instead of retrying. NoPTYBackend keeps EOF terminal.
 func (p *PTYBackend) Read(b []byte) (int, error) {
 	master, err := p.masterFile()
 	if err != nil {
 		return 0, err
 	}
+	return readRetryingReuse(master, b, p.isClosed, p.waitForReuse)
+}
 
+// readRetryingReuse reads from r, treating a child exit (syscall.EIO on Linux,
+// io.EOF on some platforms) as "wait for the next attached command" rather
+// than end of stream. It stops and reports io.ErrClosedPipe once closed reports
+// true, or returns any unrelated read error. Split out from Read so the retry
+// policy (in particular EOF handling) can be unit tested without a real pty.
+func readRetryingReuse(r io.Reader, b []byte, closed func() bool, waitForReuse func(time.Duration)) (int, error) {
 	backoff := time.Millisecond
 	for {
-		n, err := master.Read(b)
+		n, err := r.Read(b)
 		if err == nil {
 			return n, nil
 		}
-		if p.isClosed() {
+		if n > 0 {
+			// Deliver any data that accompanied the error; the next Read
+			// will observe the child exit.
+			return n, nil
+		}
+		if closed() {
 			return 0, io.ErrClosedPipe
 		}
-		if !errors.Is(err, syscall.EIO) {
+		if !errors.Is(err, syscall.EIO) && !errors.Is(err, io.EOF) {
 			return n, err
 		}
-		p.waitForReuse(backoff)
+		waitForReuse(backoff)
 		if backoff < maxReuseBackoff {
 			backoff *= 2
 		}
