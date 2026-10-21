@@ -293,8 +293,8 @@ func TestClearWideOverlaps_EdgeCase_SplitInMiddle(t *testing.T) {
 
 	lineStr = s.Line(0)
 
-	if !strings.HasPrefix(lineStr, "Y") {
-		t.Errorf("Expected line to start with 'Y', got %q", lineStr)
+	if !strings.HasPrefix(lineStr, " Y") {
+		t.Errorf("Expected line to start with ' Y', got %q", lineStr)
 	}
 	if strings.Contains(lineStr, "🎉") {
 		t.Errorf("Expected wide character to be overwritten, got %q", lineStr)

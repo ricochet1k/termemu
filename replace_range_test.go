@@ -62,10 +62,11 @@ func TestReplaceRange_WideCharacterOverwrite(t *testing.T) {
 		name string
 		x    int
 		n    int
+		want string
 	}{
-		{name: "left half", x: 0, n: 1},
-		{name: "right half", x: 1, n: 1},
-		{name: "both cells", x: 0, n: 2},
+		{name: "left half", x: 0, n: 1, want: "x         "},
+		{name: "right half", x: 1, n: 1, want: " x        "},
+		{name: "both cells", x: 0, n: 2, want: "x         "},
 	}
 
 	for _, tt := range tests {
@@ -79,15 +80,15 @@ func TestReplaceRange_WideCharacterOverwrite(t *testing.T) {
 			replaceRange(line, tt.x, tt.n, Span{Style: style, Text: "x", Width: 1}, TextReadModeGrapheme)
 			checkSpanLineInvariant(t, line, "after overwrite")
 
-			if line.width != 9 {
-				t.Fatalf("line.width = %d, want 9 (wide char replaced by one cell)", line.width)
+			if line.width != 10 {
+				t.Fatalf("line.width = %d, want 10 (screen line width unchanged)", line.width)
 			}
 			plain := spanLineText(line)
 			if strings.Contains(plain, "🐹") {
 				t.Fatalf("wide character was not fully replaced: %q", plain)
 			}
-			if plain != "x        " {
-				t.Fatalf("plain text = %q, want %q", plain, "x        ")
+			if plain != tt.want {
+				t.Fatalf("plain text = %q, want %q", plain, tt.want)
 			}
 		})
 	}
@@ -182,5 +183,67 @@ func TestReplaceRange_RandomizedInvariant(t *testing.T) {
 				return
 			}
 		}
+	}
+}
+
+func TestScreenWritesPreserveLineWidth(t *testing.T) {
+	s := newSpanScreen(&EmptyFrontend{})
+	s.setSize(10, 2)
+	s.SetAutoWrap(false)
+
+	style := NewStyle()
+	check := func(step int) {
+		t.Helper()
+		line := &s.lines[0]
+		if line.width != s.size.X {
+			t.Fatalf("step %d: line.width = %d, want screen width %d", step, line.width, s.size.X)
+		}
+		if sum := spanLineWidth(line); sum != line.width {
+			t.Fatalf("step %d: sum(span.Width) = %d, line.width = %d", step, sum, line.width)
+		}
+		if got := uniseg.StringWidth(spanLineText(line)); got != line.width {
+			t.Fatalf("step %d: rendered width = %d, line.width = %d", step, got, line.width)
+		}
+		if got := s.StyledLine(0, s.size.X, 0).Width; got != s.size.X {
+			t.Fatalf("step %d: StyledLine width = %d, want %d", step, got, s.size.X)
+		}
+	}
+
+	// Start with a wide character and explicitly write into both halves.
+	s.rawWriteSpan(0, 0, Span{Style: style, Text: "🐹", Width: 2}, CRText)
+	check(-2)
+	s.setCursorPos(1, 0)
+	s.writeString("x", 1, false, TextReadModeGrapheme)
+	check(-1)
+	s.setCursorPos(0, 0)
+	s.writeString("x", 1, false, TextReadModeGrapheme)
+	check(0)
+
+	contents := []struct {
+		text  string
+		width int
+	}{
+		{"a", 1},
+		{"b", 1},
+		{" ", 1},
+		{"x", 1},
+		{"ab", 2},
+		{"🐹", 2},
+		{"界", 2},
+		{"世", 2},
+	}
+
+	rng := rand.New(rand.NewSource(0x77de))
+	for step := 1; step <= 1000; step++ {
+		content := contents[rng.Intn(len(contents))]
+		x := rng.Intn(s.size.X - content.width + 1)
+		switch rng.Intn(2) {
+		case 0:
+			s.rawWriteSpan(x, 0, Span{Style: style, Text: content.text, Width: content.width}, CRText)
+		case 1:
+			s.setCursorPos(x, 0)
+			s.writeString(content.text, content.width, false, TextReadModeGrapheme)
+		}
+		check(step)
 	}
 }

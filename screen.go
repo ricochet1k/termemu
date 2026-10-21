@@ -820,6 +820,8 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	// grapheme cluster. The old wide character must be consumed exactly once;
 	// leaving half of it behind would corrupt both the span widths and the
 	// rendered line.
+	startPadCells := 0
+	endPadCells := 0
 	if x < totalWidth {
 		idx, off := findSpanAtX(line, x)
 		if idx < len(spans) && off > 0 && off < spans[idx].Width {
@@ -828,6 +830,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 				wideStart := off - left.Width
 				x -= wideStart
 				n += wideStart
+				startPadCells = wideStart
 			}
 		}
 	}
@@ -837,9 +840,38 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 			left, _, wide := splitSpan(spans[idx], off, mode)
 			if wide.Width > 0 {
 				wideEnd := left.Width + wide.Width
-				n += wideEnd - off
+				endPadCells = wideEnd - off
+				n += endPadCells
 			}
 		}
+	}
+
+	// A real write (insert.Width > 0) must keep the line's total width. Pad
+	// the inserted content with blanks on the side(s) where the window was
+	// expanded, plus any cells by which the original window exceeded the
+	// inserted content. Deletions/truncations (insert.Width == 0) keep their
+	// shrink behavior; deleteChars re-pads and truncateLine must shrink.
+	padLeft := 0
+	padRight := 0
+	if insert.Width > 0 && n > insert.Width {
+		need := n - insert.Width
+		padLeft = min(startPadCells, need)
+		need -= padLeft
+		padRight = min(endPadCells, need)
+		need -= padRight
+		padRight += need
+	}
+	insertWidth := insert.Width + padLeft + padRight
+	var paddedInserts [3]Span
+	insertParts := paddedInserts[:0]
+	if padLeft > 0 {
+		insertParts = append(insertParts, Span{Style: insert.Style, Width: padLeft})
+	}
+	if insert.Width > 0 {
+		insertParts = append(insertParts, insert)
+	}
+	if padRight > 0 {
+		insertParts = append(insertParts, Span{Style: insert.Style, Width: padRight})
 	}
 
 	// Locate the spans that intersect the replacement window.
@@ -871,42 +903,44 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	}
 
 	if x == 0 && n >= totalWidth {
-		line.spans = append(line.spans[:0], insert)
-		line.width = insert.Width
+		line.spans = append(line.spans[:0], insertParts...)
+		line.width = insertWidth
 		return
 	}
 
 	// If we never intersected, treat it like an append.
 	if startIdx == len(spans) {
-		if insert.Width > 0 {
-			line.spans = append(line.spans, insert)
-			line.width = totalWidth + insert.Width
+		if insertWidth > 0 {
+			line.spans = append(line.spans, insertParts...)
+			line.width = totalWidth + insertWidth
 		}
 		return
 	}
 
-	// Fast paths for in-place replacements inside a single span.
-	if startIdx == endIdx {
+	// Fast paths for in-place replacements inside a single span. Padding adds
+	// multiple spans, so those cases fall through to the general path.
+	if startIdx == endIdx && len(insertParts) == 1 {
 		sp := spans[startIdx]
+		ins := insertParts[0]
 		if startOffset == 0 && endOffset == sp.Width {
-			spans[startIdx] = insert
-			line.width = totalWidth - n + insert.Width
+			spans[startIdx] = ins
+			line.width = totalWidth - n + insertWidth
 			return
 		}
 		// Compare styles
 		spFG, _ := sp.Style.GetColor(ComponentFG)
-		insertFG, _ := insert.Style.GetColor(ComponentFG)
+		insertFG, _ := ins.Style.GetColor(ComponentFG)
 		spBG, _ := sp.Style.GetColor(ComponentBG)
-		insertBG, _ := insert.Style.GetColor(ComponentBG)
+		insertBG, _ := ins.Style.GetColor(ComponentBG)
 		// Adjacent spans with different links must stay separate so the
 		// hyperlink boundary survives; likewise the in-place text swap
 		// below would otherwise keep the old span's link.
-		if insert.Width == n && spFG == insertFG && spBG == insertBG && sp.Link == insert.Link {
-			if sp.Text == "" && insert.Text == "" {
+		if ins.Width == n && spFG == insertFG && spBG == insertBG && sp.Link == ins.Link {
+			if sp.Text == "" && ins.Text == "" {
 				return
 			}
-			if sp.Text != "" && insert.Text != "" && mode == TextReadModeRune && sp.Width == len(sp.Text) && insert.Width == len(insert.Text) {
-				sp.Text = sp.Text[:startOffset] + insert.Text + sp.Text[startOffset+n:]
+			if sp.Text != "" && ins.Text != "" && mode == TextReadModeRune && sp.Width == len(sp.Text) && ins.Width == len(ins.Text) {
+				sp.Text = sp.Text[:startOffset] + ins.Text + sp.Text[startOffset+n:]
 				spans[startIdx] = sp
 				line.width = totalWidth
 				return
@@ -936,11 +970,8 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	prefixLen := startIdx
 	suffixStart := endIdx + 1
 	newLen := prefixLen
-	insertCount := 0
+	insertCount := len(insertParts)
 	if hasLeft {
-		insertCount++
-	}
-	if insert.Width > 0 {
 		insertCount++
 	}
 	if hasRight {
@@ -950,7 +981,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	if suffixStart < len(spans) {
 		newLen += len(spans) - suffixStart
 	}
-	newWidth := totalWidth - n + insert.Width
+	newWidth := totalWidth - n + insertWidth
 
 	// Ensure capacity then populate the new span layout.
 	if cap(spans) < newLen {
@@ -961,9 +992,8 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 			newSpans[dest] = left
 			dest++
 		}
-		if insert.Width > 0 {
-			newSpans[dest] = insert
-			dest++
+		if len(insertParts) > 0 {
+			dest += copy(newSpans[dest:], insertParts)
 		}
 		if hasRight {
 			newSpans[dest] = right
@@ -989,9 +1019,8 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		line.spans[dest] = left
 		dest++
 	}
-	if insert.Width > 0 {
-		line.spans[dest] = insert
-		dest++
+	if len(insertParts) > 0 {
+		dest += copy(line.spans[dest:], insertParts)
 	}
 	if hasRight {
 		line.spans[dest] = right

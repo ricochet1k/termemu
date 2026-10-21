@@ -26,8 +26,8 @@ func TestEmojiOverwriteSequence(t *testing.T) {
 	expectedLines := []string{
 		"🐹a",
 		"🐹z",
-		"yc",
-		"xc",
+		" yc",
+		"x c",
 	}
 
 	for i, expectedLine := range expectedLines {
@@ -133,7 +133,7 @@ func TestEmojiOverwriteThroughTTY(t *testing.T) {
 	})
 	t.Logf("Outer line 0: %q", line)
 
-	if len(line) < 2 || line[0:2] != "yc" {
-		t.Errorf("Expected 'yc' but got: %q", line[0:min(10, len(line))])
+	if len(line) < 3 || line[0:3] != " yc" {
+		t.Errorf("Expected ' yc' but got: %q", line[0:min(10, len(line))])
 	}
 }
