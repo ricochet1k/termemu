@@ -387,3 +387,10 @@ func (s *Scrollback) findRowLocked(id ScrollID) (scrollRow, int, bool) {
 	}
 	return scrollRow{}, 0, false
 }
+
+// Equivalent reports whether r and other cover the same cells with the same
+// content, style, and OSC 8 link. Wrapped and ID are ignored; see
+// Line.Equivalent for the cell comparison semantics.
+func (r Row) Equivalent(other Row) bool {
+	return Line{Spans: r.Spans, Width: r.Width}.Equivalent(Line{Spans: other.Spans, Width: other.Width})
+}

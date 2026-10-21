@@ -70,27 +70,18 @@ var testSequences = []struct {
 }
 
 // TestTTYFrontendNestedTerminalSpacing round-trips screen content through a
-// TTYFrontend (render to ANSI, re-parse) and compares span-for-span.
+// TTYFrontend (render to ANSI, re-parse) and compares the two screens.
 //
-// History: this was blanket-skipped in Jan 2026 ("skip test for now", commit
-// eab7498) with no reason recorded. Re-running it shows the round-trip is
-// not span-lossless: trailing blank runs come back as Text spans instead of
-// Rune(' ') spans (same visible content, different encoding), so the exact
-// cmp.Diff on StyledLines fails. That is a renderer fidelity issue, out of
-// scope for the lifecycle batch; until it round-trips losslessly, the cases
-// that depend on exact span encoding are skipped per-case below.
+// The comparison is semantic (Line.Equivalent), not structural: rendering and
+// re-parsing can pack the same cells differently (for example a trailing run of
+// blanks comes back as a Text span instead of a Rune(' ') span). That packing
+// difference is an allocation detail, not a change in visible content.
 func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 	width, height := 40, 4
 	screenRegion := Region{X: 0, Y: 0, X2: width, Y2: height}
 
 	for _, test := range testSequences {
 		t.Run(test.name, func(t *testing.T) {
-			// Narrowest skip: this case fails only on span encoding, not
-			// visible content (see test doc comment). Skip it per-case so
-			// any other cases in testSequences still run.
-			if test.name == "emoji_overwrite" {
-				t.Skip("TTY round-trip is not span-lossless for trailing blanks")
-			}
 			r, w := io.Pipe()
 
 			outer := NewWithMode(&EmptyFrontend{}, NewNoPTYBackend(r, io.Discard), TextReadModeRune).(*terminal)
@@ -114,9 +105,17 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 			outerLines := outer.StyledLines(screenRegion)
 			outer.Unlock()
 
-			diff := cmp.Diff(innerLines, outerLines, cmp.AllowUnexported(Style{}))
-			if diff != "" {
-				t.Fatalf("difference between raw and TTYFrontend: %v", diff)
+			if len(innerLines) != len(outerLines) {
+				t.Fatalf("line count differs: raw=%d TTYFrontend=%d", len(innerLines), len(outerLines))
+			}
+			for i := range innerLines {
+				if innerLines[i].Equivalent(outerLines[i]) {
+					continue
+				}
+				// Dump the structural spans to make packing differences easy
+				// to inspect even though they are not themselves failures.
+				diff := cmp.Diff(innerLines, outerLines, cmp.AllowUnexported(Style{}))
+				t.Fatalf("line %d differs between raw and TTYFrontend: %v", i, diff)
 			}
 		})
 	}
