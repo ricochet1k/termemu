@@ -990,23 +990,25 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 			line.width = totalWidth - n + insertWidth
 			return
 		}
-		// Compare styles
-		spFG, _ := sp.Style.GetColor(ComponentFG)
-		insertFG, _ := ins.Style.GetColor(ComponentFG)
-		spBG, _ := sp.Style.GetColor(ComponentBG)
-		insertBG, _ := ins.Style.GetColor(ComponentBG)
-		// Adjacent spans with different links must stay separate so the
-		// hyperlink boundary survives; likewise the in-place text swap
-		// below would otherwise keep the old span's link.
-		if ins.Width == n && spFG == insertFG && spBG == insertBG && sp.Link == ins.Link {
+		// Compare the complete style and link. Color-only comparison used to
+		// keep the old span's mode bits (bold, italic, underline, ...) when
+		// overwriting text in place, and could skip the update entirely.
+		if ins.Width == n && sp.Style == ins.Style && sp.Link == ins.Link {
 			if sp.Text == "" && ins.Text == "" {
 				return
 			}
-			if sp.Text != "" && ins.Text != "" && mode == TextReadModeRune && sp.Width == len(sp.Text) && ins.Width == len(ins.Text) {
-				sp.Text = sp.Text[:startOffset] + ins.Text + sp.Text[startOffset+n:]
-				spans[startIdx] = sp
-				line.width = totalWidth
-				return
+			if sp.Text != "" && ins.Text != "" {
+				// Both boundaries are cluster-aligned (the window was expanded
+				// above), so the text can be spliced without changing widths.
+				textBytes := []byte(sp.Text)
+				startByte, _ := byteIndexForCell(textBytes, startOffset, mode)
+				endByte, _ := byteIndexForCell(textBytes, startOffset+n, mode)
+				if startByte <= endByte && endByte <= len(textBytes) {
+					sp.Text = sp.Text[:startByte] + ins.Text + sp.Text[endByte:]
+					spans[startIdx] = sp
+					line.width = totalWidth
+					return
+				}
 			}
 		}
 	}
@@ -1127,28 +1129,41 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 
 	sp := &line.spans[idx]
 
-	// If we're at an offset within the span, we need to split it first
+	// If we're at an offset within the span, we need to split it first.
+	// A split that falls inside a wide cluster cannot isolate the previous
+	// cell; keep the whole wide span as the merge target instead of
+	// dropping the broken cluster.
 	if offset > 0 {
-		left, right, _ := splitSpan(*sp, offset, s.textMode)
+		left, right, wide := splitSpan(*sp, offset, s.textMode)
+		if wide.Width == 0 {
+			// Update spans: replace current span with left and right
+			newSpans := make([]Span, 0, len(line.spans)+1)
+			newSpans = append(newSpans, line.spans[:idx]...)
+			newSpans = append(newSpans, left, right)
+			newSpans = append(newSpans, line.spans[idx+1:]...)
+			line.spans = newSpans
 
-		// Update spans: replace current span with left and right
-		newSpans := make([]Span, 0, len(line.spans)+1)
-		newSpans = append(newSpans, line.spans[:idx]...)
-		newSpans = append(newSpans, left, right)
-		newSpans = append(newSpans, line.spans[idx+1:]...)
-		line.spans = newSpans
-
-		// Now the cell we want to merge into is at idx+1
-		idx++
+			// Now the cell we want to merge into is at idx+1
+			idx++
+		}
 	}
 
-	// Convert repeat to text if needed and merge
+	// Never merge text with a different style or link into the previous
+	// span. Keep it as a zero-width span so the cell content and style
+	// boundary both survive.
 	sp = &line.spans[idx]
-	if sp.Text == "" {
-		sp.Text = strings.Repeat(" ", sp.Width)
+	if sp.Style != s.style || sp.Link != s.link {
+		line.spans = append(line.spans, Span{})
+		copy(line.spans[idx+2:], line.spans[idx+1:])
+		line.spans[idx+1] = Span{Style: s.style, Text: text, Width: 0, Link: s.link}
+	} else {
+		// Convert repeat to text if needed and merge
+		if sp.Text == "" {
+			sp.Text = strings.Repeat(" ", sp.Width)
+		}
+		sp.Text += text
+		// Width doesn't change for merge
 	}
-	sp.Text += text
-	// Width doesn't change for merge
 
 	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: cell, X2: cell + 1}, CRText)
 }

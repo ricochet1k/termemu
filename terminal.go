@@ -239,8 +239,11 @@ type terminal struct {
 }
 
 // New makes a new terminal using the provided Frontend, Backend, and default text read mode.
+// The default mode is TextReadModeGrapheme, which is the correct terminal
+// behavior for emoji, combining marks and other grapheme clusters. Use
+// NewWithMode to select TextReadModeRune explicitly.
 func New(f Frontend, backend Backend) Terminal {
-	return NewWithMode(f, backend, TextReadModeRune)
+	return NewWithMode(f, backend, TextReadModeGrapheme)
 }
 
 // NewWithMode makes a new terminal using the provided Frontend, Backend, and text read mode.

@@ -354,7 +354,7 @@ independent of the terminal after it is taken.
 ## API highlights
 
 - `NewWithMode(frontend, backend, mode, opts...)` — creates a terminal. Supports `WithScrollback(rows)`.
-- `New(frontend, backend)` — shorthand for `NewWithMode(…, TextReadModeRune)`.
+- `New(frontend, backend)` — shorthand for `NewWithMode(…, TextReadModeGrapheme)`.
 - `NewNoPTYBackend(reader, writer)` — creates a backend from provided pipes.
 - `PTYBackend.Attach(*exec.Cmd)` — wires a command into the PTY. Reusable.
 - `Terminal.Close()/Done()/Err()` — shut down the read loop and observe how it exited.

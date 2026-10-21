@@ -12,7 +12,11 @@ import (
 type TextReadMode int
 
 const (
-	// TextReadModeRune emits one token per rune.
+	// TextReadModeRune emits one token per rune. Zero-width runes (combining
+	// marks, VS16, ZWJ, emoji modifiers) merge into the previous cell, but
+	// rune mode does not cluster whole ZWJ sequences: a ZWJ family such as
+	// "👨\u200d👩\u200d👧\u200d👦" occupies 8 cells (each person is width 2)
+	// while the same sequence is 2 cells in grapheme mode.
 	TextReadModeRune TextReadMode = iota
 	// TextReadModeGrapheme emits one token per grapheme cluster.
 	TextReadModeGrapheme
@@ -42,7 +46,7 @@ type GraphemeReader struct {
 const graphemeReadBufferSize = 4096
 
 func NewGraphemeReader(src io.Reader) *GraphemeReader {
-	return NewGraphemeReaderWithMode(src, TextReadModeRune)
+	return NewGraphemeReaderWithMode(src, TextReadModeGrapheme)
 }
 
 func NewGraphemeReaderWithMode(src io.Reader, mode TextReadMode) *GraphemeReader {
@@ -291,6 +295,11 @@ func stepTextCluster(buf []byte, state int, mode TextReadMode) ([]byte, int, int
 	return stepRuneCluster(buf, state)
 }
 
+// runeStateLastRegionalIndicator marks that stepRuneCluster just emitted the
+// first half of a regional-indicator pair. Rune mode does not cluster grapheme
+// sequences, but flag pairs still share one cell.
+const runeStateLastRegionalIndicator = 1
+
 func stepRuneCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if !utf8.FullRune(buf) {
 		return nil, 0, 0, state, false
@@ -299,12 +308,28 @@ func stepRuneCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if size == 0 {
 		return nil, 0, 0, state, false
 	}
-	// Calculate actual display width (e.g., emoji = 2, normal char = 1)
+	// Calculate the actual display width (e.g., emoji = 2, normal char = 1).
+	// Zero-width runes stay zero so the reader can merge them into the
+	// previous cell instead of giving them a cell of their own.
 	width := uniseg.StringWidth(string(r))
-	if width <= 0 {
-		width = 1
+	if width < 0 {
+		width = 0
 	}
-	return buf[:size], size, width, state, true
+
+	newState := 0
+	if isRegionalIndicator(buf[:size]) {
+		if state == runeStateLastRegionalIndicator {
+			width = 0
+		} else {
+			newState = runeStateLastRegionalIndicator
+		}
+	} else if width == 1 && nextRuneIsEmojiPresentation(buf[size:]) {
+		// Emoji presentation selectors (VS16) and the combining enclosing
+		// keycap widen the preceding character even though rune mode emits
+		// that character on its own.
+		width = 2
+	}
+	return buf[:size], size, width, newState, true
 }
 
 func stepGraphemeCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
@@ -316,8 +341,38 @@ func stepGraphemeCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 		return nil, 0, 0, state, false
 	}
 	width := boundaries >> uniseg.ShiftWidth
+	width = emojiPresentationWidth(cluster, width)
 	consumed := len(buf) - len(rest)
 	return cluster, consumed, width, newState, true
+}
+
+// emojiPresentationWidth adjusts a grapheme cluster's width for emoji
+// presentation. uniseg reports keycap sequences such as "1\ufe0f\u20e3" as one
+// cell, but terminals render them as two. VS16 and the combining enclosing
+// keycap only widen clusters whose computed width is exactly one, so ordinary
+// text (including e + combining acute) keeps its normal width.
+func emojiPresentationWidth(cluster []byte, width int) int {
+	if width != 1 {
+		return width
+	}
+	for len(cluster) > 0 {
+		r, size := utf8.DecodeRune(cluster)
+		if r == '\ufe0f' || r == '\u20e3' {
+			return 2
+		}
+		cluster = cluster[size:]
+	}
+	return width
+}
+
+// nextRuneIsEmojiPresentation reports whether the next complete rune is an
+// emoji presentation selector or combining enclosing keycap.
+func nextRuneIsEmojiPresentation(buf []byte) bool {
+	if len(buf) == 0 || !utf8.FullRune(buf) {
+		return false
+	}
+	r, _ := utf8.DecodeRune(buf)
+	return r == '\ufe0f' || r == '\u20e3'
 }
 
 func (r *GraphemeReader) nextTokenInfo(buf []byte) ([]byte, int, int, bool, int, bool, bool, bool) {
@@ -332,7 +387,11 @@ func nextRuneTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI boo
 	if !ok {
 		return nil, 0, 0, false, state, forceMergeNext, lastWasRI, false
 	}
-	return cluster, consumed, width, false, newState, forceMergeNext, lastWasRI, true
+	// Rune mode does not cluster whole sequences, but zero-width runes
+	// (combining marks, VS16, ZWJ, modifiers, and the second half of a
+	// regional-indicator pair) attach to the previous cell.
+	merge := width == 0
+	return cluster, consumed, width, merge, newState, forceMergeNext, lastWasRI, true
 }
 
 func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool) ([]byte, int, int, bool, int, bool, bool, bool) {
