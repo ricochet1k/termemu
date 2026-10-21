@@ -20,6 +20,7 @@ A small Go library for emulating a terminal and rendering output through a plugg
 - OSC 8 hyperlinks tracked per span (`Span.Link`)
 - OSC 52 clipboard write path via the optional `ClipboardSink` interface
 - OSC 6/7 working-directory announcements mapped to `VSCurrentDirectory`
+- Screen snapshots (`Snapshot`/`Restore`) for saving and replaying terminal state
 
 ## Requirements
 
@@ -290,6 +291,26 @@ term.View(func(v termemu.LockedView) {
 })
 ```
 
+### Snapshots
+
+`Snapshot()` deep-copies both screen buffers plus cursor, style, margins,
+auto-wrap, wrapped flags, view flags/ints/strings, keyboard modes, and the
+active OSC 8 link. The scrollback buffer and backend/process state are not
+included. `Restore()` is same-size only (it returns
+`ErrSnapshotSizeMismatch` and leaves the terminal untouched otherwise) and
+emits a full-screen `RegionChanged` with `CRRestore` so frontends repaint.
+
+```go
+snap := term.Snapshot()
+// ... run more output or otherwise mutate the screen ...
+if err := term.Restore(snap); err != nil {
+    // errors.Is(err, termemu.ErrSnapshotSizeMismatch) if the size changed
+}
+```
+
+Restoring does not touch the scrollback buffer, and a snapshot stays
+independent of the terminal after it is taken.
+
 ### Modern terminal features
 
 - **Synchronized output:** `DECSET/DECRST 2026` sets/clears the
@@ -318,6 +339,7 @@ term.View(func(v termemu.LockedView) {
 - `PTYBackend.Attach(*exec.Cmd)` — wires a command into the PTY. Reusable.
 - `Terminal.Close()/Done()/Err()` — shut down the read loop and observe how it exited.
 - `Terminal.Scrollback()` — returns the scrollback buffer.
+- `Terminal.Snapshot()/Restore(Snapshot)` — deep-copy and restore terminal screen state (same size only).
 - `PrintTerminal(t Terminal)` / `PrintTerminalTo(w, t)` — debug printing of screen contents.
 - `NewTTYFrontend(out)` — terminal frontend that writes ANSI to output.
 

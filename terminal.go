@@ -57,6 +57,18 @@ type Terminal interface {
 	// LockedView.Scrollback there instead.
 	Scrollback() *Scrollback
 
+	// Snapshot returns a deep copy of the terminal's screen state. It
+	// locks internally. The scrollback buffer and backend/process state
+	// are not included. Mutating the returned Snapshot does not affect
+	// the terminal, and vice versa.
+	Snapshot() Snapshot
+	// Restore replaces the terminal's screen state with a previously
+	// captured Snapshot and emits a full repaint. It locks internally.
+	// Restore is same-size only: it returns ErrSnapshotSizeMismatch (and
+	// leaves the terminal untouched) if the snapshot dimensions differ
+	// from the current terminal size. The scrollback buffer is untouched.
+	Restore(Snapshot) error
+
 	// Close shuts down the terminal: it closes the backend (if it
 	// implements io.Closer) so a blocked Read returns and the read loop
 	// exits. It is idempotent and never blocks waiting for the loop.
@@ -67,6 +79,37 @@ type Terminal interface {
 	// otherwise the error that stopped the loop. It is only meaningful
 	// after Done is closed.
 	Err() error
+}
+
+// ErrSnapshotSizeMismatch is returned by Terminal.Restore when the snapshot
+// dimensions do not match the current terminal size. Restore never resizes
+// the pty or screens implicitly.
+var ErrSnapshotSizeMismatch = errors.New("termemu: snapshot dimensions do not match terminal size")
+
+// ScreenState is a deep copy of one screen buffer.
+type ScreenState struct {
+	Width, Height int
+	Lines         []Line // full-width rows; Spans are copies
+	Wrapped       []bool // auto-wrap continuation flags, len == Height
+	Cursor        Pos
+	SavedCursor   Pos
+	Style         Style
+	TopMargin     int
+	BottomMargin  int
+	AutoWrap      bool
+}
+
+// Snapshot is a deep copy of terminal state. It excludes the scrollback
+// buffer and backend/process state.
+type Snapshot struct {
+	Main, Alt    ScreenState
+	OnAltScreen  bool
+	ViewFlags    []bool
+	ViewInts     []int
+	ViewStrings  []string
+	KeyboardMain keyboardMode
+	KeyboardAlt  keyboardMode
+	Link         string // active OSC 8 hyperlink, if any
 }
 
 // LockedView is a read-only handle to terminal state. It is valid only for
@@ -315,6 +358,81 @@ func (t *terminal) View(fn func(LockedView)) {
 	t.Lock()
 	defer t.Unlock()
 	fn(LockedView{t: t})
+}
+
+// Snapshot returns a deep copy of the terminal's screen state. It locks
+// internally. The scrollback buffer and backend/process state are excluded.
+func (t *terminal) Snapshot() Snapshot {
+	t.Lock()
+	defer t.Unlock()
+	return Snapshot{
+		Main:         t.mainScreen.snapshotState(),
+		Alt:          t.altScreen.snapshotState(),
+		OnAltScreen:  t.onAltScreen,
+		ViewFlags:    append([]bool(nil), t.viewFlags...),
+		ViewInts:     append([]int(nil), t.viewInts...),
+		ViewStrings:  append([]string(nil), t.viewStrings...),
+		KeyboardMain: cloneKeyboardMode(t.keyboardMain),
+		KeyboardAlt:  cloneKeyboardMode(t.keyboardAlt),
+		Link:         t.hyperlink,
+	}
+}
+
+// cloneKeyboardMode copies a keyboard mode, including its stack slice.
+func cloneKeyboardMode(km keyboardMode) keyboardMode {
+	out := keyboardMode{flags: km.flags}
+	if len(km.stack) > 0 {
+		out.stack = append([]int(nil), km.stack...)
+	}
+	return out
+}
+
+// Restore replaces the terminal's screen state with a previously captured
+// Snapshot and emits a full repaint. It locks internally. Restore is
+// same-size only: it returns ErrSnapshotSizeMismatch and leaves the terminal
+// untouched when the snapshot dimensions differ from the current terminal
+// size. The scrollback buffer is untouched.
+func (t *terminal) Restore(s Snapshot) error {
+	t.Lock()
+	defer t.Unlock()
+
+	mainSize := t.mainScreen.Size()
+	altSize := t.altScreen.Size()
+	if s.Main.Width != mainSize.X || s.Main.Height != mainSize.Y ||
+		s.Alt.Width != altSize.X || s.Alt.Height != altSize.Y {
+		return ErrSnapshotSizeMismatch
+	}
+
+	t.mainScreen.restoreState(s.Main)
+	t.altScreen.restoreState(s.Alt)
+	t.onAltScreen = s.OnAltScreen
+	t.keyboardMain = cloneKeyboardMode(s.KeyboardMain)
+	t.keyboardAlt = cloneKeyboardMode(s.KeyboardAlt)
+
+	for i := range t.viewFlags {
+		if i < len(s.ViewFlags) && t.viewFlags[i] != s.ViewFlags[i] {
+			t.setViewFlag(ViewFlag(i), s.ViewFlags[i])
+		}
+	}
+	for i := range t.viewInts {
+		if i < len(s.ViewInts) && t.viewInts[i] != s.ViewInts[i] {
+			t.setViewInt(ViewInt(i), s.ViewInts[i])
+		}
+	}
+	for i := range t.viewStrings {
+		if i < len(s.ViewStrings) && t.viewStrings[i] != s.ViewStrings[i] {
+			t.setViewString(ViewString(i), s.ViewStrings[i])
+		}
+	}
+
+	t.setHyperlink(s.Link)
+
+	view := LockedView{t: t}
+	size := t.screen().Size()
+	t.frontend.RegionChanged(view, Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRRestore)
+	t.frontend.CursorMoved(view, t.screen().CursorPos().X, t.screen().CursorPos().Y)
+	t.frontend.StyleChanged(view, t.screen().Style())
+	return nil
 }
 
 // Size returns the terminal width and height. It locks internally.

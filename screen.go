@@ -43,6 +43,12 @@ type screen interface {
 	// setLink records the OSC 8 hyperlink URI applied to subsequently
 	// written content spans. Internal only.
 	setLink(link string)
+
+	// snapshotState returns a deep copy of the screen's state and
+	// restoreState replaces it. Callers must ensure the dimensions match
+	// the current screen size. Internal only.
+	snapshotState() ScreenState
+	restoreState(ScreenState)
 }
 
 // Pos holds X/Y coordinates.
@@ -596,6 +602,57 @@ func (s *spanScreen) setScrollCapture(cb func(lines []spanLine, wrapped []bool))
 
 func (s *spanScreen) setLink(link string) {
 	s.link = link
+}
+
+// snapshotState returns a deep copy of the screen buffer and cursor state.
+func (s *spanScreen) snapshotState() ScreenState {
+	lines := make([]Line, len(s.lines))
+	for y, sl := range s.lines {
+		spans := make([]Span, len(sl.spans))
+		copy(spans, sl.spans)
+		lines[y] = Line{Spans: spans, Width: sl.width}
+	}
+	wrapped := make([]bool, len(s.wrapped))
+	copy(wrapped, s.wrapped)
+	return ScreenState{
+		Width:        s.size.X,
+		Height:       s.size.Y,
+		Lines:        lines,
+		Wrapped:      wrapped,
+		Cursor:       s.cursorPos,
+		SavedCursor:  s.savedCursorPos,
+		Style:        s.style,
+		TopMargin:    s.topMargin,
+		BottomMargin: s.bottomMargin,
+		AutoWrap:     s.autoWrap,
+	}
+}
+
+// restoreState replaces the screen state with st. The caller must check that
+// st.Width/st.Height match the current screen size. It emits no callbacks;
+// the terminal is responsible for the repaint notifications.
+func (s *spanScreen) restoreState(st ScreenState) {
+	lines := make([]spanLine, s.size.Y)
+	for y := range lines {
+		if y >= len(st.Lines) {
+			lines[y] = blankSpanLine(s.size.X, st.Style)
+			continue
+		}
+		spans := make([]Span, len(st.Lines[y].Spans))
+		copy(spans, st.Lines[y].Spans)
+		lines[y] = spanLine{spans: spans, width: st.Lines[y].Width}
+	}
+	wrapped := make([]bool, s.size.Y)
+	copy(wrapped, st.Wrapped)
+
+	s.lines = lines
+	s.wrapped = wrapped
+	s.cursorPos = st.Cursor
+	s.savedCursorPos = st.SavedCursor
+	s.style = st.Style
+	s.topMargin = st.TopMargin
+	s.bottomMargin = st.BottomMargin
+	s.autoWrap = st.AutoWrap
 }
 
 func (s *spanScreen) printScreen() {

@@ -216,6 +216,13 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Runs `ptyReadLoop()` goroutine to read from backend
 - Manages view flags/ints/strings (cursor visibility, mouse mode, window title, etc.)
 - Provides self-locking read methods plus `View(func(LockedView))` for atomic reads
+- `Snapshot()` deep-copies both screens plus view flags/ints/strings, keyboard
+  modes, and the active OSC 8 link; it excludes scrollback and backend state
+- `Restore(Snapshot)` replaces that state, emits one full-screen
+  `RegionChanged` with `CRRestore` plus cursor/style callbacks, and returns
+  `ErrSnapshotSizeMismatch` without changing anything if the snapshot size
+  differs from the current terminal size (it never resizes implicitly).
+  Scrollback is untouched by both methods.
 - Handles keyboard input via `SendKey()`
 - Lifecycle: `Close()` closes the backend so the read loop exits (idempotent,
   never blocks); `Done()` closes on loop exit; `Err()` reports the loop error
@@ -232,6 +239,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   positioning / full-width erase
 - Handles complex operations: scrolling, wide character overlaps, grapheme cluster splitting
 - Screen size, cursor position, scroll margins, auto-wrap behavior
+- `snapshotState()`/`restoreState()` implement the internal `screen` hooks used
+  by `Terminal.Snapshot`/`Restore`: they deep-copy/rebuild `spanLine`s
+  (including zero-width spans and links), the `wrapped` flags, cursor, saved
+  cursor, style, margins, and auto-wrap. `restoreState` emits no callbacks;
+  the terminal owns the repaint notifications.
 - `setScrollCapture` installs a callback invoked (with the terminal lock held)
   before rows scroll off the top, passing the lost rows and their wrapped flags
 

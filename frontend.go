@@ -76,6 +76,10 @@ const (
 	// CRClear) lets frontends skip clear-specific work such as resetting
 	// scroll state.
 	CRResize
+
+	// CRRestore means a snapshot was restored with Terminal.Restore.
+	// Frontends must repaint the full screen from the restored state.
+	CRRestore
 )
 
 // Frontend is a type that can display data from a Terminal.
