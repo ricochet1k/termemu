@@ -2,6 +2,7 @@ package termemu
 
 import (
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,4 +80,99 @@ func TestEscapeQueryRepliesWithKeyboardFlags(t *testing.T) {
 	r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 	t1.mustHandleCommand(t, "[=5u")
 	feedQueryExpectReply(t, t1, r, "\x1b[?u", "\x1b[?5u")
+}
+
+func TestDECRQM_ReportsPrivateModeState(t *testing.T) {
+	r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	// Default: synchronized output (2026) is reset.
+	feedQueryExpectReply(t, t1, r, "\x1b[?2026$p", "\x1b[?2026;2$y")
+	if got := lineBlank(t, t1, 0); strings.TrimSpace(got) != "" {
+		t.Fatalf("DECRQM leaked text to screen: %q", got)
+	}
+
+	t1.mustHandleCommand(t, "[?2026h")
+	feedQueryExpectReply(t, t1, r, "\x1b[?2026$p", "\x1b[?2026;1$y")
+
+	t1.mustHandleCommand(t, "[?2026l")
+	feedQueryExpectReply(t, t1, r, "\x1b[?2026$p", "\x1b[?2026;2$y")
+
+	// Unknown private mode.
+	feedQueryExpectReply(t, t1, r, "\x1b[?9999$p", "\x1b[?9999;0$y")
+
+	// Plain modes are not supported yet.
+	feedQueryExpectReply(t, t1, r, "\x1b[4$p", "\x1b[4;0$y")
+}
+
+func TestDECRQM_ReportsCommonPrivateModes(t *testing.T) {
+	r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	tests := []struct {
+		setup string
+		query string
+		want  string
+	}{
+		{setup: "[?1h", query: "\x1b[?1$p", want: "\x1b[?1;1$y"},
+		{setup: "[?1l", query: "\x1b[?1$p", want: "\x1b[?1;2$y"},
+		{setup: "[?7l", query: "\x1b[?7$p", want: "\x1b[?7;2$y"},
+		{setup: "[?7h", query: "\x1b[?7$p", want: "\x1b[?7;1$y"},
+		{setup: "[?25l", query: "\x1b[?25$p", want: "\x1b[?25;2$y"},
+		{setup: "[?25h", query: "\x1b[?25$p", want: "\x1b[?25;1$y"},
+		{setup: "[?1000h", query: "\x1b[?1000$p", want: "\x1b[?1000;1$y"},
+		{setup: "[?1006h", query: "\x1b[?1006$p", want: "\x1b[?1006;1$y"},
+		{setup: "[?2004h", query: "\x1b[?2004$p", want: "\x1b[?2004;1$y"},
+	}
+	for _, tt := range tests {
+		t1.mustHandleCommand(t, tt.setup)
+		feedQueryExpectReply(t, t1, r, tt.query, tt.want)
+	}
+}
+
+func TestDECSTR_SoftReset(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	// Leave content on screen so we can verify DECSTR does not erase it.
+	t1.mustHandleCommand(t, "[1;31m")
+	t1.mustHandleCommand(t, "[2;3r")
+	t1.mustHandleCommand(t, "[?7l")
+	t1.mustHandleCommand(t, "[?25l")
+	feedESC(t, t1, "KEEP")
+
+	t1.mustHandleCommand(t, "[!p")
+
+	if got, want := t1.screen().Style(), NewStyle(); got != want {
+		t.Fatalf("style after DECSTR = %+v, want default %+v", got, want)
+	}
+	if got := t1.screen().TopMargin(); got != 0 {
+		t.Fatalf("TopMargin after DECSTR = %d, want 0", got)
+	}
+	if got, want := t1.screen().BottomMargin(), t1.screen().Size().Y-1; got != want {
+		t.Fatalf("BottomMargin after DECSTR = %d, want %d", got, want)
+	}
+	if !t1.screen().AutoWrap() {
+		t.Fatal("AutoWrap after DECSTR = false, want true")
+	}
+	if !t1.viewFlags[VFShowCursor] {
+		t.Fatal("cursor hidden after DECSTR")
+	}
+	if got := lineBlank(t, t1, 0); strings.TrimSpace(got) != "KEEP" {
+		t.Fatalf("DECSTR changed screen content: %q, want %q", got, "KEEP")
+	}
+}
+
+func TestCSI_UnknownIntermediatesAreConsumed(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	for _, seq := range []string{
+		"\x1b[\"p",
+		"\x1b[1 q",
+		"\x1b[?1$z",
+		"\x1b[!q",
+		"\x1b[2$x",
+	} {
+		feedESC(t, t1, seq)
+	}
+	if got := lineBlank(t, t1, 0); strings.TrimSpace(got) != "" {
+		t.Fatalf("CSI intermediates leaked text: %q", got)
+	}
 }

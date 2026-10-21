@@ -314,6 +314,82 @@ func (t *terminal) handleCommand(r escapeReader) bool {
 	return true
 }
 
+// handleDECRQM implements DECRQM (CSI ? Ps $ p / CSI Ps $ p), reporting the
+// current mode state: 1 = set, 2 = reset, 0 = not recognized.
+func (t *terminal) handleDECRQM(prefix byte, params []int) {
+	if prefix != 0 && prefix != '?' {
+		debugPrintf(debugTodo, "TODO: Unhandled DECRQM prefix: %#v\n", string(prefix))
+		return
+	}
+	ps := 0
+	if len(params) > 0 {
+		ps = params[0]
+	}
+	pm := 0
+	prefixStr := ""
+	if prefix == '?' {
+		prefixStr = "?"
+		pm = t.privateModeState(ps)
+	}
+	_ = t.writeReply([]byte(fmt.Sprintf("\033[%s%d;%d$y", prefixStr, ps, pm)))
+}
+
+// privateModeState reports the state of a DEC private mode: 1 set, 2 reset,
+// or 0 when the mode is not recognized/supported.
+func (t *terminal) privateModeState(mode int) int {
+	set := false
+	switch mode {
+	case 1: // DECCKM
+		set = t.viewFlags[VFAppCursorKeys]
+	case 7: // DECAWM
+		set = t.screen().AutoWrap()
+	case 9: // Send MouseXY on press
+		set = t.viewInts[VIMouseMode] == MMPress
+	case 12: // Cursor blink
+		set = t.viewFlags[VFBlinkCursor]
+	case 25: // Cursor visible
+		set = t.viewFlags[VFShowCursor]
+	case 47, 1047, 1048, 1049: // Alt-screen family
+		set = t.onAltScreen
+	case 1000:
+		set = t.viewInts[VIMouseMode] == MMPressRelease
+	case 1002:
+		set = t.viewInts[VIMouseMode] == MMPressReleaseMove
+	case 1003:
+		set = t.viewInts[VIMouseMode] == MMPressReleaseMoveAll
+	case 1004: // Focus reporting
+		set = t.viewFlags[VFReportFocus]
+	case 1005: // UTF-8 mouse encoding
+		set = t.viewInts[VIMouseEncoding] == MEUTF8
+	case 1006: // SGR mouse encoding
+		set = t.viewInts[VIMouseEncoding] == MESGR
+	case 1015: // urxvt mouse encoding (shares the UTF-8 encoding state)
+		set = t.viewInts[VIMouseEncoding] == MEUTF8
+	case 2004: // Bracketed paste
+		set = t.viewFlags[VFBracketedPaste]
+	case 2026: // Synchronized output
+		set = t.viewFlags[VFSynchronizedOutput]
+	default:
+		return 0
+	}
+	if set {
+		return 1
+	}
+	return 2
+}
+
+// handleDECSTR implements DECSTR (CSI ! p): soft terminal reset. It restores
+// default style, full scroll margins, auto-wrap, and cursor visibility without
+// touching screen contents.
+func (t *terminal) handleDECSTR() {
+	for _, s := range []screen{t.mainScreen, t.altScreen} {
+		s.setStyle(NewStyle())
+		s.setScrollMarginTopBottom(0, s.Size().Y-1)
+		s.SetAutoWrap(true)
+	}
+	t.setViewFlag(VFShowCursor, true)
+}
+
 func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 	b, err := r.ReadByte()
@@ -381,6 +457,41 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 	}
 
 	params := paramStore[:paramCount]
+
+	// CSI grammar allows intermediate bytes (0x20-0x2F) between the
+	// parameters and the final byte. Collect them so the final byte is not
+	// mistaken for printable text.
+	var interStore [4]byte
+	interCount := 0
+	for b >= 0x20 && b <= 0x2f {
+		if interCount < len(interStore) {
+			interStore[interCount] = b
+			interCount++
+		}
+		b, err = r.ReadByte()
+		if err != nil {
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR ReadByte7:", err)
+			}
+			return false
+		}
+	}
+	intermediates := interStore[:interCount]
+
+	if len(intermediates) > 0 {
+		switch {
+		case len(intermediates) == 1 && intermediates[0] == '$' && b == 'p':
+			// DECRQM: request mode
+			t.handleDECRQM(prefix, params)
+		case len(intermediates) == 1 && intermediates[0] == '!' && b == 'p':
+			// DECSTR: soft terminal reset
+			t.handleDECSTR()
+		default:
+			debugPrintf(debugTodo, "TODO: Unhandled CSI intermediates: %#v %v, %#v\n", string(intermediates), append([]int(nil), params...), string(b))
+			return true
+		}
+		return true
+	}
 
 	if prefix == 0 {
 		switch b {
@@ -785,9 +896,6 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled DSR params: ", append([]int(nil), params...))
 			}
-
-		case '%': // Select character set (ignored)
-			// ignored
 
 		case '<': // SGR mouse or other private mode (ignored)
 			if *debugCmd {

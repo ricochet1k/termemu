@@ -109,7 +109,7 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 			break
 		}
 
-		_, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok := r.nextTokenInfo(r.data[r.start:r.end])
+		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok := r.nextTokenInfo(r.data[r.start:r.end])
 		if !ok {
 			if r.start == runStart {
 				before := r.Buffered()
@@ -124,6 +124,23 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 				continue
 			}
 			break
+		}
+		if isC1ControlCluster(cluster) {
+			// C1 controls (U+0080-U+009F) have no display representation.
+			// If text is already buffered, stop here so the emitted run does
+			// not contain the skipped bytes; the next call consumes them.
+			if widthUsed > 0 {
+				break
+			}
+			// Consume the rune without emitting it; this also keeps the
+			// following text in the same contiguous run.
+			r.start += consumed
+			r.state = newState
+			r.forceMergeNext = nextForceMergeNext
+			r.lastWasRI = nextLastWasRI
+			runStart = r.start
+			mergeRun = false
+			continue
 		}
 		if mergeRun && !merge {
 			break
@@ -200,6 +217,14 @@ func (r *GraphemeReader) ReadPrintableTokensInto(maxWidth int, dst []GraphemeTok
 			}
 			continue
 		}
+		if isC1ControlCluster(cluster) {
+			// C1 controls (U+0080-U+009F) are not rendered.
+			r.start += consumed
+			r.state = newState
+			r.forceMergeNext = nextForceMergeNext
+			r.lastWasRI = nextLastWasRI
+			continue
+		}
 
 		tokenWidth := width
 		if merge && tokenWidth > 0 {
@@ -245,7 +270,18 @@ func (r *GraphemeReader) fill() error {
 }
 
 func isPrintableByte(b byte) bool {
-	return b >= 32 && b != 127
+	// Bytes 0x80-0x9F are C1 controls when they appear standalone (that is,
+	// not as part of a valid UTF-8 sequence). A valid multi-byte rune is
+	// always consumed as a whole by the tokenizer, so excluding these byte
+	// values here only drops invalid standalone C1 bytes.
+	return b >= 32 && b != 127 && (b < 0x80 || b > 0x9f)
+}
+
+// isC1ControlCluster reports whether the first rune of cluster is a C1 control
+// rune (U+0080-U+009F), which must not be rendered.
+func isC1ControlCluster(cluster []byte) bool {
+	r, _ := utf8.DecodeRune(cluster)
+	return r >= 0x80 && r <= 0x9f
 }
 
 func stepTextCluster(buf []byte, state int, mode TextReadMode) ([]byte, int, int, int, bool) {

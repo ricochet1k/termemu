@@ -857,7 +857,7 @@ func TestCSI_IgnoredCommands(t *testing.T) {
 	}{
 		{
 			name:     "select character set",
-			sequence: "[%",
+			sequence: "[%G",
 		},
 		{
 			name:     "SGR mouse with params",
