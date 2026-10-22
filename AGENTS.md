@@ -16,8 +16,15 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
   `cmd.Env`.
 
 ## Repository layout
-- Core library code lives at repo root (package `termemu`).
-- Examples live under `examples/`.
+- Core library code lives at repo root (package `termemu`). This flat
+  layout is intentional and idiomatic for a single-package Go library.
+- Examples live under `examples/`: `simple`, `tty`, `unicode_test`,
+  `esctest` (interactive escape debugger), and `tmux` (tmux comparison
+  harness).
+- Reference docs live under `docs/` (e.g. `keyboard-protocol.rst`).
+- Helper scripts live under `scripts/`; generated test artifacts
+  (`scripts/tmux_integration_test`, `scripts/integration_test_results.txt`)
+  are gitignored.
 - Test helpers and benchmarks live in `_test.go` files at root.
 - `backend.go` holds `Backend`, `PTYBackend`, `NoPTYBackend`, `TeeBackend`.
   `backend_unix.go` / `backend_other.go` hold `setControllingTTY` (the only
@@ -50,6 +57,8 @@ Use these exact commands unless the user asks otherwise.
   - `go build ./examples/simple`
   - `go build ./examples/tty`
   - `go build ./examples/unicode_test`
+  - `go build ./examples/esctest`
+  - `go build ./examples/tmux`
 
 ### Test
 - Run all tests: `go test ./...`

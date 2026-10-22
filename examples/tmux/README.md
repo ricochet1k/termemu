@@ -1,4 +1,4 @@
-# Tmux Integration Test
+# Tmux Comparison Harness
 
 This binary tests the termemu library by comparing its output against tmux's rendering.
 
@@ -24,15 +24,15 @@ Start a tmux session:
 tmux new-session
 ```
 
-Then run the test:
+Then run the harness:
 ```bash
-go run ./examples/tmux_integration_test
+go run ./examples/tmux
 ```
 
 Or build and run:
 ```bash
-go build ./examples/tmux_integration_test
-./tmux_integration_test
+go build -o scripts/tmux_integration_test ./examples/tmux
+./scripts/tmux_integration_test
 ```
 
 ## Options
@@ -46,17 +46,17 @@ go build ./examples/tmux_integration_test
 
 Run with verbose output:
 ```bash
-./tmux_integration_test -verbose
+./scripts/tmux_integration_test -verbose
 ```
 
 Run a specific test:
 ```bash
-./tmux_integration_test -test colors
+./scripts/tmux_integration_test -test colors
 ```
 
 Test with a smaller terminal:
 ```bash
-./tmux_integration_test -width 40 -height 10
+./scripts/tmux_integration_test -width 40 -height 10
 ```
 
 ## Test Cases
