@@ -23,3 +23,21 @@ func setControllingTTY(c *exec.Cmd) {
 func openSlave(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDWR|syscall.O_NOCTTY, 0)
 }
+
+// setNonblocking puts the pty master into non-blocking mode. os.File then
+// reads through the runtime poller, which is what makes SetReadDeadline able
+// to wake an in-flight read (needed by Terminal.Pause). The slave stays
+// blocking for the child process.
+func setNonblocking(f *os.File) error {
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var setErr error
+	if err := rc.Control(func(fd uintptr) {
+		setErr = syscall.SetNonblock(int(fd), true)
+	}); err != nil {
+		return err
+	}
+	return setErr
+}

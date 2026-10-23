@@ -19,3 +19,6 @@ func setControllingTTY(c *exec.Cmd) {}
 func openSlave(path string) (*os.File, error) {
 	return nil, pty.ErrUnsupported
 }
+
+// setNonblocking is a no-op on platforms where creack/pty is unsupported.
+func setNonblocking(f *os.File) error { return nil }

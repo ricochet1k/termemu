@@ -128,6 +128,9 @@ func (p *PTYBackend) Adopt(master, slave *os.File) error {
 		return errors.New("termemu: PTYBackend.Adopt: backend already has a pty")
 	}
 
+	if err := setNonblocking(master); err != nil {
+		return err
+	}
 	p.master = master
 	p.slave = slave
 	if slave != nil {
@@ -156,6 +159,13 @@ func (p *PTYBackend) openLocked() error {
 	}
 	master, slave, err := pty.Open()
 	if err != nil {
+		return err
+	}
+	// Read must go through the runtime poller so SetReadDeadline can
+	// interrupt a blocked read (Terminal.Pause needs this).
+	if err := setNonblocking(master); err != nil {
+		_ = master.Close()
+		_ = slave.Close()
 		return err
 	}
 	p.master = master
@@ -438,12 +448,19 @@ func (p *PTYBackend) SetSize(w, h int) error {
 	if err != nil {
 		return err
 	}
-	return pty.Setsize(master, &pty.Winsize{
+	err = pty.Setsize(master, &pty.Winsize{
 		Rows: uint16(h),
 		Cols: uint16(w),
 		X:    uint16(w * 8),
 		Y:    uint16(h * 16),
 	})
+	// pty.Setsize uses (*os.File).Fd(), which switches the descriptor back
+	// to blocking mode. Re-apply non-blocking so SetReadDeadline can still
+	// interrupt an in-flight read (Pause depends on it).
+	if serr := setNonblocking(master); serr != nil && err == nil {
+		err = serr
+	}
+	return err
 }
 
 // NoPTYBackend implements Backend using provided IO streams.
