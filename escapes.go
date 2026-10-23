@@ -154,7 +154,9 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 		})
 
 	case 11: // VT ^K Vertical TAB
-		debugPrintln(debugTodo, "TODO: vtab")
+		t.withLock(func() {
+			t.screen().moveCursor(0, 1, false, true)
+		})
 
 	case 12: // FF ^L Formfeed (also: New page NP)
 		t.withLock(func() {

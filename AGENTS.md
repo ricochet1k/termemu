@@ -267,12 +267,16 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   positioning / full-width erase
 - Handles complex operations: scrolling, wide character overlaps, grapheme cluster splitting
 - Screen size, cursor position, scroll margins, auto-wrap behavior. Auto-wrap
-  (DECAWM) defaults to on, as in xterm.
+  (DECAWM) defaults to on, as in xterm. Writes use deferred wrap: filling the
+  last cell leaves the cursor there with `pendingWrap` set; the next printable
+  write (or one whose cell would not fit) wraps first via `wrapLine()`. CR, LF,
+  VT, FF, BS, TAB, explicit cursor moves, DECSC/DECRC, setSize, RIS/DECSTR, and
+  DECALN clear or restore `pendingWrap`; DECAWM off clamps and never sets it.
 - `snapshotState()`/`restoreState()` implement the internal `screen` hooks used
   by `Terminal.Snapshot`/`Restore`: they deep-copy/rebuild `spanLine`s
-  (including zero-width spans and links), the `wrapped` flags, cursor, saved
-  cursor, style, margins, and auto-wrap. `restoreState` emits no callbacks;
-  the terminal owns the repaint notifications.
+  (including zero-width spans and links), the `wrapped` flags, cursor, pending
+  wrap, saved cursor, style, margins, and auto-wrap. `restoreState` emits no
+  callbacks; the terminal owns the repaint notifications.
 - `setScrollCapture` installs a callback invoked (with the terminal lock held)
   before rows scroll off the top, passing the lost rows and their wrapped flags
 

@@ -77,8 +77,10 @@ type spanScreen struct {
 
 	size Pos
 
-	cursorPos      Pos
-	savedCursorPos Pos
+	cursorPos        Pos
+	pendingWrap      bool // cursor sits on the last column; the next write wraps first
+	savedCursorPos   Pos
+	savedPendingWrap bool
 
 	topMargin, bottomMargin int
 
@@ -134,6 +136,9 @@ func (s *spanScreen) AutoWrap() bool {
 
 func (s *spanScreen) SetAutoWrap(value bool) {
 	s.autoWrap = value
+	// Pending wrap is meaningless with DECAWM off, and both DECSTR and RIS
+	// restore auto-wrap through this method, so clear it here.
+	s.pendingWrap = false
 }
 
 func (s *spanScreen) TopMargin() int {
@@ -315,6 +320,7 @@ func (s *spanScreen) setSize(w, h int) {
 	s.bottomMargin = h - (s.size.Y - s.bottomMargin)
 
 	s.size = Pos{X: w, Y: h}
+	s.pendingWrap = false
 
 	// Resize buffers
 	s.renderBuffer = make([]rune, w)
@@ -398,12 +404,13 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 	if width > s.size.X {
 		width = s.size.X
 	}
+	if s.pendingWrap {
+		s.pendingWrap = false
+		s.wrapLine()
+	}
 	if s.cursorPos.X+width > s.size.X {
 		if s.autoWrap {
-			s.moveCursor(-s.cursorPos.X, 1, false, true)
-			if s.cursorPos.Y < len(s.wrapped) {
-				s.wrapped[s.cursorPos.Y] = true
-			}
+			s.wrapLine()
 		} else {
 			s.cursorPos.X = s.size.X - width
 		}
@@ -424,7 +431,37 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 		sp.Link = ""
 	}
 	s.rawWriteSpan(s.cursorPos.X, s.cursorPos.Y, sp, CRText)
-	s.moveCursor(width, 0, true, true)
+
+	newX := s.cursorPos.X + width
+	if s.autoWrap {
+		if newX >= s.size.X {
+			// Defer the wrap: stay on the last column until the next
+			// printable write actually needs a new row.
+			s.cursorPos.X = s.size.X - 1
+			s.pendingWrap = true
+		} else {
+			s.cursorPos.X = newX
+		}
+	} else {
+		s.cursorPos.X = clamp(newX, 0, s.size.X-1)
+	}
+	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
+}
+
+// wrapLine advances to column 0 of the next row, scrolling the scroll region
+// when already at its bottom margin, and marks the new row as a continuation
+// of the previous one. It does not emit CursorMoved; the caller does that once
+// it knows the final position.
+func (s *spanScreen) wrapLine() {
+	s.cursorPos.X = 0
+	s.cursorPos.Y++
+	if s.cursorPos.Y > s.bottomMargin {
+		s.scroll(s.topMargin, s.bottomMargin, s.bottomMargin-s.cursorPos.Y)
+		s.cursorPos.Y = s.bottomMargin
+	}
+	if s.cursorPos.Y < len(s.wrapped) {
+		s.wrapped[s.cursorPos.Y] = true
+	}
 }
 
 func (s *spanScreen) insertRunes(b []rune) {
@@ -507,6 +544,7 @@ func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 }
 
 func (s *spanScreen) setCursorPos(x, y int) {
+	s.pendingWrap = false
 	oldY := s.cursorPos.Y
 	s.cursorPos.X = clamp(x, 0, s.size.X-1)
 	s.cursorPos.Y = clamp(y, 0, s.size.Y-1)
@@ -592,6 +630,7 @@ func (s *spanScreen) clampRegion(r Region) Region {
 }
 
 func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
+	s.pendingWrap = false
 	if wrap && s.autoWrap {
 		s.cursorPos.X += dx
 		for s.cursorPos.X < 0 {
@@ -643,10 +682,12 @@ func (s *spanScreen) decaln() {
 
 func (s *spanScreen) saveCursorPos() {
 	s.savedCursorPos = s.cursorPos
+	s.savedPendingWrap = s.pendingWrap
 }
 
 func (s *spanScreen) restoreCursorPos() {
 	s.cursorPos = s.savedCursorPos
+	s.pendingWrap = s.savedPendingWrap
 	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
 }
 
@@ -669,16 +710,18 @@ func (s *spanScreen) snapshotState() ScreenState {
 	wrapped := make([]bool, len(s.wrapped))
 	copy(wrapped, s.wrapped)
 	return ScreenState{
-		Width:        s.size.X,
-		Height:       s.size.Y,
-		Lines:        lines,
-		Wrapped:      wrapped,
-		Cursor:       s.cursorPos,
-		SavedCursor:  s.savedCursorPos,
-		Style:        s.style,
-		TopMargin:    s.topMargin,
-		BottomMargin: s.bottomMargin,
-		AutoWrap:     s.autoWrap,
+		Width:            s.size.X,
+		Height:           s.size.Y,
+		Lines:            lines,
+		Wrapped:          wrapped,
+		Cursor:           s.cursorPos,
+		PendingWrap:      s.pendingWrap,
+		SavedCursor:      s.savedCursorPos,
+		SavedPendingWrap: s.savedPendingWrap,
+		Style:            s.style,
+		TopMargin:        s.topMargin,
+		BottomMargin:     s.bottomMargin,
+		AutoWrap:         s.autoWrap,
 	}
 }
 
@@ -702,7 +745,9 @@ func (s *spanScreen) restoreState(st ScreenState) {
 	s.lines = lines
 	s.wrapped = wrapped
 	s.cursorPos = st.Cursor
+	s.pendingWrap = st.PendingWrap
 	s.savedCursorPos = st.SavedCursor
+	s.savedPendingWrap = st.SavedPendingWrap
 	s.style = st.Style
 	s.topMargin = st.TopMargin
 	s.bottomMargin = st.BottomMargin
@@ -1168,12 +1213,17 @@ func truncateLine(line *spanLine, width int, mode TextReadMode) {
 }
 
 func (s *spanScreen) mergeIntoPreviousCell(text string) {
-	if s.cursorPos.X <= 0 {
-		return
-	}
 	y := s.cursorPos.Y
 	line := &s.lines[y]
 	cell := s.cursorPos.X - 1
+	// With a pending wrap the cursor still sits on the cell that was just
+	// written, so the merge target is that cell rather than the one before.
+	if s.pendingWrap {
+		cell = s.cursorPos.X
+	}
+	if cell < 0 {
+		return
+	}
 
 	// Find the span at cell position
 	idx, offset := findSpanAtX(line, cell)

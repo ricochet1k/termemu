@@ -88,15 +88,17 @@ var ErrSnapshotSizeMismatch = errors.New("termemu: snapshot dimensions do not ma
 
 // ScreenState is a deep copy of one screen buffer.
 type ScreenState struct {
-	Width, Height int
-	Lines         []Line // full-width rows; Spans are copies
-	Wrapped       []bool // auto-wrap continuation flags, len == Height
-	Cursor        Pos
-	SavedCursor   Pos
-	Style         Style
-	TopMargin     int
-	BottomMargin  int
-	AutoWrap      bool
+	Width, Height    int
+	Lines            []Line // full-width rows; Spans are copies
+	Wrapped          []bool // auto-wrap continuation flags, len == Height
+	Cursor           Pos
+	PendingWrap      bool // next printable write wraps before writing
+	SavedCursor      Pos
+	SavedPendingWrap bool // pending-wrap state saved by DECSC
+	Style            Style
+	TopMargin        int
+	BottomMargin     int
+	AutoWrap         bool
 }
 
 // Snapshot is a deep copy of terminal state. It excludes the scrollback
