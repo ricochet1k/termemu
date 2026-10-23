@@ -319,6 +319,7 @@ func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 		scrollRows:    make([]scrollRow, 0, DefaultScrollbackRows),
 		scrollNextID:  1,
 		scrollMaxRows: DefaultScrollbackRows,
+		readLoopDone:  make(chan struct{}),
 	}
 
 	// The cursor is visible by default (DECSET 25); applications hide it
@@ -544,9 +545,6 @@ func (t *terminal) startReadLoopFromState(initial ReaderState) {
 		return
 	}
 	t.readLoopStarted = true
-	if t.readLoopDone == nil {
-		t.readLoopDone = make(chan struct{})
-	}
 	t.Unlock()
 
 	go func() {
@@ -593,9 +591,6 @@ func (t *terminal) Close() error {
 		// running the goroutine owns the close; startReadLoop refuses to
 		// start after Close so it can never double-close.
 		if !t.readLoopStarted {
-			if t.readLoopDone == nil {
-				t.readLoopDone = make(chan struct{})
-			}
 			close(t.readLoopDone)
 		}
 		t.Unlock()
@@ -605,11 +600,9 @@ func (t *terminal) Close() error {
 
 // Done returns a channel that is closed when the read loop exits.
 func (t *terminal) Done() <-chan struct{} {
-	t.Lock()
-	defer t.Unlock()
-	if t.readLoopDone == nil {
-		t.readLoopDone = make(chan struct{})
-	}
+	// Lock-free on purpose: watchdogs call this while another goroutine may
+	// hold the terminal lock. readLoopDone is created in newTerminal and is
+	// only ever closed.
 	return t.readLoopDone
 }
 

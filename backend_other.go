@@ -20,5 +20,8 @@ func openSlave(path string) (*os.File, error) {
 	return nil, pty.ErrUnsupported
 }
 
-// setNonblocking is a no-op on platforms where creack/pty is unsupported.
-func setNonblocking(f *os.File) error { return nil }
+// makePollableFile is a no-op on platforms where creack/pty is unsupported.
+func makePollableFile(f *os.File) (*os.File, error) { return f, nil }
+
+// setPTYSize is unavailable without pty support.
+func setPTYSize(f *os.File, w, h int) error { return pty.ErrUnsupported }

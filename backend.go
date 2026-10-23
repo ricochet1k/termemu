@@ -27,9 +27,12 @@ type Backend interface {
 // A single pty pair is shared by every command attached to the backend, so
 // commands can be run back-to-back through the same terminal state.
 type PTYBackend struct {
-	mu     sync.Mutex
-	master *os.File
-	slave  *os.File
+	mu sync.Mutex
+	// master is the pollable duplicate used for reads/writes; rawMaster is
+	// the originally opened descriptor, closed with the backend.
+	master    *os.File
+	rawMaster *os.File
+	slave     *os.File
 	// slavePath is the device path of slave, used to reopen it when a
 	// previous child's exit revoked it (see refreshSlaveLocked).
 	slavePath string
@@ -63,8 +66,8 @@ func (p *PTYBackend) Close() error {
 		return nil
 	}
 	p.closed = true
-	master, slave := p.master, p.slave
-	p.master, p.slave = nil, nil
+	master, rawMaster, slave := p.master, p.rawMaster, p.slave
+	p.master, p.rawMaster, p.slave = nil, nil, nil
 	p.slavePath = ""
 	reuse := p.reuse
 	if reuse == nil {
@@ -83,6 +86,9 @@ func (p *PTYBackend) Close() error {
 	var err error
 	if master != nil {
 		err = master.Close()
+	}
+	if rawMaster != nil && rawMaster != master {
+		err = errors.Join(err, rawMaster.Close())
 	}
 	if slave != nil {
 		err = errors.Join(err, slave.Close())
@@ -128,10 +134,12 @@ func (p *PTYBackend) Adopt(master, slave *os.File) error {
 		return errors.New("termemu: PTYBackend.Adopt: backend already has a pty")
 	}
 
-	if err := setNonblocking(master); err != nil {
+	pollable, err := makePollableFile(master)
+	if err != nil {
 		return err
 	}
-	p.master = master
+	p.master = pollable
+	p.rawMaster = master
 	p.slave = slave
 	if slave != nil {
 		p.slavePath = slave.Name()
@@ -163,12 +171,14 @@ func (p *PTYBackend) openLocked() error {
 	}
 	// Read must go through the runtime poller so SetReadDeadline can
 	// interrupt a blocked read (Terminal.Pause needs this).
-	if err := setNonblocking(master); err != nil {
+	pollable, err := makePollableFile(master)
+	if err != nil {
 		_ = master.Close()
 		_ = slave.Close()
 		return err
 	}
-	p.master = master
+	p.master = pollable
+	p.rawMaster = master
 	p.slave = slave
 	p.slavePath = slave.Name()
 	return nil
@@ -455,19 +465,7 @@ func (p *PTYBackend) SetSize(w, h int) error {
 	if err != nil {
 		return err
 	}
-	err = pty.Setsize(master, &pty.Winsize{
-		Rows: uint16(h),
-		Cols: uint16(w),
-		X:    uint16(w * 8),
-		Y:    uint16(h * 16),
-	})
-	// pty.Setsize uses (*os.File).Fd(), which switches the descriptor back
-	// to blocking mode. Re-apply non-blocking so SetReadDeadline can still
-	// interrupt an in-flight read (Pause depends on it).
-	if serr := setNonblocking(master); serr != nil && err == nil {
-		err = serr
-	}
-	return err
+	return setPTYSize(master, w, h)
 }
 
 // NoPTYBackend implements Backend using provided IO streams.

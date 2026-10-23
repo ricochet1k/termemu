@@ -65,3 +65,14 @@ func TestBackendNoopWhenClosed(t *testing.T) {
 	backend := NewNoPTYBackend(io.NopCloser(strings.NewReader("")), io.Discard)
 	_ = backend.Close()
 }
+
+func TestDoneIsLockFree(t *testing.T) {
+	term := newTerminal(NewMockFrontend(), NewNoPTYBackend(nil, nil), TextReadModeGrapheme)
+	term.Lock()
+	// Calling Done while the terminal lock is held must not block (watchdog
+	// usage). The old implementation locked here and deadlocked.
+	if term.Done() == nil {
+		t.Fatal("Done returned nil")
+	}
+	term.Unlock()
+}
