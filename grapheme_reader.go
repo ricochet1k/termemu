@@ -45,12 +45,53 @@ type GraphemeReader struct {
 
 const graphemeReadBufferSize = 4096
 
+// GraphemeState is the user-space tokenizer/parser state needed to resume a
+// GraphemeReader in another process. Pending holds the bytes already read from
+// the source but not yet consumed (data[start:end]).
+type GraphemeState struct {
+	Pending        []byte
+	State          int
+	ForceMergeNext bool
+	LastWasRI      bool
+	Mode           TextReadMode
+}
+
 func NewGraphemeReader(src io.Reader) *GraphemeReader {
 	return NewGraphemeReaderWithMode(src, TextReadModeGrapheme)
 }
 
 func NewGraphemeReaderWithMode(src io.Reader, mode TextReadMode) *GraphemeReader {
 	return &GraphemeReader{src: src, state: -1, mode: mode}
+}
+
+// NewGraphemeReaderFromState creates a reader that resumes from st, including
+// any buffered bytes and tokenizer state. The src is the new underlying stream.
+func NewGraphemeReaderFromState(src io.Reader, st GraphemeState) *GraphemeReader {
+	r := &GraphemeReader{
+		src:            src,
+		state:          st.State,
+		forceMergeNext: st.ForceMergeNext,
+		lastWasRI:      st.LastWasRI,
+		mode:           st.Mode,
+	}
+	if len(st.Pending) > 0 {
+		r.data = append([]byte(nil), st.Pending...)
+		r.end = len(r.data)
+	}
+	return r
+}
+
+// SnapshotState returns a deep copy of the reader's buffered bytes and
+// tokenizer state. The receiver is not modified.
+func (r *GraphemeReader) SnapshotState() GraphemeState {
+	pending := append([]byte(nil), r.data[r.start:r.end]...)
+	return GraphemeState{
+		Pending:        pending,
+		State:          r.state,
+		ForceMergeNext: r.forceMergeNext,
+		LastWasRI:      r.lastWasRI,
+		Mode:           r.mode,
+	}
 }
 
 func (r *GraphemeReader) ReadByte() (byte, error) {

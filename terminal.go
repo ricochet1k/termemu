@@ -2,6 +2,7 @@ package termemu
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -74,6 +75,15 @@ type Terminal interface {
 	// implements io.Closer) so a blocked Read returns and the read loop
 	// exits. It is idempotent and never blocks waiting for the loop.
 	Close() error
+
+	// Pause stops the read loop, captures the user-space reader/parser
+	// state plus a snapshot and scrollback snapshot, and leaves the
+	// terminal paused. Resume continues a same-process paused loop.
+	// For a cross-process handoff, Pause then transfer the backend fds
+	// (see PTYBackend.Master/Slave) and close this terminal.
+	Pause(context.Context) (Handoff, error)
+	Resume() error
+
 	// Done is closed when the read loop exits.
 	Done() <-chan struct{}
 	// Err reports how the read loop terminated: nil for a clean EOF,
@@ -237,6 +247,14 @@ type terminal struct {
 	readLoopDone    chan struct{}
 	readLoopErr     error
 	textReadMode    TextReadMode
+
+	// Pause/Resume handshake. All fields are guarded by the terminal lock.
+	// paused is the request flag checked by the read loop; pauseReady
+	// carries the loop's ReaderState to Pause, and pauseResume carries
+	// true (resume) or false (abort/exit) back to the loop.
+	paused      bool
+	pauseReady  chan ReaderState
+	pauseResume chan bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -508,6 +526,12 @@ func (t *terminal) Resize(w, h int) error {
 }
 
 func (t *terminal) startReadLoop() {
+	t.startReadLoopFromState(ReaderState{Mode: t.textReadMode})
+}
+
+// startReadLoopFromState starts the read loop from a captured ReaderState.
+// NewWithMode uses startReadLoop; NewFromHandoff uses this directly.
+func (t *terminal) startReadLoopFromState(initial ReaderState) {
 	t.Lock()
 	started := t.readLoopStarted
 	backend := t.backend
@@ -522,7 +546,7 @@ func (t *terminal) startReadLoop() {
 	t.Unlock()
 
 	go func() {
-		err := t.ptyReadLoop()
+		err := t.ptyReadLoop(initial)
 		t.Lock()
 		// io.EOF is a clean shutdown (e.g. NoPTYBackend at end of
 		// input); report it as nil so Err() == nil on success.
@@ -541,6 +565,20 @@ func (t *terminal) startReadLoop() {
 // to wait for loop exit and Err to see how it terminated.
 func (t *terminal) Close() error {
 	t.closeOnce.Do(func() {
+		// A paused loop is parked on pauseResume. Wake it with false
+		// before closing the backend so it exits cleanly rather than
+		// surfacing the backend's closed-pipe error.
+		t.Lock()
+		paused := t.paused
+		resume := t.pauseResume
+		t.Unlock()
+		if paused && resume != nil {
+			select {
+			case resume <- false:
+			default:
+			}
+		}
+
 		if c, ok := t.backend.(io.Closer); ok {
 			t.closeErr = c.Close()
 		}

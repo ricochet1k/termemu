@@ -350,6 +350,54 @@ term.View(func(v termemu.LockedView) {
 })
 ```
 
+### Pause and process handoff
+
+`Terminal.Pause(ctx)` parks the read loop and returns a `Handoff` containing
+screen and scrollback snapshots, the terminal size, and the reader/parser
+state (bytes already read but not applied, plus any partial escape command).
+`Terminal.Resume()` continues a same-process paused loop.
+
+To move a terminal to another process, the old process pauses, sends the
+backend file descriptors, then closes/exits. The new process adopts the fds
+and creates a terminal with `NewFromHandoff`, which restores everything before
+starting the read loop:
+
+```go
+// Old process: pause, then send h and the fds (SCM_RIGHTS, cmd.ExtraFiles,
+// or your IPC of choice).
+h, err := term.Pause(ctx)
+master, slave := backend.Master(), backend.Slave() // owned by backend
+// ... transfer master/slave and h ...
+_ = term.Close() // now safe to close/exit; Resume is no longer needed
+
+// New process: wrap received fds and adopt them, then rebuild.
+backend := &termemu.PTYBackend{}
+if err := backend.Adopt(os.NewFile(masterFD, "ptmx"), os.NewFile(slaveFD, "pts")); err != nil {
+    // handle
+}
+term, err := termemu.NewFromHandoff(frontend, backend, h)
+```
+
+`PTYBackend.Master()` and `Slave()` return the owned files (`Slave()` may be
+nil after `AdoptMaster`). The sender may close its copies after transferring
+them, because the descriptor is duplicated into the receiving process.
+`NewFromHandoff` validates the backend, size, and snapshot dimensions; on a
+restore error it closes the backend. Use `AdoptMaster` when only the master is
+available (no `Attach`/reuse after that).
+
+Pause interrupts a blocked read by setting a deadline through the optional
+`SetReadDeadline` method (`PTYBackend`, `NoPTYBackend` when its reader supports
+deadlines such as `*os.File`, and `TeeBackend`). A backend that does not
+support deadlines returns `errors.ErrUnsupported`; `Pause` then waits for the
+next byte or `ctx` cancellation. Always pass a context if pause must be
+bounded.
+
+```go
+h, err := term.Pause(ctx) // leaves the loop paused
+if err != nil { /* cancelled or loop already stopped */ }
+if err := term.Resume(); err != nil { /* ... */ }
+```
+
 ### Snapshots
 
 `Snapshot()` deep-copies both screen buffers plus cursor, style, margins,
@@ -415,6 +463,12 @@ are the packed internal representation (not palette indexes), not `{}`.
 - `NewNoPTYBackend(reader, writer)` — creates a backend from provided pipes.
 - `PTYBackend.Attach(*exec.Cmd)` — wires a command into the PTY. Reusable.
 - `PTYBackend.Adopt(master, slave)` / `AdoptMaster(master)` — adopt and own an existing pty pair (slave may be nil).
+- `Terminal.Pause(ctx)` / `Terminal.Resume()` — park/capture and continue a
+  terminal's read loop, including buffered bytes and a partial escape command.
+- `NewFromHandoff(frontend, backend, handoff, opts...)` — restore a paused
+  terminal in another process (after adopting the transferred backend fds).
+- `PTYBackend.Master()/Slave()/SetReadDeadline()` — access handoff fds and
+  interrupt a blocked read for pausing.
 - `Terminal.Close()/Done()/Err()` — shut down the read loop and observe how it exited.
 - `Terminal.Scrollback()` — returns the scrollback buffer.
 - `Scrollback.Snapshot()/Restore(ScrollbackSnapshot)` — deep-copy and restore scrollback history (separate from terminal snapshots; callback-safe snapshot via `LockedScrollback.Snapshot()`).

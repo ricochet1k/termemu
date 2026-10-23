@@ -148,9 +148,9 @@ func MakeTerminalWithMock(mode TextReadMode) (io.ReadCloser, *terminal, *MockFro
 
 func (t *terminal) testFeedTerminalInputFromBackend(data []byte, mode TextReadMode) error {
 	r := bytes.NewReader(data)
-	gr := NewGraphemeReaderWithMode(r, mode)
-	for r.Len() > 0 || gr.Buffered() > 0 {
-		if err := t.ptyReadOne(gr); err != nil {
+	st := &readLoopState{gr: NewGraphemeReaderWithMode(r, mode)}
+	for r.Len() > 0 || st.gr.Buffered() > 0 || len(st.pendingCmd) > 0 {
+		if err := t.ptyReadOne(st); err != nil {
 			return err
 		}
 	}

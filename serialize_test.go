@@ -270,6 +270,52 @@ func cloneScreenForTest(s ScreenState) ScreenState {
 	return out
 }
 
+func TestHandoffSerialization(t *testing.T) {
+	reader := ReaderState{
+		Pending:        []byte{0xe2, 0x82},
+		PendingCommand: []byte("[3"),
+		State:          7,
+		ForceMergeNext: true,
+		LastWasRI:      true,
+		Mode:           TextReadModeGrapheme,
+	}
+	if got := jsonRoundTrip(t, reader); !reflect.DeepEqual(got, reader) {
+		t.Fatalf("ReaderState JSON mismatch: got %#v want %#v", got, reader)
+	}
+	if got := gobRoundTrip(t, reader); !reflect.DeepEqual(got, reader) {
+		t.Fatalf("ReaderState gob mismatch: got %#v want %#v", got, reader)
+	}
+
+	gs := GraphemeState{Pending: []byte{0xf0, 0x9f}, State: 2, ForceMergeNext: true, LastWasRI: true, Mode: TextReadModeRune}
+	if got := jsonRoundTrip(t, gs); !reflect.DeepEqual(got, gs) {
+		t.Fatalf("GraphemeState JSON mismatch: got %#v want %#v", got, gs)
+	}
+	if got := gobRoundTrip(t, gs); !reflect.DeepEqual(got, gs) {
+		t.Fatalf("GraphemeState gob mismatch: got %#v want %#v", got, gs)
+	}
+
+	h := Handoff{
+		Snapshot: Snapshot{
+			Main: ScreenState{Width: 3, Height: 1},
+			Alt:  ScreenState{Width: 3, Height: 1},
+		},
+		Scrollback: ScrollbackSnapshot{
+			Rows: []Row{{Spans: []Span{{Text: "x", Width: 1}}, Width: 1, ID: 1}},
+			Base: 1,
+			Next: 2,
+		},
+		Reader:   reader,
+		Size:     Pos{X: 3, Y: 1},
+		TextMode: TextReadModeGrapheme,
+	}
+	if got := jsonRoundTrip(t, h); !reflect.DeepEqual(got, h) {
+		t.Fatalf("Handoff JSON mismatch: got %#v want %#v", got, h)
+	}
+	if got := gobRoundTrip(t, h); !reflect.DeepEqual(got, h) {
+		t.Fatalf("Handoff gob mismatch: got %#v want %#v", got, h)
+	}
+}
+
 func TestSnapshotSerializationFromTerminal(t *testing.T) {
 	_, term, _ := MakeTerminalWithMock(TextReadModeGrapheme)
 

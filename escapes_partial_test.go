@@ -175,7 +175,7 @@ func TestReadEscapeCommand(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := bytes.NewReader([]byte(tc.in))
-			cmd, err := readEscapeCommand(r)
+			cmd, err := readEscapeCommand(r, nil)
 			if err != nil {
 				t.Fatalf("readEscapeCommand(%q): %v", tc.in, err)
 			}

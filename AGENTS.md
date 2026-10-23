@@ -29,15 +29,18 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
 - `backend.go` holds `Backend`, `PTYBackend`, `NoPTYBackend`, `TeeBackend`.
   `backend_unix.go` / `backend_other.go` hold `setControllingTTY` (the only
   platform-specific child-session setup).
-- `terminal.go` (coordinator + scrollback wiring), `screen.go` (the only
-  screen implementation), `scrollback.go` (scrollback ring buffer + reflow),
-  `escapes.go` (ANSI parser), `style.go` (colors/modes), `keys.go` (input
-  encoding), `tty_frontend.go` (ANSI renderer frontend).
+- `terminal.go` (coordinator + scrollback wiring), `handoff.go` (Pause/
+  Resume/NewFromHandoff and reader state), `screen.go` (the only screen
+  implementation), `scrollback.go` (scrollback ring buffer + reflow),
+  `escapes.go` (ANSI parser), `grapheme_reader.go` (grapheme tokenizer),
+  `style.go` (colors/modes), `keys.go` (input encoding), `tty_frontend.go`
+  (ANSI renderer frontend).
 - `serialize_test.go` covers JSON/gob round-trips for the public value types.
 
 ## Serialization
 All public value types (`Style`, `Span`, `Line`, `Region`, `Pos`, `Row`,
-`ScrollbackSnapshot`, `ScreenState`, `Snapshot`) round-trip through
+`ScrollbackSnapshot`, `ScreenState`, `Snapshot`, `ReaderState`, `Handoff`)
+round-trip through
 `encoding/json` and `encoding/gob`. `Style` and `keyboardMode` implement
 custom `MarshalJSON`/`UnmarshalJSON` and `GobEncode`/`GobDecode` over exported
 shadow structs, so `Snapshot.KeyboardMain/KeyboardAlt` serialize even though
@@ -46,6 +49,34 @@ their type is unexported. `Style` encodes its three packed uint32 components
 representation, not palette indexes. Keep the in-memory layout unchanged when
 touching these types, and extend `serialize_test.go` when adding new public
 value types or fields.
+
+## Pause and process handoff
+`Terminal.Pause(ctx)` parks the read loop, snapshots the reader/parser state
+(`ReaderState`), the screen (`Snapshot`), and scrollback, and returns a
+`Handoff`. `Resume()` continues the same-process loop. A new process adopts the
+backend fds (`PTYBackend.Master()`/`Slave()` transferred with SCM_RIGHTS or
+`cmd.ExtraFiles`), wraps them with `Adopt`/`AdoptMaster`, and calls
+`NewFromHandoff`, which creates the terminal without reading, resizes/restores
+snapshot + scrollback, then starts the loop from `ReaderState` (buffered bytes
+and partial ESC command included). The old process pauses, sends the fds, then
+closes/exits; the sender may close its copies after transfer because the fd is
+duplicated into the receiver.
+
+`GraphemeReader` buffers, so `ptyReadLoop` passes the backend directly (no
+`bufio.Reader` read-ahead). `GraphemeState` / `GraphemeReader.SnapshotState` /
+`NewGraphemeReaderFromState` preserve the tokenizer buffer and state.
+`readEscapeCommand(r, partial)` replays a partial command before reading more
+and returns consumed bytes on error. `readLoopState` holds the reader plus
+`pendingCmd`; `ptyReadLoop` starts from a `ReaderState` and continues a
+pending command before normal reads.
+
+Pause sets a read deadline through the optional `SetReadDeadline` method so a
+blocked read wakes immediately; the loop recognizes `os.ErrDeadlineExceeded`
+while paused and parks instead of exiting. `PTYBackend`, `NoPTYBackend` (when
+its reader supports deadlines), and `TeeBackend` implement it. A backend that
+returns `errors.ErrUnsupported` cannot interrupt a blocked read, so `Pause`
+waits for the next byte or ctx cancellation. `Close` wakes a paused loop with
+an abort signal before closing the backend so `Done()` still closes cleanly.
 
 ## Build, lint, and test commands
 Use these exact commands unless the user asks otherwise.
@@ -294,11 +325,14 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   before rows scroll off the top, passing the lost rows and their wrapped flags
 
 **Escape Sequence Parsing** (escapes.go):
-- `ptyReadLoop()` reads from backend via `GraphemeReader`
-- `ptyReadOne()` buffers one complete ESC command with `readEscapeCommand`
-  *before* taking the terminal lock, then dispatches `handleCommand` from an
-  in-memory `bytes.Reader`. A child that stops mid-sequence therefore never
-  blocks `Snapshot`/`Restore` (or any other lock user) on backend I/O.
+- `ptyReadLoop(ReaderState)` reads from backend via `GraphemeReader`; it starts
+  from captured state and first continues `pendingCmd` when present
+- `ptyReadOne(readLoopState)` buffers one complete ESC command with
+  `readEscapeCommand` *before* taking the terminal lock, then dispatches
+  `handleCommand` from an in-memory `bytes.Reader`. A child that stops
+  mid-sequence therefore never blocks `Snapshot`/`Restore` (or any other lock
+  user) on backend I/O. On an ESC read error the bytes consumed so far are
+  stored in `pendingCmd` for pause/handoff resume.
 - Distinguishes printable text runs from control codes
 - Parses CSI sequences (cursor movement, SGR colors, screen manipulation)
 - Parses OSC sequences: 0/2 window title, 6/7 working directory
@@ -322,6 +356,8 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Two modes: `TextReadModeRune` (1 rune = 1 token) or `TextReadModeGrapheme` (1 grapheme cluster = 1 token)
 - Handles combining characters, zero-width joiners, emoji sequences
 - Returns merge tokens for combining chars that should merge into previous cell
+- `GraphemeState` + `SnapshotState`/`NewGraphemeReaderFromState` capture and
+  restore the buffer and tokenizer state for pause/handoff
 
 **Line Representation** (line.go):
 - `Line` holds `[]Span` for external API access

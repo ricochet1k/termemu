@@ -403,6 +403,36 @@ func (p *PTYBackend) Write(b []byte) (int, error) {
 	return master.Write(b)
 }
 
+// Master returns the pty master file. The backend still owns it; do not
+// close it while handing it off. It returns nil if the pty cannot be opened
+// (for example after Close).
+func (p *PTYBackend) Master() *os.File {
+	master, err := p.masterFile()
+	if err != nil {
+		return nil
+	}
+	return master
+}
+
+// Slave returns the pty slave file, or nil when the backend was adopted with
+// only a master (see AdoptMaster). The backend still owns it; do not close it
+// while handing it off.
+func (p *PTYBackend) Slave() *os.File {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.slave
+}
+
+// SetReadDeadline sets a read deadline on the pty master. It is used by
+// Terminal.Pause to interrupt a blocked read.
+func (p *PTYBackend) SetReadDeadline(t time.Time) error {
+	master, err := p.masterFile()
+	if err != nil {
+		return err
+	}
+	return master.SetReadDeadline(t)
+}
+
 func (p *PTYBackend) SetSize(w, h int) error {
 	master, err := p.masterFile()
 	if err != nil {
@@ -443,6 +473,20 @@ func (b *NoPTYBackend) Write(p []byte) (int, error) {
 
 func (b *NoPTYBackend) SetSize(w, h int) error {
 	return nil
+}
+
+// SetReadDeadline forwards to the underlying reader when it supports
+// deadlines (for example *os.File or an os.Pipe). Otherwise it returns
+// errors.ErrUnsupported. Terminal.Pause then cannot interrupt a blocked read
+// until the next byte arrives.
+func (b *NoPTYBackend) SetReadDeadline(t time.Time) error {
+	if b.r == nil {
+		return errors.ErrUnsupported
+	}
+	if d, ok := b.r.(interface{ SetReadDeadline(time.Time) error }); ok {
+		return d.SetReadDeadline(t)
+	}
+	return errors.ErrUnsupported
 }
 
 func (b *NoPTYBackend) Close() error {
@@ -500,6 +544,14 @@ func (t *TeeBackend) Write(p []byte) (int, error) {
 
 func (t *TeeBackend) SetSize(w, h int) error {
 	return t.backend.SetSize(w, h)
+}
+
+// SetReadDeadline forwards to the wrapped backend when it supports deadlines.
+func (t *TeeBackend) SetReadDeadline(d time.Time) error {
+	if sb, ok := t.backend.(interface{ SetReadDeadline(time.Time) error }); ok {
+		return sb.SetReadDeadline(d)
+	}
+	return errors.ErrUnsupported
 }
 
 // Close forwards to the wrapped backend when it implements io.Closer.

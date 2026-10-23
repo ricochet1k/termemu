@@ -1,12 +1,12 @@
 package termemu
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -49,19 +49,77 @@ func (t *terminal) writeReply(b []byte) error {
 
 // ptyReadLoop consumes backend output until a read fails, then reports the
 // terminal error: the first read error encountered. The caller normalizes
-// io.EOF to nil (clean shutdown).
-func (t *terminal) ptyReadLoop() error {
-	reader := bufio.NewReader(t.backend)
-	gr := NewGraphemeReaderWithMode(reader, t.textReadMode)
+// io.EOF to nil (clean shutdown). It starts from a previously captured reader
+// state so a paused loop (or a new process) can resume mid-command.
+func (t *terminal) ptyReadLoop(initial ReaderState) error {
+	state := newReadLoopState(t.backend, initial)
 
 	for {
-		if err := t.ptyReadOne(gr); err != nil {
+		if t.shouldPause() {
+			if !t.pauseLoop(state.snapshot()) {
+				return nil
+			}
+		}
+
+		var err error
+		if len(state.pendingCmd) > 0 {
+			err = t.continueEscapeCommand(state)
+		} else {
+			err = t.ptyReadOne(state)
+		}
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				if t.isPaused() {
+					// A deadline fired to wake the loop for Pause. The
+					// partial state is already recorded; park at the top.
+					continue
+				}
+				// A cancelled Pause may have cleared the pause flag
+				// just before the blocked read observed the deadline.
+				// Clearing the deadline and retrying keeps the loop
+				// alive instead of exiting on our own wakeup.
+				t.clearReadDeadline()
+				continue
+			}
 			return err
 		}
 	}
 }
 
-func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
+// readLoopState is the user-space read-loop state that survives a pause.
+type readLoopState struct {
+	gr         *GraphemeReader
+	pendingCmd []byte
+}
+
+func newReadLoopState(src io.Reader, st ReaderState) *readLoopState {
+	gs := GraphemeState{
+		Pending:        st.Pending,
+		State:          st.State,
+		ForceMergeNext: st.ForceMergeNext,
+		LastWasRI:      st.LastWasRI,
+		Mode:           st.Mode,
+	}
+	return &readLoopState{
+		gr:         NewGraphemeReaderFromState(src, gs),
+		pendingCmd: append([]byte(nil), st.PendingCommand...),
+	}
+}
+
+func (s *readLoopState) snapshot() ReaderState {
+	gs := s.gr.SnapshotState()
+	return ReaderState{
+		Pending:        gs.Pending,
+		PendingCommand: append([]byte(nil), s.pendingCmd...),
+		State:          gs.State,
+		ForceMergeNext: gs.ForceMergeNext,
+		LastWasRI:      gs.LastWasRI,
+		Mode:           gs.Mode,
+	}
+}
+
+func (t *terminal) ptyReadOne(state *readLoopState) error {
+	gr := state.gr
 	bw, useBytes := t.screen().(interface {
 		writeString(string, int, bool, TextReadMode)
 	})
@@ -173,24 +231,21 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 		// parses from memory, so a child that stops mid-sequence cannot
 		// block Snapshot/Restore (which need the lock) behind a pending
 		// ReadByte on the backend.
-		cmd, err := readEscapeCommand(gr)
+		cmd, err := readEscapeCommand(gr, nil)
 		if err != nil {
+			if len(cmd) == 0 {
+				// The ESC itself was already consumed; remember it so a
+				// resumed loop can continue the command.
+				cmd = []byte{0x1b}
+			}
+			state.pendingCmd = append([]byte(nil), cmd...)
 			if err != io.EOF {
 				debugPrintln(debugErrors, "ERR readEscapeCommand:", err)
 			}
 			return err
 		}
 
-		t.withLock(func() {
-			success := t.handleCommand(bytes.NewReader(cmd))
-			if *debugCmd || *debugTodo {
-				if success {
-					debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
-				} else {
-					debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
-				}
-			}
-		})
+		t.dispatchEscapeCommand(cmd)
 
 	case 127: // DEL  Delete Character (treat as backspace)
 		t.withLock(func() {
@@ -202,23 +257,65 @@ func (t *terminal) ptyReadOne(gr *GraphemeReader) error {
 	return nil
 }
 
+// continueEscapeCommand resumes an ESC-initiated command from state.pendingCmd.
+// It is called at the top of ptyReadLoop before normal reads.
+func (t *terminal) continueEscapeCommand(state *readLoopState) error {
+	cmd, err := readEscapeCommand(state.gr, state.pendingCmd)
+	if err != nil {
+		state.pendingCmd = append([]byte(nil), cmd...)
+		if len(state.pendingCmd) == 0 {
+			state.pendingCmd = []byte{0x1b}
+		}
+		return err
+	}
+	state.pendingCmd = nil
+	t.dispatchEscapeCommand(cmd)
+	return nil
+}
+
+// dispatchEscapeCommand applies a complete ESC-initiated command under the
+// terminal lock.
+func (t *terminal) dispatchEscapeCommand(cmd []byte) {
+	t.withLock(func() {
+		success := t.handleCommand(bytes.NewReader(cmd))
+		if *debugCmd || *debugTodo {
+			if success {
+				debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
+			} else {
+				debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
+			}
+		}
+	})
+}
+
 type escapeReader interface {
 	ReadByte() (byte, error)
 }
 
-// readEscapeCommand reads one complete ESC-initiated command from r, whose
-// leading ESC has already been consumed. It returns the command bytes (not
-// including the ESC) so the caller can dispatch them under the terminal lock
-// from an in-memory reader instead of blocking on backend I/O while locked.
+// readEscapeCommand reads one complete ESC-initiated command, whose leading
+// ESC has already been consumed. partial holds bytes that were consumed before
+// a pause; they are replayed first through the same CSI/OSC/DCS/two-byte
+// logic. On error it returns the bytes consumed so far (including partial) so
+// the caller can store them and resume later.
 //
 // CSI commands end at a final byte in 0x40-0x7E. OSC, DCS, APC, PM and SOS
 // strings end at ST (ESC \\ or 0x9C) or BEL, honoring UTF-8 continuation bytes.
 // Two-byte commands consume their argument, and everything else is a single
 // command byte. The bytes are buffered even when debugging is off; the debug
 // capture uses the returned slice directly.
-func readEscapeCommand(r escapeReader) ([]byte, error) {
-	var buf []byte
+func readEscapeCommand(r escapeReader, partial []byte) ([]byte, error) {
+	// A lone ESC is stored as a sentinel when no command byte was read yet.
+	if len(partial) > 0 && partial[0] == 0x1b {
+		partial = partial[1:]
+	}
+	buf := append([]byte(nil), partial...)
+	replay := 0
 	read := func() (byte, error) {
+		if replay < len(partial) {
+			b := partial[replay]
+			replay++
+			return b, nil
+		}
 		b, err := r.ReadByte()
 		if err == nil {
 			buf = append(buf, b)
@@ -228,7 +325,7 @@ func readEscapeCommand(r escapeReader) ([]byte, error) {
 
 	b, err := read()
 	if err != nil {
-		return nil, err
+		return buf, err
 	}
 
 	switch b {
