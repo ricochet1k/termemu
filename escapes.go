@@ -96,6 +96,7 @@ func newReadLoopState(src io.Reader, st ReaderState) *readLoopState {
 	gs := GraphemeState{
 		Pending:        st.Pending,
 		State:          st.State,
+		Initial:        st.Initial,
 		ForceMergeNext: st.ForceMergeNext,
 		LastWasRI:      st.LastWasRI,
 		Mode:           st.Mode,
@@ -112,6 +113,7 @@ func (s *readLoopState) snapshot() ReaderState {
 		Pending:        gs.Pending,
 		PendingCommand: append([]byte(nil), s.pendingCmd...),
 		State:          gs.State,
+		Initial:        gs.Initial,
 		ForceMergeNext: gs.ForceMergeNext,
 		LastWasRI:      gs.LastWasRI,
 		Mode:           gs.Mode,

@@ -5,6 +5,7 @@ package termemu
 import (
 	"context"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -172,4 +173,50 @@ func TestHandoffAcrossBackends(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func pauseResumeGrapheme(t *testing.T, first, rest, want string) {
+	t.Helper()
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	term := NewWithMode(NewMockFrontend(), NewNoPTYBackend(pr, nil), TextReadModeGrapheme)
+	_ = term.Resize(20, 3)
+	defer func() { _ = term.Close() }()
+	if _, err := pw.Write([]byte(first)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := term.Pause(ctx); err != nil {
+		t.Fatalf("Pause after %q: %v", first, err)
+	}
+	if err := term.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.Write([]byte(rest)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		line := strings.TrimRight(term.Line(0), " ")
+		if line == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after %q + %q got %q, want %q", first, rest, line, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestPauseResumeGraphemeBoundaries(t *testing.T) {
+	pauseResumeGrapheme(t, "👨\u200d", "👩\u200d👧", "👨\u200d👩\u200d👧")
+	pauseResumeGrapheme(t, "👨\u200d👩", "\u200d👧", "👨\u200d👩\u200d👧")
+	pauseResumeGrapheme(t, "🇺", "🇸", "🇺🇸")
+	pauseResumeGrapheme(t, "e", "\u0301", "e\u0301")
+	pauseResumeGrapheme(t, "👍", "🏽", "👍🏽")
+	pauseResumeGrapheme(t, "1", "\ufe0f\u20e3", "1\ufe0f\u20e3")
 }

@@ -18,6 +18,9 @@ type ReaderState struct {
 	Pending        []byte // GraphemeReader buffered bytes (data[start:end])
 	PendingCommand []byte // partial ESC-initiated command (ESC already consumed)
 	State          int    // GraphemeReader UTF-8/grapheme state
+	// Initial marks a reader that has not processed any bytes yet; State is
+	// then ignored and the reader starts from the tokenizer's initial state.
+	Initial        bool
 	ForceMergeNext bool
 	LastWasRI      bool
 	Mode           TextReadMode
@@ -68,7 +71,7 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 	t.Unlock()
 
 	if !started {
-		return t.captureHandoff(ReaderState{Mode: mode})
+		return t.captureHandoff(ReaderState{Mode: mode, Initial: true})
 	}
 
 	if setter, ok := backend.(interface{ SetReadDeadline(time.Time) error }); ok {

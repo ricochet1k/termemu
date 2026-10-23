@@ -526,7 +526,7 @@ func (t *terminal) Resize(w, h int) error {
 }
 
 func (t *terminal) startReadLoop() {
-	t.startReadLoopFromState(ReaderState{Mode: t.textReadMode})
+	t.startReadLoopFromState(ReaderState{Mode: t.textReadMode, Initial: true})
 }
 
 // startReadLoopFromState starts the read loop from a captured ReaderState.

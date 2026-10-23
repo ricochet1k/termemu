@@ -49,8 +49,12 @@ const graphemeReadBufferSize = 4096
 // GraphemeReader in another process. Pending holds the bytes already read from
 // the source but not yet consumed (data[start:end]).
 type GraphemeState struct {
-	Pending        []byte
-	State          int
+	Pending []byte
+	State   int
+	// Initial is true when State has not been set yet; the reader then
+	// starts from the tokenizer's initial state (-1) instead of state 0,
+	// which would incorrectly continue a previous grapheme.
+	Initial        bool
 	ForceMergeNext bool
 	LastWasRI      bool
 	Mode           TextReadMode
@@ -67,9 +71,13 @@ func NewGraphemeReaderWithMode(src io.Reader, mode TextReadMode) *GraphemeReader
 // NewGraphemeReaderFromState creates a reader that resumes from st, including
 // any buffered bytes and tokenizer state. The src is the new underlying stream.
 func NewGraphemeReaderFromState(src io.Reader, st GraphemeState) *GraphemeReader {
+	state := st.State
+	if st.Initial {
+		state = -1
+	}
 	r := &GraphemeReader{
 		src:            src,
-		state:          st.State,
+		state:          state,
 		forceMergeNext: st.ForceMergeNext,
 		lastWasRI:      st.LastWasRI,
 		mode:           st.Mode,
@@ -88,6 +96,7 @@ func (r *GraphemeReader) SnapshotState() GraphemeState {
 	return GraphemeState{
 		Pending:        pending,
 		State:          r.state,
+		Initial:        r.state == -1,
 		ForceMergeNext: r.forceMergeNext,
 		LastWasRI:      r.lastWasRI,
 		Mode:           r.mode,
@@ -349,6 +358,11 @@ func stepRuneCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if size == 0 {
 		return nil, 0, 0, state, false
 	}
+	if r == utf8.RuneError && size == 1 {
+		// Invalid UTF-8 is rendered as a replacement character rather than
+		// stored as raw bytes.
+		return []byte("\ufffd"), size, 1, state, true
+	}
 	// Calculate the actual display width (e.g., emoji = 2, normal char = 1).
 	// Zero-width runes stay zero so the reader can merge them into the
 	// previous cell instead of giving them a cell of their own.
@@ -432,7 +446,27 @@ func nextRuneTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI boo
 	// (combining marks, VS16, ZWJ, modifiers, and the second half of a
 	// regional-indicator pair) attach to the previous cell.
 	merge := width == 0
-	return cluster, consumed, width, merge, newState, forceMergeNext, lastWasRI, true
+	nextForceMergeNext := forceMergeNext
+	if nextForceMergeNext {
+		merge = true
+		width = 0
+		nextForceMergeNext = false
+	}
+	if len(cluster) > 0 {
+		r, _ := utf8.DecodeRune(cluster)
+		switch {
+		case r == '\u200d':
+			// The joiner itself is zero-width and glues the next rune to
+			// the same cell, so a ZWJ family stays 2 cells in rune mode.
+			merge = true
+			width = 0
+			nextForceMergeNext = true
+		case r == '\ufe0f' || r == '\u20e3' || (r >= 0x1f3fb && r <= 0x1f3ff):
+			merge = true
+			width = 0
+		}
+	}
+	return cluster, consumed, width, merge, newState, nextForceMergeNext, lastWasRI, true
 }
 
 func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool) ([]byte, int, int, bool, int, bool, bool, bool) {
@@ -468,10 +502,42 @@ func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI
 		nextLastWasRI = false
 	}
 
+	// A cluster with no advance and any cluster that starts with a
+	// continuation rune (ZWJ, variation selector, combining mark, emoji
+	// modifier, keycap, tag) is part of the preceding grapheme, which can
+	// happen when a cluster is split across reads or a pause/resume. Merge
+	// it into the previous cell instead of giving it a cell of its own.
+	if width == 0 || startsWithGraphemeContinuation(cluster) {
+		merge = true
+	}
 	if merge {
 		width = 0
 	}
 	return cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, true
+}
+
+// startsWithGraphemeContinuation reports whether the first rune of cluster is
+// a code point that can extend the preceding grapheme.
+func startsWithGraphemeContinuation(cluster []byte) bool {
+	if len(cluster) == 0 {
+		return false
+	}
+	r, _ := utf8.DecodeRune(cluster)
+	switch {
+	case r == '\u200d': // ZWJ
+		return true
+	case r >= 0xfe00 && r <= 0xfe0f, r >= 0xe0100 && r <= 0xe01ef: // VS1-16
+		return true
+	case r >= 0x1f3fb && r <= 0x1f3ff: // emoji modifiers
+		return true
+	case r == 0x20e3: // combining enclosing keycap
+		return true
+	case r >= 0xe0020 && r <= 0xe007f: // emoji tag sequences
+		return true
+	case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Mc, r):
+		return true
+	}
+	return false
 }
 
 func isCombiningOnly(b []byte) bool {

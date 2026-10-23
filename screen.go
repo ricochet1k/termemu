@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 )
 
 type screen interface {
@@ -392,6 +393,9 @@ func (s *spanScreen) writeTokens(tokens []GraphemeToken) {
 func (s *spanScreen) writeString(text string, width int, merge bool, mode TextReadMode) {
 	if len(text) == 0 {
 		return
+	}
+	if !utf8.ValidString(text) {
+		text = strings.ToValidUTF8(text, "\ufffd")
 	}
 	s.textMode = mode
 	if merge {
@@ -1213,6 +1217,9 @@ func truncateLine(line *spanLine, width int, mode TextReadMode) {
 }
 
 func (s *spanScreen) mergeIntoPreviousCell(text string) {
+	if !utf8.ValidString(text) {
+		text = strings.ToValidUTF8(text, "\ufffd")
+	}
 	y := s.cursorPos.Y
 	line := &s.lines[y]
 	cell := s.cursorPos.X - 1
@@ -1261,15 +1268,44 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 		copy(line.spans[idx+2:], line.spans[idx+1:])
 		line.spans[idx+1] = Span{Style: s.style, Text: text, Width: 0, Link: s.link}
 	} else {
-		// Convert repeat to text if needed and merge
-		if sp.Text == "" {
-			sp.Text = strings.Repeat(" ", sp.Width)
+		// Convert repeat to text if needed and merge.
+		base := sp.Text
+		if base == "" {
+			base = strings.Repeat(" ", sp.Width)
 		}
-		sp.Text += text
-		// Width doesn't change for merge
+		// A variation selector / keycap / emoji modifier can turn a
+		// one-cell base into a two-cell emoji presentation. Widen the
+		// cell and consume the following column (or skip the widening at
+		// the right edge).
+		if sp.Width == 1 && emojiPresentationAdding(text) && cell+2 <= s.size.X && !s.pendingWrap {
+			widened := Span{Style: sp.Style, Text: base + text, Width: 2, Link: sp.Link}
+			replaceRange(line, cell, 2, widened, s.textMode)
+			if s.cursorPos.X == cell+1 {
+				s.cursorPos.X++
+				s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
+			}
+			s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: cell, X2: cell + 2}, CRText)
+			return
+		}
+		sp.Text = base + text
+		// Width doesn't change for an ordinary merge.
 	}
 
 	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: cell, X2: cell + 1}, CRText)
+}
+
+// emojiPresentationAdding reports whether text contains a code point that can
+// turn a one-cell base into a two-cell emoji presentation.
+func emojiPresentationAdding(text string) bool {
+	for _, r := range text {
+		switch {
+		case r == 0xfe0f, r == 0x20e3:
+			return true
+		case r >= 0x1f3fb && r <= 0x1f3ff:
+			return true
+		}
+	}
+	return false
 }
 
 func max(a, b int) int {
