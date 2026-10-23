@@ -232,6 +232,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   `io.EOF` (Darwin) from the master as "current child exited", waiting for
   the next `Attach`; `NoPTYBackend` EOF stays terminal. `PID()` and `Wait()`
   expose the most recently attached command (never also call `cmd.Wait()`).
+  `Adopt(master, slave)` / `AdoptMaster(master)` take ownership of an existing
+  pty pair before use; `slave` may be nil (then `Open`/`Attach` error and
+  `Read` surfaces EOF/EIO instead of waiting for reuse). Use
+  `os.NewFile(fd, "pts")` for raw fds. Adopt rejects a nil master, a closed
+  backend, or one that already has a pty.
 - `NoPTYBackend`: Pipes for non-PTY environments (EOF is terminal; still
   ends the read loop cleanly with `Err() == nil`)
 - `TeeBackend`: Wraps a backend to duplicate reads (`Close` forwards)
@@ -248,6 +253,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   `ErrSnapshotSizeMismatch` without changing anything if the snapshot size
   differs from the current terminal size (it never resizes implicitly).
   Scrollback is untouched by both methods.
+- Callback-safe variants: `LockedView.Snapshot()` and
+  `LockedScrollback.Snapshot()` do not lock (zero views return empty
+  snapshots). `Terminal.Snapshot` / `*Scrollback.Snapshot` lock and must not be
+  called from a Frontend callback or `View`. There is no view Restore
+  variant; the view is read-only.
 - Handles keyboard input via `SendKey()`
 - Lifecycle: `Close()` closes the backend so the read loop exits (idempotent,
   never blocks); `Done()` closes on loop exit; `Err()` reports the loop error
@@ -346,7 +356,8 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   independently of `Terminal.Snapshot`/`Restore` (which exclude scrollback).
   Restore preserves `Base`/`Next` IDs, keeps only the newest rows when the
   snapshot exceeds capacity, and returns `ErrScrollbackSnapshotInvalid` for
-  malformed input.
+  malformed input. The no-lock `LockedScrollback.Snapshot()` is the
+  callback-safe snapshot entry point.
 - `MovePos` moves by *stored* physical rows, not reflown rows.
 - `Row`/`LogicalLine` return copies of the stored span slices (public API
   hands out copies; internal hot paths never copy).

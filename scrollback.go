@@ -74,7 +74,9 @@ type Scrollback struct {
 // LockedScrollback is the no-lock counterpart of *Scrollback, obtained from
 // LockedView.Scrollback. It is valid only for the duration of the callback
 // or View that produced the view. Its methods do not lock, so they are safe
-// to call from a Frontend callback (unlike *Scrollback methods).
+// to call from a Frontend callback (unlike *Scrollback methods). Its
+// Snapshot is the callback-safe snapshot entry point; *Scrollback.Snapshot
+// is for ordinary code.
 type LockedScrollback struct {
 	t *terminal
 }
@@ -112,6 +114,16 @@ func (s LockedScrollback) MovePos(pos ScrollPos, delta int) ScrollPos {
 	return s.scrollback().movePosLocked(pos, delta)
 }
 
+// Snapshot returns a deep copy of every stored row without taking the
+// terminal lock. It is the callback-safe counterpart of *Scrollback.Snapshot.
+// A LockedScrollback with no terminal returns an empty snapshot.
+func (s LockedScrollback) Snapshot() ScrollbackSnapshot {
+	if s.t == nil {
+		return ScrollbackSnapshot{}
+	}
+	return s.scrollback().scrollbackSnapshotLocked()
+}
+
 // Range returns the IDs of the oldest and next-to-be-assigned rows.
 // Valid IDs satisfy base <= id < next.
 func (s *Scrollback) Range() (base, next ScrollID) {
@@ -147,20 +159,27 @@ func (s *Scrollback) Clear() {
 func (s *Scrollback) Snapshot() ScrollbackSnapshot {
 	var snap ScrollbackSnapshot
 	s.t.withLock(func() {
-		n := len(s.t.scrollRows)
-		snap.Rows = make([]Row, n)
-		for i := 0; i < n; i++ {
-			r := s.t.scrollRows[(s.t.scrollBaseIdx+i)%n]
-			snap.Rows[i] = Row{
-				Spans:   copySpans(r.spans),
-				Width:   r.width,
-				Wrapped: r.wrapped,
-				ID:      r.id,
-			}
-		}
-		snap.Base = s.scrollBaseIDLocked()
-		snap.Next = s.t.scrollNextID
+		snap = s.scrollbackSnapshotLocked()
 	})
+	return snap
+}
+
+// scrollbackSnapshotLocked implements Snapshot with t.Lock held.
+func (s *Scrollback) scrollbackSnapshotLocked() ScrollbackSnapshot {
+	var snap ScrollbackSnapshot
+	n := len(s.t.scrollRows)
+	snap.Rows = make([]Row, n)
+	for i := 0; i < n; i++ {
+		r := s.t.scrollRows[(s.t.scrollBaseIdx+i)%n]
+		snap.Rows[i] = Row{
+			Spans:   copySpans(r.spans),
+			Width:   r.width,
+			Wrapped: r.wrapped,
+			ID:      r.id,
+		}
+	}
+	snap.Base = s.scrollBaseIDLocked()
+	snap.Next = s.t.scrollNextID
 	return snap
 }
 

@@ -211,6 +211,34 @@ backend.Attach(cmd2)
 cmd2.Start()
 ```
 
+### Adopting an existing pty
+
+If something else already opened the pty pair, hand it to the backend with
+`Adopt` (or `AdoptMaster`). The backend takes ownership of the files it is
+given: `Close` (also via `Terminal.Close`) closes them. Call `Adopt` before
+constructing the Terminal or opening the backend.
+
+```go
+master, slave := existingFiles() // both are *os.File
+backend := &termemu.PTYBackend{}
+if err := backend.Adopt(master, slave); err != nil {
+    // nil master, closed/already-open backend, or already has a pty
+}
+term := termemu.New(&termemu.EmptyFrontend{}, backend)
+
+// Raw file descriptors can be wrapped as files first:
+slave := os.NewFile(uintptr(fd), "pts")
+_ = backend.Adopt(master, slave)
+// Master only (no Attach; Read surfaces EOF/EIO instead of reuse):
+_ = backend.AdoptMaster(master)
+```
+
+With `slave == nil` (from `AdoptMaster`), `Open` and `Attach` return an error
+because there is no slave to attach a command to. `Read` then does a plain
+master read and surfaces EOF/EIO so the read loop can exit; it does not wait
+for reuse. `Write`, `SetSize`, `Close`, `PID`, and `Wait` behave as usual
+(`PID` is 0 and `Wait` errors since no command was attached).
+
 ### Scrollback
 
 ```go
@@ -247,7 +275,10 @@ ScrollIDs are monotonic across `Clear` (no ID is ever reused). Do not call
 `Terminal.Scrollback` methods from inside a `Frontend` callback (deadlock:
 callbacks already hold the terminal lock). Inside a callback use
 `v.Scrollback()`, which returns the no-lock `LockedScrollback`
-(`Range`, `Row`, `LogicalLine`, `MovePos`, `Len`).
+(`Range`, `Row`, `LogicalLine`, `MovePos`, `Len`). From a callback, use
+`v.Snapshot()` and `v.Scrollback().Snapshot()` for deep copies;
+`Terminal.Snapshot` and `*Scrollback.Snapshot` lock and would deadlock
+there.
 
 To avoid polling, implement the optional `termemu.ScrollbackListener`
 extension on your frontend. It is called once per capture batch, with the
@@ -328,6 +359,11 @@ included. `Restore()` is same-size only (it returns
 `ErrSnapshotSizeMismatch` and leaves the terminal untouched otherwise) and
 emits a full-screen `RegionChanged` with `CRRestore` so frontends repaint.
 
+From a `Frontend` callback or inside `Terminal.View`, use `v.Snapshot()` and
+`v.Scrollback().Snapshot()` instead: they are the no-lock variants of
+`Terminal.Snapshot()` and `Scrollback.Snapshot()`. `Restore` has no view
+variant (the view is read-only).
+
 ```go
 snap := term.Snapshot()
 // ... run more output or otherwise mutate the screen ...
@@ -378,10 +414,11 @@ are the packed internal representation (not palette indexes), not `{}`.
 - `New(frontend, backend)` — shorthand for `NewWithMode(…, TextReadModeGrapheme)`.
 - `NewNoPTYBackend(reader, writer)` — creates a backend from provided pipes.
 - `PTYBackend.Attach(*exec.Cmd)` — wires a command into the PTY. Reusable.
+- `PTYBackend.Adopt(master, slave)` / `AdoptMaster(master)` — adopt and own an existing pty pair (slave may be nil).
 - `Terminal.Close()/Done()/Err()` — shut down the read loop and observe how it exited.
 - `Terminal.Scrollback()` — returns the scrollback buffer.
-- `Scrollback.Snapshot()/Restore(ScrollbackSnapshot)` — deep-copy and restore scrollback history (separate from terminal snapshots).
-- `Terminal.Snapshot()/Restore(Snapshot)` — deep-copy and restore terminal screen state (same size only; scrollback excluded).
+- `Scrollback.Snapshot()/Restore(ScrollbackSnapshot)` — deep-copy and restore scrollback history (separate from terminal snapshots; callback-safe snapshot via `LockedScrollback.Snapshot()`).
+- `Terminal.Snapshot()/Restore(Snapshot)` — deep-copy and restore terminal screen state (same size only; scrollback excluded; callback-safe snapshot via `LockedView.Snapshot()`).
 - `PrintTerminal(t Terminal)` / `PrintTerminalTo(w, t)` — debug printing of screen contents.
 - `NewTTYFrontend(out)` — terminal frontend that writes ANSI to output.
 

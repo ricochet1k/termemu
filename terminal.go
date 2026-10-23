@@ -58,9 +58,10 @@ type Terminal interface {
 	Scrollback() *Scrollback
 
 	// Snapshot returns a deep copy of the terminal's screen state. It
-	// locks internally. The scrollback buffer and backend/process state
-	// are not included. Mutating the returned Snapshot does not affect
-	// the terminal, and vice versa.
+	// locks internally, so it must not be called from inside View or a
+	// Frontend callback (use LockedView.Snapshot there). The scrollback
+	// buffer and backend/process state are not included. Mutating the
+	// returned Snapshot does not affect the terminal, and vice versa.
 	Snapshot() Snapshot
 	// Restore replaces the terminal's screen state with a previously
 	// captured Snapshot and emits a full repaint. It locks internally.
@@ -116,7 +117,10 @@ type Snapshot struct {
 
 // LockedView is a read-only handle to terminal state. It is valid only for
 // the duration of the call that received it (a Frontend callback or
-// Terminal.View); do not retain it. Its methods do not lock.
+// Terminal.View); do not retain it. Its methods do not lock, which makes
+// Snapshot and Scrollback (and LockedScrollback.Snapshot) the callback-safe
+// snapshot entry points. Terminal.Snapshot and *Scrollback.Snapshot are for
+// ordinary code and would deadlock here.
 type LockedView struct {
 	t *terminal
 }
@@ -201,6 +205,18 @@ func (v LockedView) GetViewString(s ViewString) string {
 // Scrollback returns a no-lock scrollback reader for use inside callbacks.
 func (v LockedView) Scrollback() LockedScrollback {
 	return LockedScrollback{t: v.t}
+}
+
+// Snapshot returns a deep copy of the terminal's screen state without taking
+// the terminal lock. It is the callback-safe counterpart of
+// Terminal.Snapshot. Like Terminal.Snapshot, it excludes the scrollback
+// buffer and backend/process state. A zero LockedView returns an empty
+// Snapshot.
+func (v LockedView) Snapshot() Snapshot {
+	if v.t == nil {
+		return Snapshot{}
+	}
+	return v.t.snapshotLocked()
 }
 
 type terminal struct {
@@ -370,6 +386,11 @@ func (t *terminal) View(fn func(LockedView)) {
 func (t *terminal) Snapshot() Snapshot {
 	t.Lock()
 	defer t.Unlock()
+	return t.snapshotLocked()
+}
+
+// snapshotLocked implements Snapshot with t.Lock held.
+func (t *terminal) snapshotLocked() Snapshot {
 	return Snapshot{
 		Main:         t.mainScreen.snapshotState(),
 		Alt:          t.altScreen.snapshotState(),

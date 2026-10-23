@@ -89,8 +89,11 @@ const (
 // for the duration of the callback: use it to read terminal state (Size,
 // Line, Scrollback, ...) without locking. Do not retain it, and do not call
 // Terminal write methods or read methods that take the lock themselves
-// (plain Size/Line/... or the Terminal.Scrollback reader) from a callback,
-// as that would deadlock.
+// (plain Size/Line/Snapshot/... or the Terminal.Scrollback reader) from a
+// callback, as that would deadlock. Use v.Snapshot() and
+// v.Scrollback().Snapshot() to snapshot screen or scrollback state from a
+// callback; Terminal.Snapshot and *Scrollback.Snapshot are for ordinary
+// code.
 type Frontend interface {
 	Bell(v LockedView)
 	RegionChanged(v LockedView, r Region, c ChangeReason)

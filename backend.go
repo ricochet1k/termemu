@@ -87,15 +87,56 @@ func (p *PTYBackend) Close() error {
 
 // Open creates a new pty pair and returns the slave for external use.
 // The pair is created lazily, so it is safe to call this before or after
-// constructing a Terminal.
+// constructing a Terminal. It returns an error when the backend was created
+// by Adopt with a nil slave, because there is nothing to return or attach.
 func (p *PTYBackend) Open() (*os.File, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.openLocked(); err != nil {
 		return nil, err
 	}
+	if p.slave == nil {
+		return nil, errNoAdoptedSlave
+	}
 	return p.slave, nil
 }
+
+// Adopt adopts an already-open pty pair. master is required; slave may be
+// nil when only the master is available. The backend takes ownership of the
+// files (Close closes them). Call before constructing the Terminal or opening
+// the pty backend. With slave == nil, Attach is unavailable and Read does not
+// wait for reuse on EOF/EIO.
+//
+// Use os.NewFile(fd, "pts") to wrap raw pty file descriptors before calling
+// Adopt.
+func (p *PTYBackend) Adopt(master, slave *os.File) error {
+	if master == nil {
+		return errors.New("termemu: PTYBackend.Adopt: master is nil")
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return io.ErrClosedPipe
+	}
+	if p.master != nil || p.slave != nil {
+		return errors.New("termemu: PTYBackend.Adopt: backend already has a pty")
+	}
+
+	p.master = master
+	p.slave = slave
+	return nil
+}
+
+// AdoptMaster is Adopt(master, nil). With no slave, Open and Attach are
+// unavailable and Read surfaces EOF/EIO instead of waiting for reuse.
+func (p *PTYBackend) AdoptMaster(master *os.File) error {
+	return p.Adopt(master, nil)
+}
+
+// errNoAdoptedSlave is returned by Open and Attach for a backend adopted with
+// only a master.
+var errNoAdoptedSlave = errors.New("termemu: PTYBackend has no slave (created by Adopt with a nil slave)")
 
 // openLocked creates the pty pair if it does not exist yet. Caller must hold p.mu.
 func (p *PTYBackend) openLocked() error {
@@ -112,6 +153,17 @@ func (p *PTYBackend) openLocked() error {
 	p.master = master
 	p.slave = slave
 	return nil
+}
+
+// readFile returns the pty master and reports whether the backend has a slave
+// (and therefore supports Attach/reuse). It creates the pair if needed.
+func (p *PTYBackend) readFile() (master *os.File, hasSlave bool, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.openLocked(); err != nil {
+		return nil, false, err
+	}
+	return p.master, p.slave != nil, nil
 }
 
 // masterFile returns the pty master, creating the pair if needed.
@@ -246,12 +298,17 @@ func setEnv(env []string, kv string) []string {
 // Read reads from the pty master. When the current child has exited the
 // master returns syscall.EIO on Linux and io.EOF on some platforms (Darwin);
 // because the pty stays valid for the next attached command, Read waits for
-// one instead of surfacing that as EOF. After Close, Read returns
+// one instead of surfacing that as EOF. That reuse behavior requires a slave:
+// for an adopted master-only pty, Read performs a plain master read and
+// surfaces EOF/EIO so the read loop can exit. After Close, Read returns
 // io.ErrClosedPipe instead of retrying. NoPTYBackend keeps EOF terminal.
 func (p *PTYBackend) Read(b []byte) (int, error) {
-	master, err := p.masterFile()
+	master, hasSlave, err := p.readFile()
 	if err != nil {
 		return 0, err
+	}
+	if !hasSlave {
+		return master.Read(b)
 	}
 	return readRetryingReuse(master, b, p.isClosed, p.waitForReuse)
 }
