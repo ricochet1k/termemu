@@ -5,6 +5,7 @@ package termemu
 import (
 	"context"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -219,4 +220,61 @@ func TestPauseResumeGraphemeBoundaries(t *testing.T) {
 	pauseResumeGrapheme(t, "e", "\u0301", "e\u0301")
 	pauseResumeGrapheme(t, "👍", "🏽", "👍🏽")
 	pauseResumeGrapheme(t, "1", "\ufe0f\u20e3", "1\ufe0f\u20e3")
+}
+
+func TestCloseInterruptsBlockedReadLiveChild(t *testing.T) {
+	backend := &PTYBackend{}
+	cmd := exec.Command("sh", "-c", "sleep 5")
+	if err := backend.Attach(cmd); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	term := NewWithMode(NewMockFrontend(), backend, TextReadModeGrapheme)
+	if err := term.Resize(20, 5); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	done := term.Done()
+	start := time.Now()
+	_ = term.Close()
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Close took %v", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not interrupt the blocked read")
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
+func TestPauseWakesReuseBackoff(t *testing.T) {
+	backend := &PTYBackend{}
+	term := NewWithMode(NewMockFrontend(), backend, TextReadModeGrapheme)
+	if err := term.Resize(20, 5); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	cmd := exec.Command("true")
+	if err := backend.Attach(cmd); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	_ = cmd.Wait()
+	// Let the read loop observe the child exit and enter the reuse backoff.
+	time.Sleep(20 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := term.Pause(ctx); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Pause from reuse backoff took %v", elapsed)
+	}
+	_ = term.Close()
 }

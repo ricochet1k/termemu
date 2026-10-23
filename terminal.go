@@ -321,6 +321,10 @@ func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 		scrollMaxRows: DefaultScrollbackRows,
 	}
 
+	// The cursor is visible by default (DECSET 25); applications hide it
+	// explicitly.
+	t.viewFlags[VFShowCursor] = true
+
 	// Wire scroll capture to feed incoming rows into the scrollback buffer.
 	t.mainScreen.setScrollCapture(t.scrollCapture)
 	t.altScreen.setScrollCapture(t.scrollCapture)
@@ -698,7 +702,15 @@ const (
 // x and y should start at 1
 // wheel events should use btn1 for wheel up, btn2 for wheel down, true for press, and M_wheel for mods
 func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y int) error {
-	switch t.viewInts[VIMouseMode] {
+	if x < 0 || y < 0 {
+		return fmt.Errorf("termemu: mouse coordinates must be non-negative, got %d,%d", x, y)
+	}
+	t.Lock()
+	mouseMode := t.viewInts[VIMouseMode]
+	mouseEncoding := t.viewInts[VIMouseEncoding]
+	t.Unlock()
+
+	switch mouseMode {
 	case MMNone:
 		return nil
 	case MMPress:
@@ -716,7 +728,6 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 	case MMPressReleaseMoveAll:
 	}
 
-	mouseEncoding := t.viewInts[VIMouseEncoding]
 	switch mouseEncoding {
 	case MEX10:
 		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
@@ -733,9 +744,6 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 
 		mouseCmd := []byte("\033[M" + string(32+btnByte) + string(byte(32+x)) + string(byte(32+y)))
 		_, err := t.Write(mouseCmd)
-		if err != nil {
-			panic(fmt.Sprintf("error %v", err))
-		}
 		return err
 
 	case MEUTF8:
@@ -756,7 +764,7 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 		_, err := fmt.Fprintf(t, "\033[<%v;%v;%v%c", btnByte, x, y, pressByte)
 		return err
 	}
-	panic(fmt.Sprintf("Unhandled ViMouseEncoding?? %v", mouseEncoding))
+	return fmt.Errorf("termemu: unsupported mouse encoding %d", mouseEncoding)
 }
 
 func (t *terminal) setViewFlag(flag ViewFlag, value bool) {

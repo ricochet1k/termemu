@@ -233,6 +233,13 @@ func (p *PTYBackend) isClosedLocked() bool {
 	return p.closed
 }
 
+// Wake interrupts a Read that is waiting for the next attached command, so a
+// Pause does not have to wait out the reuse backoff. It is safe to call from
+// any goroutine.
+func (p *PTYBackend) Wake() {
+	p.signalReuse()
+}
+
 // signalReuse wakes a Read that is waiting for the next attached command.
 func (p *PTYBackend) signalReuse() {
 	p.mu.Lock()
@@ -564,6 +571,13 @@ func (t *TeeBackend) SetSize(w, h int) error {
 }
 
 // SetReadDeadline forwards to the wrapped backend when it supports deadlines.
+// Wake forwards to the wrapped backend when it implements Wake.
+func (t *TeeBackend) Wake() {
+	if w, ok := t.backend.(interface{ Wake() }); ok {
+		w.Wake()
+	}
+}
+
 func (t *TeeBackend) SetReadDeadline(d time.Time) error {
 	if sb, ok := t.backend.(interface{ SetReadDeadline(time.Time) error }); ok {
 		return sb.SetReadDeadline(d)

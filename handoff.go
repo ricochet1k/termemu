@@ -77,6 +77,11 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 	if setter, ok := backend.(interface{ SetReadDeadline(time.Time) error }); ok {
 		_ = setter.SetReadDeadline(time.Now())
 	}
+	// Also wake a loop sleeping in the reuse backoff (child exited); a read
+	// deadline alone does not interrupt that timer.
+	if waker, ok := backend.(interface{ Wake() }); ok {
+		waker.Wake()
+	}
 
 	var reader ReaderState
 	select {

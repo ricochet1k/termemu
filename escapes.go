@@ -14,6 +14,11 @@ import (
 // Version is the emulator version reported by XTVERSION (CSI > q).
 const Version = "0.1"
 
+// maxEscapeCommandBytes bounds the user-space buffer for a single ESC-initiated
+// command (CSI/OSC/DCS/APC/etc.). Longer sequences are consumed and discarded
+// rather than growing memory without bound.
+const maxEscapeCommandBytes = 64 << 10
+
 // colorModes maps SGR codes 1-7 to their Mode values
 var colorModes = [7]Mode{
 	ModeBold,      // SGR 1
@@ -311,6 +316,10 @@ func readEscapeCommand(r escapeReader, partial []byte) ([]byte, error) {
 		partial = partial[1:]
 	}
 	buf := append([]byte(nil), partial...)
+	drop := len(buf) > maxEscapeCommandBytes
+	if drop {
+		buf = nil
+	}
 	replay := 0
 	read := func() (byte, error) {
 		if replay < len(partial) {
@@ -320,6 +329,17 @@ func readEscapeCommand(r escapeReader, partial []byte) ([]byte, error) {
 		}
 		b, err := r.ReadByte()
 		if err == nil {
+			if drop {
+				return b, nil
+			}
+			if len(buf) >= maxEscapeCommandBytes {
+				// Stop buffering, but keep consuming until the sequence
+				// terminator. A broken/unterminated sequence must not grow
+				// memory without bound.
+				drop = true
+				buf = nil
+				return b, nil
+			}
 			buf = append(buf, b)
 		}
 		return b, err
@@ -338,13 +358,13 @@ func readEscapeCommand(r escapeReader, partial []byte) ([]byte, error) {
 				return buf, err
 			}
 			if b >= 0x40 && b <= 0x7e {
-				return buf, nil
+				return commandResult(buf, drop), nil
 			}
 			if b < 0x20 || b > 0x3f {
 				// Malformed (not a parameter, intermediate, or final
 				// byte): stop here and let the handler treat it as the
 				// final byte instead of swallowing following text.
-				return buf, nil
+				return commandResult(buf, drop), nil
 			}
 		}
 
@@ -356,10 +376,10 @@ func readEscapeCommand(r escapeReader, partial []byte) ([]byte, error) {
 				return buf, err
 			}
 			if b == 0x07 { // BEL
-				return buf, nil
+				return commandResult(buf, drop), nil
 			}
 			if scanner.isST(b) {
-				return buf, nil
+				return commandResult(buf, drop), nil
 			}
 		}
 
@@ -370,8 +390,17 @@ func readEscapeCommand(r escapeReader, partial []byte) ([]byte, error) {
 		}
 	}
 
-	return buf, nil
+	return commandResult(buf, drop), nil
 }
+
+// commandResult drops a command that exceeded maxEscapeCommandBytes.
+func commandResult(buf []byte, drop bool) []byte {
+	if drop {
+		return nil
+	}
+	return buf
+}
+
 func (t *terminal) handleCommand(r escapeReader) bool {
 	b, err := r.ReadByte()
 	if err != nil {
