@@ -332,7 +332,12 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - `LogicalLine(id)` walks backward/forward over `wrapped` rows to rebuild the
   logical line and reflows it at the terminal's current width. Trailing blank
   padding on the final physical row is dropped before reflow, so a 20-column
-  line of 50 cells returns rows of width 20/20/10.
+  line of 50 cells returns rows of width 20/20/10. Each returned row's `ID` is
+  the stored raw row containing its first cell: reflown rows that split one
+  stored row share its ID, rows straddling a boundary report the row holding
+  the first cell, and IDs are non-zero and non-decreasing but may repeat
+  (use `Row(id)` to fetch the stored row). The no-reflow fast path reports the
+  stored IDs unchanged.
 - `Scrollback.Snapshot()`/`Restore()` deep-copy and replace the ring contents
   independently of `Terminal.Snapshot`/`Restore` (which exclude scrollback).
   Restore preserves `Base`/`Next` IDs, keeps only the newest rows when the

@@ -190,6 +190,87 @@ func TestScrollback_LogicalLine_RingWrap(t *testing.T) {
 	}
 }
 
+// TestScrollback_LogicalLine_ReflowIDs verifies that reflown rows report the
+// ScrollID of the stored row containing their first cell.
+func TestScrollback_LogicalLine_ReflowIDs(t *testing.T) {
+	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
+	if err := term.Resize(20, 10); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	sb := term.Scrollback()
+	sb.Clear()
+
+	feedText(t, term, strings.Repeat("A", 50))
+	for range 10 {
+		feedText(t, term, "\n")
+	}
+
+	base, next := sb.Range()
+	if got := int(next - base); got != 3 {
+		t.Fatalf("scrollback rows = %d, want 3 (base=%d next=%d)", got, base, next)
+	}
+	stored := make([]ScrollID, 3)
+	for i := range stored {
+		row, ok := sb.Row(base + ScrollID(i))
+		if !ok {
+			t.Fatalf("Row(%d) missing", base+ScrollID(i))
+		}
+		stored[i] = row.ID
+	}
+
+	// Narrower than the captured 20 columns forces a reflow (50 cells become
+	// seven 7-cell rows plus one 1-cell row).
+	if err := term.Resize(7, 10); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+
+	logical := sb.LogicalLine(base + 1)
+	if len(logical) != 8 {
+		t.Fatalf("LogicalLine returned %d rows, want 8: %+v", len(logical), logical)
+	}
+	if got := logicalText(logical); got != strings.Repeat("A", 50) {
+		t.Errorf("logical text = %q, want 50 A", got)
+	}
+
+	// Cell offsets 0..19 live in stored row 0, 20..39 in stored row 1, and
+	// 40..49 in stored row 2. Reflowed rows start at 0,7,14,21,28,35,42,49.
+	wantIDs := []ScrollID{
+		stored[0], stored[0], stored[0],
+		stored[1], stored[1], stored[1],
+		stored[2], stored[2],
+	}
+	prev := ScrollID(0)
+	for i, row := range logical {
+		if row.ID == 0 {
+			t.Errorf("logical row %d has zero ID", i)
+		}
+		if row.ID < prev {
+			t.Errorf("logical row %d ID %d decreased from %d", i, row.ID, prev)
+		}
+		prev = row.ID
+		if row.ID != wantIDs[i] {
+			t.Errorf("logical row %d ID = %d, want %d", i, row.ID, wantIDs[i])
+		}
+		storedRow, ok := sb.Row(row.ID)
+		if !ok {
+			t.Errorf("Row(%d) for logical row %d not found", row.ID, i)
+			continue
+		}
+		if storedRow.ID != row.ID {
+			t.Errorf("Row(%d).ID = %d", row.ID, storedRow.ID)
+		}
+	}
+
+	// The logical line always starts in the stored row that contains the
+	// requested ID's line, and that row must itself be reachable.
+	if logical[0].ID != stored[0] {
+		t.Errorf("first logical ID = %d, want %d", logical[0].ID, stored[0])
+	}
+	if _, ok := sb.Row(stored[0]); !ok {
+		t.Errorf("Row(%d) missing after reflow", stored[0])
+	}
+}
+
 // TestResize_ShrinkFeedsScrollback verifies a height shrink pushes the lost
 // top rows into scrollback and keeps the newest rows visible.
 func TestResize_ShrinkFeedsScrollback(t *testing.T) {

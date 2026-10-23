@@ -456,3 +456,74 @@ func TestSplitSpan_BetweenWideCharacters(t *testing.T) {
 		t.Errorf("right = %q (%d cells), want %q (2 cells)", right.Text, right.Width, "世")
 	}
 }
+
+// TestWriteString_AllSpacesBecomesBlankSpan verifies that a text run made
+// entirely of ASCII spaces is stored as a blank span (empty Text), matching
+// how blank fills are represented, while mixed runs keep their text.
+func TestWriteString_AllSpacesBecomesBlankSpan(t *testing.T) {
+	bold := NewStyle()
+	bold.SetMode(ModeBold)
+
+	newTestScreen := func(width int) *spanScreen {
+		s := newSpanScreen(&EmptyFrontend{})
+		s.setSize(width, 1)
+		s.style = bold
+		return s
+	}
+
+	t.Run("all spaces", func(t *testing.T) {
+		s := newTestScreen(3)
+		s.writeString("   ", 3, false, TextReadModeRune)
+		spans := s.lines[0].spans
+		if len(spans) != 1 {
+			t.Fatalf("got %d spans, want 1: %+v", len(spans), spans)
+		}
+		if spans[0].Text != "" || spans[0].Width != 3 {
+			t.Errorf("span = %#v, want empty text width 3", spans[0])
+		}
+		if spans[0].Style != bold {
+			t.Errorf("span style = %#v, want %#v", spans[0].Style, bold)
+		}
+		if spans[0].Link != "" {
+			t.Errorf("blank span carries link %q", spans[0].Link)
+		}
+	})
+
+	t.Run("mixed run keeps text", func(t *testing.T) {
+		s := newTestScreen(4)
+		s.writeString("a  ", 3, false, TextReadModeRune)
+		spans := s.lines[0].spans
+		if len(spans) != 2 {
+			t.Fatalf("got %d spans, want 2: %+v", len(spans), spans)
+		}
+		if spans[0].Text != "a  " || spans[0].Width != 3 {
+			t.Errorf("first span = %#v, want text %q width 3", spans[0], "a  ")
+		}
+	})
+
+	t.Run("single space matches rawWriteRune", func(t *testing.T) {
+		viaWriteString := newTestScreen(4)
+		viaWriteString.writeString(" ", 1, false, TextReadModeRune)
+		viaRaw := newTestScreen(4)
+		viaRaw.rawWriteRune(0, 0, ' ', 1, CRText)
+		if diff := cmp.Diff(viaWriteString.lines[0].spans, viaRaw.lines[0].spans, cmp.AllowUnexported(Style{})); diff != "" {
+			t.Errorf("writeString(\" \") vs rawWriteRune(' ') mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("blank span drops active link", func(t *testing.T) {
+		s := newTestScreen(4)
+		s.setLink("https://example.com")
+		s.writeString(" ", 1, false, TextReadModeRune)
+		spans := s.lines[0].spans
+		if len(spans) == 0 {
+			t.Fatal("no spans")
+		}
+		if spans[0].Text != "" || spans[0].Width != 1 {
+			t.Errorf("span = %#v, want empty text width 1", spans[0])
+		}
+		if spans[0].Link != "" {
+			t.Errorf("blank span carries link %q, want none", spans[0].Link)
+		}
+	})
+}

@@ -409,6 +409,20 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 		}
 	}
 	sp := Span{Style: s.style, Text: text, Width: width, Link: s.link}
+	// Canonicalize runs of plain ASCII spaces as blank spans (empty Text),
+	// matching how blank fills are stored. Blank spans never carry links.
+	// Mixed text runs (e.g. "a  ") are left untouched.
+	allSpaces := true
+	for i := 0; i < len(text); i++ {
+		if text[i] != ' ' {
+			allSpaces = false
+			break
+		}
+	}
+	if allSpaces {
+		sp.Text = ""
+		sp.Link = ""
+	}
 	s.rawWriteSpan(s.cursorPos.X, s.cursorPos.Y, sp, CRText)
 	s.moveCursor(width, 0, true, true)
 }

@@ -70,12 +70,8 @@ var testSequences = []struct {
 }
 
 // TestTTYFrontendNestedTerminalSpacing round-trips screen content through a
-// TTYFrontend (render to ANSI, re-parse) and compares the two screens.
-//
-// The comparison is semantic (Line.Equivalent), not structural: rendering and
-// re-parsing can pack the same cells differently (for example a trailing run of
-// blanks comes back as a Text span instead of a Rune(' ') span). That packing
-// difference is an allocation detail, not a change in visible content.
+// TTYFrontend (render to ANSI, re-parse) and compares the two screens
+// structurally.
 func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 	width, height := 40, 4
 	screenRegion := Region{X: 0, Y: 0, X2: width, Y2: height}
@@ -104,12 +100,10 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 				t.Fatalf("line count differs: raw=%d TTYFrontend=%d", len(innerLines), len(outerLines))
 			}
 			for i := range innerLines {
-				if innerLines[i].Equivalent(outerLines[i]) {
+				diff := cmp.Diff(innerLines[i], outerLines[i], cmp.AllowUnexported(Style{}))
+				if diff == "" {
 					continue
 				}
-				// Dump the structural spans to make packing differences easy
-				// to inspect even though they are not themselves failures.
-				diff := cmp.Diff(innerLines, outerLines, cmp.AllowUnexported(Style{}))
 				t.Fatalf("line %d differs between raw and TTYFrontend: %v", i, diff)
 			}
 		})

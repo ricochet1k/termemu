@@ -101,7 +101,8 @@ func (s LockedScrollback) Row(id ScrollID) (Row, bool) {
 }
 
 // LogicalLine returns all physical rows that form the logical line
-// containing the given row ID.
+// containing the given row ID. See Scrollback.LogicalLine for details on
+// how reflown rows report IDs (one stored ID per row, can repeat).
 func (s LockedScrollback) LogicalLine(id ScrollID) []Row {
 	return s.scrollback().logicalLineLocked(id)
 }
@@ -234,6 +235,14 @@ func (s *Scrollback) Row(id ScrollID) (Row, bool) {
 // from the captured storage. Returns nil if the ID has been evicted.
 // The returned Rows own their span slices; mutating them does not affect
 // the stored history.
+//
+// Every returned Row carries the ScrollID of the stored physical row that
+// contains its first cell. When reflow splits a stored row across several
+// reflown rows they share that stored row's ID, and because reflown rows may
+// straddle a boundary between two stored rows, the reported IDs are
+// non-decreasing and may repeat but are always non-zero. Row(id) still works
+// for each reported ID; it returns the stored (captured) row, not the reflown
+// one.
 func (s *Scrollback) LogicalLine(id ScrollID) []Row {
 	var result []Row
 	s.t.withLock(func() {
@@ -342,7 +351,33 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 	}
 	allSpans = append(allSpans, lastSpans...)
 
-	return reflowRows(allSpans, totalWidth, termW)
+	// Record where each stored raw row begins in the concatenated cell stream
+	// so reflown rows can report the ID of the raw row holding their first
+	// cell. The final raw row contributes only its trimmed width.
+	rawStarts := make([]int, len(rawRows))
+	rawIDs := make([]ScrollID, len(rawRows))
+	offset := 0
+	for i, r := range rawRows {
+		rawStarts[i] = offset
+		rawIDs[i] = r.id
+		w := r.width
+		if i == lastIdx {
+			w = lastWidth
+		}
+		offset += w
+	}
+
+	rows := reflowRows(allSpans, totalWidth, termW)
+	rawIdx := 0
+	cellPos := 0
+	for i := range rows {
+		for rawIdx+1 < len(rawStarts) && cellPos >= rawStarts[rawIdx+1] {
+			rawIdx++
+		}
+		rows[i].ID = rawIDs[rawIdx]
+		cellPos += rows[i].Width
+	}
+	return rows
 }
 
 // trimTrailingBlankSpans returns spans without trailing blank runs (spans
