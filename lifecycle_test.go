@@ -281,3 +281,54 @@ func TestConcurrentResizeAndRestoreLeaveBackendAtScreenSize(t *testing.T) {
 		}
 	}
 }
+
+// signalReader reports when its first Read starts (i.e. the read loop has
+// computed its maxWidth and is now blocked waiting for output).
+type signalReader struct {
+	io.ReadCloser
+	once    sync.Once
+	started chan struct{}
+}
+
+func (r *signalReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	return r.ReadCloser.Read(p)
+}
+
+func TestResizeWhileReadBlockedUsesNewWidth(t *testing.T) {
+	pr, pw := io.Pipe()
+	started := make(chan struct{})
+	backend := NewNoPTYBackend(&signalReader{ReadCloser: pr, started: started}, io.Discard)
+	term := New(&EmptyFrontend{}, backend)
+	defer func() {
+		_ = term.Close()
+		_ = pw.Close()
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read loop did not reach Read")
+	}
+
+	// The loop computed maxWidth for 80 columns before blocking. Shrink the
+	// terminal, then deliver a run that only fits at the old width.
+	if err := term.Resize(5, 3); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	if _, err := pw.Write([]byte("abcdefghij")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if term.Line(0) == "abcde" && term.Line(1) == "fghij" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lines after resize = %q / %q, want %q / %q",
+				term.Line(0), term.Line(1), "abcde", "fghij")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

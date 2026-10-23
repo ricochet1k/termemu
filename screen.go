@@ -376,7 +376,12 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 		width = 1
 	}
 	if width > s.size.X {
-		width = s.size.X
+		// The run was read with a stale maxWidth (for example the terminal
+		// was resized while the read loop was blocked). Split it at the
+		// current screen width instead of clamping the width and storing
+		// text that is wider than its cells.
+		s.writeLongString(text, width, mode)
+		return
 	}
 	if s.pendingWrap {
 		s.pendingWrap = false
@@ -420,6 +425,37 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 		s.cursorPos.X = clamp(newX, 0, s.size.X-1)
 	}
 	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
+}
+
+// writeLongString writes a text run wider than the screen, splitting it at
+// grapheme boundaries and letting each chunk wrap normally. It is used when a
+// run was buffered before a resize made the screen narrower.
+func (s *spanScreen) writeLongString(text string, width int, mode TextReadMode) {
+	sp := Span{Style: s.style, Text: text, Width: width}
+	for sp.Width > 0 {
+		remaining := s.size.X - s.cursorPos.X
+		if s.pendingWrap || remaining < 1 {
+			remaining = s.size.X
+		}
+		if remaining >= sp.Width {
+			s.writeString(sp.Text, sp.Width, false, mode)
+			return
+		}
+		left, right, wide := splitSpan(sp, remaining, mode)
+		if left.Width > 0 {
+			s.writeString(left.Text, left.Width, false, mode)
+		}
+		if wide.Width > 0 {
+			// The boundary fell inside a wide cluster. Write it as a whole
+			// when it can fit on the screen; otherwise it cannot be shown.
+			if wide.Width <= s.size.X {
+				s.writeString(wide.Text, wide.Width, false, mode)
+			}
+			sp = right
+			continue
+		}
+		sp = right
+	}
 }
 
 // wrapLine advances to column 0 of the next row, scrolling the scroll region

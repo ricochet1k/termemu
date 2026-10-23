@@ -341,6 +341,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   mid-sequence therefore never blocks `Snapshot`/`Restore` (or any other lock
   user) on backend I/O. On an ESC read error the bytes consumed so far are
   stored in `pendingCmd` for pause/handoff resume.
+- The printable-run `maxWidth` is computed before the blocking read. If the
+  terminal is resized while idle, `writeString` re-checks the current screen
+  width and `writeLongString` splits an oversized stale run at grapheme
+  boundaries, so the next output is laid out at the new width.
 - Distinguishes printable text runs from control codes
 - Parses CSI sequences (cursor movement, SGR colors, screen manipulation)
 - Parses OSC sequences: 0/2 window title, 6/7 working directory
