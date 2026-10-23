@@ -4,6 +4,8 @@ package termemu
 
 import (
 	"context"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,5 +96,80 @@ func TestPauseRealPTYCloseWhilePaused(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Done did not close after Close while paused")
+	}
+}
+
+// dupFile duplicates f so a pty can be handed to a second backend while the
+// first one closes its copies.
+func dupFile(t *testing.T, f *os.File) *os.File {
+	t.Helper()
+	fd, err := syscall.Dup(int(f.Fd()))
+	if err != nil {
+		t.Fatalf("dup %s: %v", f.Name(), err)
+	}
+	return os.NewFile(uintptr(fd), f.Name())
+}
+
+// TestHandoffAcrossBackends simulates the cross-process path in one process:
+// pause, duplicate the fds, close the old terminal, adopt the duplicates into a
+// new backend, restore via Handoff, and finish the half-consumed sequence.
+func TestHandoffAcrossBackends(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	oldBackend := &PTYBackend{}
+	if err := oldBackend.Adopt(master, slave); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	oldTerm := NewWithMode(NewMockFrontend(), oldBackend, TextReadModeGrapheme)
+	if err := oldTerm.Resize(20, 5); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	if _, err := slave.Write([]byte("\x1b[3")); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	h, err := oldTerm.Pause(ctx)
+	if err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if got := string(h.Reader.PendingCommand); got != "[3" {
+		t.Fatalf("PendingCommand = %q, want %q", got, "[3")
+	}
+
+	// Duplicate before closing the old owner; keep a writer for the slave.
+	newMaster := dupFile(t, master)
+	newSlave := dupFile(t, slave)
+	writer := dupFile(t, slave)
+	defer func() { _ = writer.Close() }()
+
+	_ = oldTerm.Close() // closes the original master/slave only
+
+	newBackend := &PTYBackend{}
+	if err := newBackend.Adopt(newMaster, newSlave); err != nil {
+		t.Fatalf("Adopt new: %v", err)
+	}
+	newTerm, err := NewFromHandoff(NewMockFrontend(), newBackend, h)
+	if err != nil {
+		t.Fatalf("NewFromHandoff: %v", err)
+	}
+	defer func() { _ = newTerm.Close() }()
+
+	if _, err := writer.Write([]byte("1mX")); err != nil {
+		t.Fatalf("write rest: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if line := newTerm.Line(0); len(line) > 0 && line[0] == 'X' {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("X not rendered after handoff, line0=%q", newTerm.Line(0))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
