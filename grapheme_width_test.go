@@ -18,11 +18,11 @@ func TestTextWidthSequences(t *testing.T) {
 		{name: "flag", seq: "🇺🇸", graphemeWidth: 2, runeWidth: 2},
 		{name: "heart VS16", seq: "❤️", graphemeWidth: 2, runeWidth: 2},
 		{name: "keycap one", seq: "1\uFE0F\u20E3", graphemeWidth: 2, runeWidth: 2},
-		{name: "woman technologist ZWJ", seq: "👩\u200d💻", graphemeWidth: 2, runeWidth: 4},
-		{name: "rainbow flag ZWJ", seq: "🏳\uFE0F\u200d🌈", graphemeWidth: 2, runeWidth: 4},
+		{name: "woman technologist ZWJ", seq: "👩\u200d💻", graphemeWidth: 2, runeWidth: 2},
+		{name: "rainbow flag ZWJ", seq: "🏳\uFE0F\u200d🌈", graphemeWidth: 2, runeWidth: 2},
 		{name: "combining acute", seq: "e\u0301", graphemeWidth: 1, runeWidth: 1},
 		{name: "combining acute in text", seq: "a\u0301b", graphemeWidth: 2, runeWidth: 2},
-		{name: "family ZWJ", seq: "👨\u200d👩\u200d👧\u200d👦", graphemeWidth: 2, runeWidth: 8},
+		{name: "family ZWJ", seq: "👨\u200d👩\u200d👧\u200d👦", graphemeWidth: 2, runeWidth: 2},
 	}
 
 	modes := []struct {

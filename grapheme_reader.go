@@ -118,6 +118,16 @@ func (r *GraphemeReader) ReadByte() (byte, error) {
 	}
 	b := r.data[r.start]
 	r.start++
+	// Control bytes and escape sequences are not part of the grapheme
+	// stream. Reset the tokenizer state so the next printable byte starts a
+	// fresh grapheme; otherwise the state can encode boundary context for
+	// bytes that were consumed by the escape parser instead of the next
+	// text byte.
+	if b < 0x20 || b == 0x7f || (b >= 0x80 && b <= 0x9f) {
+		r.state = -1
+		r.forceMergeNext = false
+		r.lastWasRI = false
+	}
 	return b, nil
 }
 
