@@ -223,8 +223,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 **Backend** (backend.go): Provides I/O abstraction
 - `PTYBackend`: Real PTY using github.com/creack/pty. One pty pair is opened
   lazily and shared by every command, so commands can be run back-to-back on the
-  same terminal. `Attach(cmd)` wires stdio + `SysProcAttr`; the caller runs
-  `cmd.Start()`. `Read` treats `EIO` (current child exited) as "wait for the
+  same terminal. The master survives child exits; on Darwin a child that was a
+  session leader with the pty as its controlling terminal revokes the parent's
+  slave descriptors when it exits, so every `Attach` after the first reopens
+  the slave by path via `openSlave()` (`backend_unix.go`). `Attach(cmd)` wires
+  stdio + `SysProcAttr`; the caller runs `cmd.Start()`. `Read` treats `EIO` (current child exited) as "wait for the
   next attached command" instead of EOF, which is what makes reuse work.
   `Close()` closes master+slave, wakes blocked `Read`s with
   `io.ErrClosedPipe`, and stops the EIO retry; later `Read`/`Write`/`Attach`

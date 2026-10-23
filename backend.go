@@ -2,6 +2,7 @@ package termemu
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -29,7 +30,10 @@ type PTYBackend struct {
 	mu     sync.Mutex
 	master *os.File
 	slave  *os.File
-	closed bool
+	// slavePath is the device path of slave, used to reopen it when a
+	// previous child's exit revoked it (see refreshSlaveLocked).
+	slavePath string
+	closed    bool
 
 	// cmd is the most recently attached command, used by PID and Wait.
 	cmd *exec.Cmd
@@ -61,6 +65,7 @@ func (p *PTYBackend) Close() error {
 	p.closed = true
 	master, slave := p.master, p.slave
 	p.master, p.slave = nil, nil
+	p.slavePath = ""
 	reuse := p.reuse
 	if reuse == nil {
 		reuse = make(chan struct{}, 1)
@@ -98,7 +103,7 @@ func (p *PTYBackend) Open() (*os.File, error) {
 	if p.slave == nil {
 		return nil, errNoAdoptedSlave
 	}
-	return p.slave, nil
+	return p.refreshSlaveLocked()
 }
 
 // Adopt adopts an already-open pty pair. master is required; slave may be
@@ -125,6 +130,9 @@ func (p *PTYBackend) Adopt(master, slave *os.File) error {
 
 	p.master = master
 	p.slave = slave
+	if slave != nil {
+		p.slavePath = slave.Name()
+	}
 	return nil
 }
 
@@ -152,6 +160,7 @@ func (p *PTYBackend) openLocked() error {
 	}
 	p.master = master
 	p.slave = slave
+	p.slavePath = slave.Name()
 	return nil
 }
 
@@ -164,6 +173,39 @@ func (p *PTYBackend) readFile() (master *os.File, hasSlave bool, err error) {
 		return nil, false, err
 	}
 	return p.master, p.slave != nil, nil
+}
+
+// refreshSlaveLocked returns the slave to wire into the next command,
+// reopening it if a previous child's exit revoked the cached descriptor. On
+// Darwin a session-leader child that used the pty as its controlling terminal
+// revokes the parent's slave descriptors when it exits; the master survives
+// that, so the pair itself is still shared. Caller must hold p.mu, and p.slave
+// must be non-nil.
+func (p *PTYBackend) refreshSlaveLocked() (*os.File, error) {
+	if _, err := p.slave.Stat(); err == nil {
+		return p.slave, nil
+	}
+	slave, err := openSlave(p.slavePath)
+	if err != nil {
+		return nil, fmt.Errorf("reopen pty slave: %w", err)
+	}
+	_ = p.slave.Close()
+	p.slave = slave
+	return slave, nil
+}
+
+// attachSlave returns the slave to wire into the next command. Caller must
+// not hold p.mu.
+func (p *PTYBackend) attachSlave() (*os.File, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.openLocked(); err != nil {
+		return nil, err
+	}
+	if p.slave == nil {
+		return nil, errNoAdoptedSlave
+	}
+	return p.refreshSlaveLocked()
 }
 
 // masterFile returns the pty master, creating the pair if needed.
@@ -216,7 +258,7 @@ func (p *PTYBackend) waitForReuse(d time.Duration) {
 // The PTY pair is opened lazily on first call and reused on subsequent calls.
 // Caller starts the command themselves via cmd.Start().
 func (p *PTYBackend) Attach(c *exec.Cmd) error {
-	slave, err := p.Open()
+	slave, err := p.attachSlave()
 	if err != nil {
 		return err
 	}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -191,5 +193,71 @@ func TestPTYBackendWaitUsesLatestAttach(t *testing.T) {
 	}
 	if err := backend.Wait(); err != nil {
 		t.Fatalf("Wait for second command failed: %v", err)
+	}
+}
+
+// TestPTYBackendReuseAfterChildExit runs two commands through one backend and
+// checks both produce output. On Darwin a session-leader child that used the
+// pty as its controlling terminal revokes the parent's slave descriptors when
+// it exits, so Attach must reopen the slave for the second command.
+func TestPTYBackendReuseAfterChildExit(t *testing.T) {
+	backend := &PTYBackend{}
+
+	var (
+		mu  sync.Mutex
+		out strings.Builder
+	)
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 256)
+		for {
+			n, err := backend.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				out.Write(buf[:n])
+				mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	markers := []string{"first_marker", "second_marker"}
+	for i, marker := range markers {
+		cmd := exec.Command("sh", "-c", "printf "+marker)
+		if err := backend.Attach(cmd); err != nil {
+			t.Fatalf("attach %d: %v", i, err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		if err := backend.Wait(); err != nil {
+			t.Fatalf("wait %d: %v", i, err)
+		}
+
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			mu.Lock()
+			got := out.String()
+			mu.Unlock()
+			if strings.Contains(got, marker) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("never saw %q, got %q", marker, got)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if err := backend.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	select {
+	case <-readDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read loop did not stop after Close")
 	}
 }
