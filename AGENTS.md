@@ -309,6 +309,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - A parallel `wrapped []bool` marks rows that continue the previous row due to
   auto-wrap; it feeds scrollback logical lines and is cleared by explicit cursor
   positioning / full-width erase
+- `setSize` keeps every line exactly the new width (a wide cluster dropped by
+  truncation is padded back), clamps the cursor/saved cursor and scroll margins
+  into the new bounds. `scroll` clamps `|dy|` to the region height and ignores
+  invalid margins (`top > bottom`).
 - Handles complex operations: scrolling, wide character overlaps, grapheme cluster splitting
 - Screen size, cursor position, scroll margins, auto-wrap behavior. Auto-wrap
   (DECAWM) defaults to on, as in xterm. Writes use deferred wrap: filling the
@@ -497,6 +501,20 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
 **Table-Driven Tests:**
 - See escapes_test.go and screen_test.go for examples
 - Test cases specify input and expected screen state
+
+**Generative / property tests:**
+- `screen_invariants_test.go` has a deterministic random-input test and
+  `FuzzTerminalInput`. Both feed arbitrary text/escape streams and assert
+  `checkScreenInvariants` (full-width lines, span widths, cursor and margins in
+  bounds), then round-trip Snapshot/Restore. Keep new screen features inside
+  those invariants.
+- Failing fuzz inputs are kept under `testdata/fuzz/FuzzTerminalInput/` and run
+  as seeds by a normal `go test`. Run a longer session with
+  `go test -run '^$' -fuzz '^FuzzTerminalInput$' -fuzztime 30s .`.
+- `scrollback_property_test.go` checks the ring buffer against a model under
+  random append/evict/clear/snapshot operations.
+- `keys_coverage_test.go` enforces that every `KeyCode` encodes in legacy and
+  Kitty modes, and property-checks the functional-code and keypad tables.
 
 ## Common Development Tasks
 

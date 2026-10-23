@@ -54,11 +54,6 @@ type scrollRow struct {
 	wrapped bool
 }
 
-// scrollRowsLen returns the number of populated rows (equivalent to len(s.t.scrollRows)).
-// Always use this instead of cap() for ring-buffer index arithmetic to handle
-// the pre-full growing-slice case correctly.
-func (s *Scrollback) scrollRowsLen() int { return len(s.t.scrollRows) }
-
 // Scrollback provides read access to the terminal's scrollback buffer.
 // All methods handle their own locking and are safe to call from any goroutine,
 // except from within a Frontend callback: callbacks run with the terminal lock
@@ -83,7 +78,10 @@ type LockedScrollback struct {
 
 // scrollback returns the locking helper view used to share implementations.
 func (s LockedScrollback) scrollback() *Scrollback {
-	return &Scrollback{t: s.t}
+	if s.t == nil {
+		return &Scrollback{}
+	}
+	return &s.t.scrollback
 }
 
 // Range returns the IDs of the oldest and next-to-be-assigned rows.
@@ -170,13 +168,7 @@ func (s *Scrollback) scrollbackSnapshotLocked() ScrollbackSnapshot {
 	n := len(s.t.scrollRows)
 	snap.Rows = make([]Row, n)
 	for i := 0; i < n; i++ {
-		r := s.t.scrollRows[(s.t.scrollBaseIdx+i)%n]
-		snap.Rows[i] = Row{
-			Spans:   copySpans(r.spans),
-			Width:   r.width,
-			Wrapped: r.wrapped,
-			ID:      r.id,
-		}
+		snap.Rows[i] = rowFromScrollRow(s.t.scrollRows[(s.t.scrollBaseIdx+i)%n])
 	}
 	snap.Base = s.scrollBaseIDLocked()
 	snap.Next = s.t.scrollNextID
@@ -277,7 +269,7 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 		return nil
 	}
 
-	n := s.scrollRowsLen()
+	n := len(s.t.scrollRows)
 	if n == 0 {
 		return nil
 	}
@@ -336,7 +328,9 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 		// collapsing to nothing.
 		result := make([]Row, len(rawRows))
 		for i, r := range rawRows {
-			result[i] = Row{Spans: copySpans(r.spans), Width: r.width, Wrapped: i < lastIdx, ID: r.id}
+			row := rowFromScrollRow(r)
+			row.Wrapped = i < lastIdx
+			result[i] = row
 		}
 		return result
 	}
@@ -358,7 +352,9 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 		// mutate the stored history through the returned Rows.
 		result := make([]Row, len(rawRows))
 		for i, r := range rawRows {
-			result[i] = Row{Spans: copySpans(r.spans), Width: r.width, Wrapped: i < lastIdx, ID: r.id}
+			row := rowFromScrollRow(r)
+			row.Wrapped = i < lastIdx
+			result[i] = row
 		}
 		return result
 	}
@@ -530,7 +526,7 @@ func (s *Scrollback) movePosLocked(pos ScrollPos, delta int) ScrollPos {
 		return pos
 	}
 
-	n := s.scrollRowsLen()
+	n := len(s.t.scrollRows)
 	if n == 0 {
 		return pos
 	}
@@ -563,13 +559,17 @@ func (s *Scrollback) rowLocked(id ScrollID) (Row, bool) {
 	if !found {
 		return Row{}, false
 	}
-	r := s.t.scrollRows[idx]
+	return rowFromScrollRow(s.t.scrollRows[idx]), true
+}
+
+// rowFromScrollRow returns a public Row copy of an internal scrollback row.
+func rowFromScrollRow(r scrollRow) Row {
 	return Row{
 		Spans:   copySpans(r.spans),
 		Width:   r.width,
 		Wrapped: r.wrapped,
 		ID:      r.id,
-	}, true
+	}
 }
 
 // copySpans returns a copy of the span slice for handing out through the
@@ -591,7 +591,7 @@ func (s *Scrollback) findRowLocked(id ScrollID) (scrollRow, int, bool) {
 		return scrollRow{}, 0, false
 	}
 
-	n := s.scrollRowsLen()
+	n := len(s.t.scrollRows)
 	if n == 0 {
 		return scrollRow{}, 0, false
 	}

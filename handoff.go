@@ -126,7 +126,7 @@ func (t *terminal) captureHandoff(reader ReaderState) (Handoff, error) {
 	t.Lock()
 	snap := t.snapshotLocked()
 	size := t.screen().Size()
-	sb := (&Scrollback{t: t}).scrollbackSnapshotLocked()
+	sb := t.scrollback.scrollbackSnapshotLocked()
 	mode := t.textReadMode
 	t.Unlock()
 

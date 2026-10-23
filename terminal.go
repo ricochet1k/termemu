@@ -272,6 +272,10 @@ type terminal struct {
 	scrollNextID  ScrollID
 	scrollBaseIdx int
 	scrollMaxRows int
+
+	// scrollback is the self-locking reader returned by Scrollback.
+	// Its t field points back at this terminal.
+	scrollback Scrollback
 }
 
 // New makes a new terminal using the provided Frontend, Backend, and default text read mode.
@@ -335,6 +339,7 @@ func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 	view := LockedView{t: t}
 	t.mainScreen.setView(view)
 	t.altScreen.setView(view)
+	t.scrollback.t = t
 
 	return t
 }
@@ -346,15 +351,6 @@ func (t *terminal) SetFrontend(f Frontend) {
 	t.mainScreen.SetFrontend(f)
 	t.altScreen.SetFrontend(f)
 }
-
-// func NewNoPTY(f Frontend) Terminal {
-// 	return &terminal{
-// 		frontend: f,
-// 		screen: screen{
-// 			frontend: f,
-// 		},
-// 	}
-// }
 
 // TerminalOption configures a Terminal at construction time.
 type TerminalOption func(*terminal)
@@ -500,6 +496,7 @@ func (t *terminal) CursorPos() Pos {
 
 func (t *terminal) Resize(w, h int) error {
 	t.Lock()
+	backend := t.backend
 	// Shrinking the main screen would otherwise discard the top rows. Feed
 	// them to scrollback and shift the surviving content up so the newest
 	// output stays visible. The alt screen only resizes (as before). The
@@ -517,10 +514,6 @@ func (t *terminal) Resize(w, h int) error {
 	// setSize preserves content and emits nothing, so tell frontends
 	// to repaint the full screen at the new dimensions.
 	t.frontend.RegionChanged(LockedView{t: t}, Region{X: 0, Y: 0, X2: w, Y2: h}, CRResize)
-	t.Unlock()
-
-	t.Lock()
-	backend := t.backend
 	t.Unlock()
 
 	if backend == nil {
@@ -798,7 +791,7 @@ func (t *terminal) GetViewString(flag ViewString) string {
 
 // Scrollback returns the terminal's scrollback buffer.
 func (t *terminal) Scrollback() *Scrollback {
-	return &Scrollback{t: t}
+	return &t.scrollback
 }
 
 // scrollCapture is the callback wired to the screen's scrollCapture.
@@ -863,7 +856,7 @@ func (t *terminal) clearScrollbackLocked() {
 	t.scrollBaseIdx = 0
 }
 
-// returns screen and unlock fn, must defer the unlock fn
+// returns the active screen (main or alt)
 func (t *terminal) screen() screen {
 	if t.onAltScreen {
 		return t.altScreen

@@ -45,26 +45,18 @@ func makeScreen(chars []string, newFn func(Frontend) screen) screen {
 }
 
 func writeTextAt(s screen, x, y int, text string) {
-	if writer, ok := s.(interface {
+	width := utf8.RuneCountInString(text)
+	s.(interface {
 		rawWriteSpan(int, int, Span, ChangeReason)
-	}); ok {
-		width := utf8.RuneCountInString(text)
-		writer.rawWriteSpan(x, y, Span{Style: s.Style(), Text: text, Width: width}, CRText)
-		return
-	}
-	s.rawWriteRunes(x, y, []rune(text), CRText)
+	}).rawWriteSpan(x, y, Span{Style: s.Style(), Text: text, Width: width}, CRText)
 }
 
 // writeTextAtWithWidth writes text at position (x, y) with explicit cell width.
 // This is needed for wide characters like emoji that are 1 rune but 2+ cells wide.
 func writeTextAtWithWidth(s screen, x, y int, text string, width int) {
-	if writer, ok := s.(interface {
+	s.(interface {
 		rawWriteSpan(int, int, Span, ChangeReason)
-	}); ok {
-		writer.rawWriteSpan(x, y, Span{Style: s.Style(), Text: text, Width: width}, CRText)
-		return
-	}
-	s.rawWriteRunes(x, y, []rune(text), CRText)
+	}).rawWriteSpan(x, y, Span{Style: s.Style(), Text: text, Width: width}, CRText)
 }
 
 func testScreen(s screen, chars []string) bool {

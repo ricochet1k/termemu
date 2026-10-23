@@ -238,18 +238,11 @@ func renderSnapshotCursor(snap ttySnapshot) {
 }
 
 func (t *TTYFrontend) renderCursorLocked() {
-	if t.term == nil || t.out == nil {
+	if t.term == nil {
 		return
 	}
-	if !t.attached || !t.showCur || !t.focused {
-		_, _ = t.out.Write([]byte(ansiCursorHide))
-		return
-	}
-	if t.cursor.X < t.region.X || t.cursor.X >= t.region.X2 || t.cursor.Y < t.region.Y || t.cursor.Y >= t.region.Y2 {
-		_, _ = t.out.Write([]byte(ansiCursorHide))
-		return
-	}
-	_, _ = t.out.Write([]byte(ansiMoveCursor(t.cursor.X, t.cursor.Y) + ansiCursorShow))
+	snap := t.snapshotLocked()
+	renderSnapshotCursor(snap)
 }
 
 // renderStyledLineANSI renders a line's text and SGR styling. OSC 8

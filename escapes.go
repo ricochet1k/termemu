@@ -127,56 +127,30 @@ func (s *readLoopState) snapshot() ReaderState {
 
 func (t *terminal) ptyReadOne(state *readLoopState) error {
 	gr := state.gr
-	bw, useBytes := t.screen().(interface {
-		writeString(string, int, bool, TextReadMode)
+	maxWidth := 0
+	t.withLock(func() {
+		if t.screen().AutoWrap() {
+			maxWidth = t.screen().Size().X - t.screen().CursorPos().X
+			if maxWidth < 1 {
+				maxWidth = 1
+			}
+		}
 	})
-	if useBytes {
-		maxWidth := 0
+	data, width, merge, err := gr.ReadPrintableBytes(maxWidth)
+	if err != nil {
+		if err != io.EOF {
+			debugPrintln(debugErrors, "ERR ReadPrintableBytes:", err)
+		}
+		return err
+	}
+	if len(data) > 0 {
 		t.withLock(func() {
-			if t.screen().AutoWrap() {
-				maxWidth = t.screen().Size().X - t.screen().CursorPos().X
-				if maxWidth < 1 {
-					maxWidth = 1
-				}
-			}
+			t.screen().writeString(data, width, merge, t.textReadMode)
 		})
-		data, width, merge, err := gr.ReadPrintableBytes(maxWidth)
-		if err != nil {
-			if err != io.EOF {
-				debugPrintln(debugErrors, "ERR ReadPrintableBytes:", err)
-			}
-			return err
+		if *debugTxt {
+			debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", data, len(data))
 		}
-		if len(data) > 0 {
-			t.withLock(func() {
-				bw.writeString(data, width, merge, t.textReadMode)
-			})
-			if *debugTxt {
-				debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", data, len(data))
-			}
-			return nil
-		}
-	} else {
-		tokens, err := gr.ReadPrintableTokens(0)
-		if err != nil {
-			if err != io.EOF {
-				debugPrintln(debugErrors, "ERR ReadPrintableTokens:", err)
-			}
-			return err
-		}
-		if len(tokens) > 0 {
-			t.withLock(func() {
-				t.screen().writeTokens(tokens)
-			})
-			if *debugTxt {
-				var buf bytes.Buffer
-				for _, tok := range tokens {
-					buf.Write(tok.Bytes)
-				}
-				debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", buf.String(), buf.Len())
-			}
-			return nil
-		}
+		return nil
 	}
 
 	b, err := gr.ReadByte()
@@ -641,6 +615,15 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 	}
 
 	params := paramStore[:paramCount]
+	// defaultParam supplies the CSI default for a missing first parameter.
+	defaultParam := func(v int) {
+		if paramCount != 0 {
+			return
+		}
+		paramStore[0] = v
+		paramCount = 1
+		params = paramStore[:paramCount]
+	}
 
 	// CSI grammar allows intermediate bytes (0x20-0x2F) between the
 	// parameters and the final byte. Collect them so the final byte is not
@@ -680,59 +663,31 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 	if prefix == 0 {
 		switch b {
 		case 'A': // Move cursor up
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().moveCursor(0, -params[0], false, false)
 		case 'B': // Move cursor down
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().moveCursor(0, params[0], false, true)
 		case 'C': // Move cursor forward
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().moveCursor(params[0], 0, false, false)
 		case 'D': // Move cursor backward
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().moveCursor(-params[0], 0, false, false)
 
 		case 'G': // Cursor Character Absolute
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().setCursorPos(params[0]-1, t.screen().CursorPos().Y)
 
 		case 'c': // Send Device Attributes
-			if paramCount == 0 {
-				paramStore[0] = 0
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(0)
 			switch params[0] {
 			case 0:
 				_ = t.writeReply([]byte("\033[?1;2c"))
 			}
 
 		case 'd': // Line Position Absolute
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().setCursorPos(t.screen().CursorPos().X, params[0]-1)
 
 		case 'f', 'H': // Cursor Home
@@ -767,11 +722,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 
 		case 'm': // Set color/mode
-			if paramCount == 0 {
-				paramStore[0] = 0
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(0)
 
 			style := t.screen().Style()
 
@@ -1000,51 +951,27 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 
 		case 'L': // Insert lines, scroll down
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().scroll(t.screen().CursorPos().Y, t.screen().BottomMargin(), params[0])
 
 		case 'M': // Delete lines, scroll up
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().scroll(t.screen().CursorPos().Y, t.screen().BottomMargin(), -params[0])
 
 		case 'S': // Scroll up
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().scroll(t.screen().TopMargin(), t.screen().BottomMargin(), -params[0])
 
 		case 'T': // Scroll down
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().scroll(t.screen().TopMargin(), t.screen().BottomMargin(), params[0])
 
 		case 'P': // Delete n characters
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().deleteChars(t.screen().CursorPos().X, t.screen().CursorPos().Y, params[0], CRClear)
 
 		case 'X': // Erase from cursor pos to the right
-			if paramCount == 0 {
-				paramStore[0] = 1
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(1)
 			t.screen().eraseRegion(Region{
 				X:  t.screen().CursorPos().X,
 				Y:  t.screen().CursorPos().Y,
@@ -1065,11 +992,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			t.screen().setScrollMarginTopBottom(top-1, bottom-1)
 
 		case 'n': // Device Status Report
-			if paramCount == 0 {
-				paramStore[0] = 0
-				paramCount = 1
-				params = paramStore[:paramCount]
-			}
+			defaultParam(0)
 			switch params[0] {
 			case 5:
 				_ = t.writeReply([]byte("\033[0n"))
@@ -1090,7 +1013,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			debugPrintf(debugTodo, "TODO: Unhandled CSI Command: %v %#v\n", append([]int(nil), params...), string(b))
 			return true
 		}
-	} else if string(prefix) == "?" {
+	} else if prefix == '?' {
 		switch b {
 		case 'u': // Query keyboard mode
 			flags := t.keyboardFlags()
@@ -1214,7 +1137,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		default:
 			debugPrintf(debugTodo, "TODO: Unhandled ? command: %#v %v, %#v\n", string(prefix), append([]int(nil), params...), string(b))
 		}
-	} else if string(prefix) == ">" {
+	} else if prefix == '>' {
 		switch b {
 		case 'c': // Send Device Attributes
 			attrs := "\x1b[>1;4402;0c"
@@ -1256,7 +1179,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			debugPrintf(debugTodo, "TODO: Unhandled > command: %#v %v, %#v\n", string(prefix), append([]int(nil), params...), string(b))
 			return true
 		}
-	} else if string(prefix) == "<" {
+	} else if prefix == '<' {
 		switch b {
 		case 'u': // key encoding mode pop
 			count := 1
@@ -1274,7 +1197,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			debugPrintf(debugTodo, "TODO: Unhandled < command: %#v %v, %#v\n", string(prefix), append([]int(nil), params...), string(b))
 			return true
 		}
-	} else if string(prefix) == "=" {
+	} else if prefix == '=' {
 		switch b {
 		case 'u': // key encoding mode set
 			flags := 0
@@ -1321,31 +1244,13 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 
 	param, _ := strconv.Atoi(string(paramBytes))
 
-	param2 := []byte{}
+	var param2 []byte
 
 	if b == ';' {
-		// skip the ';'
-		var scanner stringTermScanner
-		for {
-			b, err = r.ReadByte()
-			if err != nil {
-				if err != io.EOF {
-					debugPrintln(debugErrors, "ERR ReadByte9:", err)
-				}
-				return false
-			}
-			if b == 7 { // BEL
-				break
-			}
-			if scanner.isST(b) {
-				// ESC \ is ST; drop the ESC we appended as payload.
-				if len(param2) > 0 && b == '\\' && param2[len(param2)-1] == 27 {
-					param2 = param2[:len(param2)-1]
-				}
-				break
-			}
-
-			param2 = append(param2, byte(b))
+		var ok bool
+		param2, ok = readStringPayload(r, true)
+		if !ok {
+			return false
 		}
 	} else if b != 7 && b != 0x9c { // BEL, ST
 		debugPrintln(debugErrors, "OSC command number not followed by ;, BEL, or ST?", b)
@@ -1353,25 +1258,17 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 	}
 
 	switch param {
-	case 0:
-		t.setViewString(VSWindowTitle, string(param2))
-
-	case 2:
+	case 0, 2:
 		t.setViewString(VSWindowTitle, string(param2))
 
 	case 4:
 		debugPrintf(debugTodo, "TODO: change color : %#v\n", string(param2))
 
-	case 6:
-		// Legacy nonstandard working-directory announcement; OSC 7 is the
-		// standard form. Both map to VSCurrentDirectory.
-		t.setViewString(VSCurrentDirectory, string(param2))
-
-	case 7:
-		// Standard working-directory URI advertised by shells (e.g.
-		// "file://host/path"). This previously (incorrectly) set
-		// VSCurrentFile; an OSC 7 payload alone never means a file, so it
-		// now sets VSCurrentDirectory. No OSC sequence sets VSCurrentFile.
+	case 6, 7:
+		// OSC 7 is the standard working-directory URI advertised by shells
+		// (e.g. "file://host/path"); OSC 6 is the legacy nonstandard form.
+		// An OSC 7 payload alone never means a file, so no OSC sets
+		// VSCurrentFile.
 		t.setViewString(VSCurrentDirectory, string(param2))
 
 	case 8:
@@ -1500,49 +1397,50 @@ func (s *stringTermScanner) isST(b byte) bool {
 	return false
 }
 
-// consumeString discards an ESC-initiated string (APC, PM, SOS) up to its
-// terminator: ST (ESC \ or 0x9C) or BEL. Payload bytes are never printed.
-func (t *terminal) consumeString(r escapeReader) bool {
-	var scanner stringTermScanner
-	for {
-		b, err := r.ReadByte()
-		if err != nil {
-			if err != io.EOF {
-				debugPrintln(debugErrors, "ERR ReadByteString:", err)
-			}
-			return false
-		}
-		if b == 0x07 { // BEL
-			return true
-		}
-		if scanner.isST(b) {
-			return true
-		}
-	}
-}
-
-func (t *terminal) handleDCS(r escapeReader) bool {
+// readStringPayload reads a control-string payload up to BEL or ST and
+// returns it without the terminator. When collect is false the payload is
+// consumed but not buffered. ok is false when a read failed first.
+func readStringPayload(r escapeReader, collect bool) ([]byte, bool) {
 	var scanner stringTermScanner
 	var payload []byte
 	for {
 		b, err := r.ReadByte()
 		if err != nil {
 			if err != io.EOF {
-				debugPrintln(debugErrors, "ERR ReadByteDCS:", err)
+				debugPrintln(debugErrors, "ERR ReadByteString:", err)
 			}
-			return false
+			return nil, false
 		}
 		if scanner.isST(b) {
-			if *debugCmd {
-				if len(payload) > 0 && b == '\\' && payload[len(payload)-1] == 27 {
-					payload = payload[:len(payload)-1]
-				}
-				debugPrintf(debugCmd, "DCS payload: %q\n", string(payload))
+			// A 7-bit ST is ESC \\: drop the ESC that was buffered as payload.
+			if b == '\\' && len(payload) > 0 && payload[len(payload)-1] == 0x1b {
+				payload = payload[:len(payload)-1]
 			}
-			return true
+			return payload, true
 		}
-		if *debugCmd {
+		if b == 0x07 {
+			return payload, true
+		}
+		if collect {
 			payload = append(payload, b)
 		}
 	}
+}
+
+// consumeString discards an ESC-initiated string (APC, PM, SOS) up to its
+// terminator: ST (ESC \ or 0x9C) or BEL. Payload bytes are never printed.
+func (t *terminal) consumeString(r escapeReader) bool {
+	_, ok := readStringPayload(r, false)
+	return ok
+}
+
+func (t *terminal) handleDCS(r escapeReader) bool {
+	payload, ok := readStringPayload(r, *debugCmd)
+	if !ok {
+		return false
+	}
+	if *debugCmd {
+		debugPrintf(debugCmd, "DCS payload: %q\n", string(payload))
+	}
+	return true
 }

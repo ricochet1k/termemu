@@ -26,10 +26,7 @@ type screen interface {
 	setStyle(style Style)
 	setSize(w, h int)
 	eraseRegion(r Region, cr ChangeReason)
-	writeRunes(b []rune)
-	writeTokens(tokens []GraphemeToken)
-	insertRunes(b []rune)
-	rawWriteRunes(x int, y int, b []rune, cr ChangeReason)
+	writeString(text string, width int, merge bool, mode TextReadMode)
 	rawWriteRune(x int, y int, r rune, width int, cr ChangeReason)
 	deleteChars(x int, y int, n int, cr ChangeReason)
 	setScrollMarginTopBottom(top, bottom int)
@@ -88,9 +85,6 @@ type spanScreen struct {
 	autoWrap bool
 
 	textMode TextReadMode
-
-	// scratch buffers for rendering
-	renderBuffer []rune
 
 	// scrollCapture is called before lines scroll off. It receives the
 	// physical rows being lost, along with their wrapped flags.
@@ -176,25 +170,6 @@ func (s *spanScreen) Line(y int) string {
 		pos++
 	}
 	return line.String()
-}
-
-func (s *spanScreen) LineSlice(x, w, y int) string {
-	if y < 0 || y >= s.size.Y {
-		return ""
-	}
-	if x < 0 {
-		x = 0
-	}
-	if w < 0 || x+w > s.size.X {
-		w = s.size.X - x
-	}
-	if w <= 0 {
-		return ""
-	}
-
-	// Use StyledLine to get the spans, then extract plain text
-	line := s.StyledLine(x, w, y)
-	return line.PlainTextString()
 }
 
 func (s *spanScreen) StyledLine(x, w, y int) Line {
@@ -323,15 +298,18 @@ func (s *spanScreen) setSize(w, h int) {
 	s.size = Pos{X: w, Y: h}
 	s.pendingWrap = false
 
-	// Resize buffers
-	s.renderBuffer = make([]rune, w)
+	// Keep the scroll margins valid after the height change: a shrink can
+	// leave the bottom above the top (or both outside the new screen).
+	s.topMargin = clamp(s.topMargin, 0, h-1)
+	s.bottomMargin = clamp(s.bottomMargin, s.topMargin, h-1)
 
-	if s.cursorPos.X > w {
-		s.cursorPos.X = 0
-	}
-	if s.cursorPos.Y > h {
-		s.cursorPos.Y = 0
-	}
+	// Clamp rather than reset: content is preserved, so the cursor should
+	// stay near the same place. A cursor exactly at the old edge (or a saved
+	// cursor restored later by DECRC) must not remain out of bounds.
+	s.cursorPos.X = clamp(s.cursorPos.X, 0, w-1)
+	s.cursorPos.Y = clamp(s.cursorPos.Y, 0, h-1)
+	s.savedCursorPos.X = clamp(s.savedCursorPos.X, 0, w-1)
+	s.savedCursorPos.Y = clamp(s.savedCursorPos.Y, 0, h-1)
 
 	s.setStyle(s.style)
 }
@@ -382,21 +360,11 @@ func (s *spanScreen) eraseRegion(r Region, cr ChangeReason) {
 	}
 }
 
-func (s *spanScreen) writeRunes(b []rune) {
-	panic("This path should not ever be used by spanScreen")
-}
-
-func (s *spanScreen) writeTokens(tokens []GraphemeToken) {
-	panic("This path should not ever be used by spanScreen")
-}
-
 func (s *spanScreen) writeString(text string, width int, merge bool, mode TextReadMode) {
 	if len(text) == 0 {
 		return
 	}
-	if !utf8.ValidString(text) {
-		text = strings.ToValidUTF8(text, "\ufffd")
-	}
+	text = sanitizeUTF8(text)
 	s.textMode = mode
 	if merge {
 		s.mergeIntoPreviousCell(text)
@@ -466,27 +434,6 @@ func (s *spanScreen) wrapLine() {
 	if s.cursorPos.Y < len(s.wrapped) {
 		s.wrapped[s.cursorPos.Y] = true
 	}
-}
-
-func (s *spanScreen) insertRunes(b []rune) {
-	y := s.cursorPos.Y
-	n := len(b)
-	if n <= 0 {
-		return
-	}
-	if n > s.size.X {
-		n = s.size.X
-	}
-
-	line := &s.lines[y]
-	truncateLine(line, s.size.X-n, s.textMode)
-	insertSpan(line, s.cursorPos.X, Span{Style: s.style, Width: n}, s.textMode)
-
-	s.rawWriteRunes(s.cursorPos.X, s.cursorPos.Y, b[:n], CRText)
-}
-
-func (s *spanScreen) rawWriteRunes(x int, y int, b []rune, cr ChangeReason) {
-	panic("This path should not ever be used by spanScreen")
 }
 
 func (s *spanScreen) rawWriteSpan(x int, y int, sp Span, cr ChangeReason) {
@@ -563,8 +510,14 @@ func (s *spanScreen) setCursorPos(x, y int) {
 
 func (s *spanScreen) setScrollMarginTopBottom(top, bottom int) {
 	debugPrintln(debugScroll, "scroll margins:", top, bottom)
-	s.topMargin = clamp(top, 0, s.size.Y-1)
-	s.bottomMargin = clamp(bottom, 0, s.size.Y-1)
+	top = clamp(top, 0, s.size.Y-1)
+	bottom = clamp(bottom, 0, s.size.Y-1)
+	if top > bottom {
+		// Invalid margins are ignored, leaving the previous region intact.
+		return
+	}
+	s.topMargin = top
+	s.bottomMargin = bottom
 }
 
 func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
@@ -573,7 +526,13 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 	y2 = clamp(y2, 0, s.size.Y-1)
 	if y1 > y2 {
 		fmt.Fprintln(os.Stderr, "scroll ys out of order", y1, y2, dy)
+		return
 	}
+	// Scrolling by more than the region height has the same effect as
+	// scrolling by exactly the region height; clamping keeps the row
+	// indices (and the capture count) inside the region.
+	height := y2 - y1 + 1
+	dy = clamp(dy, -height, height)
 
 	if dy > 0 {
 		for y := y2; y >= y1+dy; y-- {
@@ -785,7 +744,10 @@ func resizeLine(line *spanLine, width int, style Style, mode TextReadMode) {
 	cur := lineCellWidth(line)
 	if cur > width {
 		truncateLine(line, width, mode)
-		return
+		// Truncating may drop a whole wide cluster at the boundary, which
+		// can leave the line narrower than the requested width. Pad it back
+		// so every resized line is exactly the screen width.
+		cur = lineCellWidth(line)
 	}
 	if cur < width {
 		line.spans = append(line.spans, Span{Style: style, Width: width - cur})
@@ -805,6 +767,37 @@ func lineCellWidth(line *spanLine) int {
 		width += sp.Width
 	}
 	return width
+}
+
+// sanitizeUTF8 replaces each invalid byte with U+FFFD without collapsing runs
+// of invalid bytes. The reader counts one cell per invalid byte, so collapsing
+// a run (as strings.ToValidUTF8 does) would desynchronize text from width.
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		if r == utf8.RuneError && size == 1 {
+			b.WriteRune(utf8.RuneError)
+			s = s[1:]
+			continue
+		}
+		b.WriteString(s[:size])
+		s = s[size:]
+	}
+	return b.String()
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // splitSpan splits a span at cellOffset. Returns (left, right, brokeWideCluster).
@@ -827,8 +820,8 @@ func splitSpan(sp Span, cellOffset int, mode TextReadMode) (left Span, right Spa
 		return left, right, Span{}
 	}
 
-	if mode == TextReadModeRune && sp.Width == len(sp.Text) {
-		// Simple mode where each rune is one cell - can't have wide clusters
+	if mode == TextReadModeRune && sp.Width == len(sp.Text) && isASCII(sp.Text) {
+		// Simple mode where each byte is one cell - can't have wide clusters
 		leftText := sp.Text[:cellOffset]
 		rightText := sp.Text[cellOffset:]
 		left := sp
@@ -1200,12 +1193,6 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	line.width = newWidth
 }
 
-func insertSpan(line *spanLine, x int, insert Span, mode TextReadMode) {
-	// Use replaceRange with zero-width deletion to insert at position x
-	// This properly handles splitting spans at boundaries without extra allocations
-	replaceRange(line, x, 0, insert, mode)
-}
-
 func truncateLine(line *spanLine, width int, mode TextReadMode) {
 	if width <= 0 {
 		line.spans = nil
@@ -1217,9 +1204,7 @@ func truncateLine(line *spanLine, width int, mode TextReadMode) {
 }
 
 func (s *spanScreen) mergeIntoPreviousCell(text string) {
-	if !utf8.ValidString(text) {
-		text = strings.ToValidUTF8(text, "\ufffd")
-	}
+	text = sanitizeUTF8(text)
 	y := s.cursorPos.Y
 	line := &s.lines[y]
 	cell := s.cursorPos.X - 1
@@ -1306,18 +1291,4 @@ func emojiPresentationAdding(text string) bool {
 		}
 	}
 	return false
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
