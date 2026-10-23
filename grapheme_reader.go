@@ -370,8 +370,14 @@ func stepRuneCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	}
 	if r == utf8.RuneError && size == 1 {
 		// Invalid UTF-8 is rendered as a replacement character rather than
-		// stored as raw bytes.
-		return []byte("\ufffd"), size, 1, state, true
+		// stored as raw bytes. It still participates in emoji-presentation
+		// widening so a following VS16/keycap/modifier behaves the same as
+		// when the replacement arrives in its own read.
+		width := 1
+		if nextRuneIsEmojiPresentation(buf[size:]) {
+			width = 2
+		}
+		return []byte("\ufffd"), size, width, state, true
 	}
 	// Calculate the actual display width (e.g., emoji = 2, normal char = 1).
 	// Zero-width runes stay zero so the reader can merge them into the
@@ -401,28 +407,47 @@ func stepGraphemeCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if !utf8.FullRune(buf) {
 		return nil, 0, 0, state, false
 	}
-	cluster, rest, boundaries, newState := uniseg.Step(buf, state)
+	cluster, rest, _, newState := uniseg.Step(buf, state)
 	if cluster == nil {
 		return nil, 0, 0, state, false
 	}
-	width := boundaries >> uniseg.ShiftWidth
+	// uniseg's carried state supplies the previous rune's property, and its
+	// single-rune fast path uses that property for the next cluster's width.
+	// That makes widths chunk-dependent: after "🇸" every following rune
+	// measures 2, and after "e\u0301" every following rune measures 0. Measure
+	// each cluster standalone instead; continuation clusters (after ZWJ,
+	// combining marks, regional indicators, modifiers) are merged and zeroed
+	// by nextGraphemeTokenInfo.
+	width := standaloneGraphemeWidth(cluster)
 	width = emojiPresentationWidth(cluster, width)
 	consumed := len(buf) - len(rest)
 	return cluster, consumed, width, newState, true
 }
 
+func standaloneGraphemeWidth(cluster []byte) int {
+	if len(cluster) == 0 {
+		return 0
+	}
+	_, _, boundaries, _ := uniseg.Step(cluster, -1)
+	return boundaries >> uniseg.ShiftWidth
+}
+
 // emojiPresentationWidth adjusts a grapheme cluster's width for emoji
 // presentation. uniseg reports keycap sequences such as "1\ufe0f\u20e3" as one
-// cell, but terminals render them as two. VS16 and the combining enclosing
-// keycap only widen clusters whose computed width is exactly one, so ordinary
-// text (including e + combining acute) keeps its normal width.
+// cell, but terminals render them as two. VS16, the combining enclosing
+// keycap, and emoji skin-tone modifiers only widen clusters whose computed
+// width is exactly one, so ordinary text (including e + combining acute) keeps
+// its normal width.
 func emojiPresentationWidth(cluster []byte, width int) int {
 	if width != 1 {
 		return width
 	}
 	for len(cluster) > 0 {
 		r, size := utf8.DecodeRune(cluster)
-		if r == '\ufe0f' || r == '\u20e3' {
+		switch {
+		case r == '\ufe0f', r == '\u20e3':
+			return 2
+		case r >= 0x1f3fb && r <= 0x1f3ff: // emoji skin-tone modifier
 			return 2
 		}
 		cluster = cluster[size:]
@@ -430,14 +455,15 @@ func emojiPresentationWidth(cluster []byte, width int) int {
 	return width
 }
 
-// nextRuneIsEmojiPresentation reports whether the next complete rune is an
-// emoji presentation selector or combining enclosing keycap.
+// nextRuneIsEmojiPresentation reports whether the next complete rune widens a
+// one-cell base: an emoji presentation selector, combining enclosing keycap, or
+// skin-tone modifier.
 func nextRuneIsEmojiPresentation(buf []byte) bool {
 	if len(buf) == 0 || !utf8.FullRune(buf) {
 		return false
 	}
 	r, _ := utf8.DecodeRune(buf)
-	return r == '\ufe0f' || r == '\u20e3'
+	return r == '\ufe0f' || r == '\u20e3' || (r >= 0x1f3fb && r <= 0x1f3ff)
 }
 
 func (r *GraphemeReader) nextTokenInfo(buf []byte) ([]byte, int, int, bool, int, bool, bool, bool) {
@@ -512,6 +538,13 @@ func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI
 		nextLastWasRI = false
 	}
 
+	// A cluster that ends in ZWJ glues the next cluster to this cell. Track it
+	// explicitly so the next chunk merges regardless of what uniseg's carried
+	// state reports.
+	if endsWithZWJ(cluster) {
+		nextForceMergeNext = true
+	}
+
 	// A cluster with no advance and any cluster that starts with a
 	// continuation rune (ZWJ, variation selector, combining mark, emoji
 	// modifier, keycap, tag) is part of the preceding grapheme, which can
@@ -524,6 +557,17 @@ func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI
 		width = 0
 	}
 	return cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, true
+}
+
+func endsWithZWJ(cluster []byte) bool {
+	for len(cluster) > 0 {
+		r, size := utf8.DecodeRune(cluster)
+		cluster = cluster[size:]
+		if len(cluster) == 0 {
+			return r == '\u200d'
+		}
+	}
+	return false
 }
 
 // startsWithGraphemeContinuation reports whether the first rune of cluster is

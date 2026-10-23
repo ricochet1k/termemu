@@ -360,6 +360,13 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Two modes: `TextReadModeRune` (1 rune = 1 token) or `TextReadModeGrapheme` (1 grapheme cluster = 1 token)
 - Handles combining characters, zero-width joiners, emoji sequences
 - Returns merge tokens for combining chars that should merge into previous cell
+- Cluster widths are measured standalone (`standaloneGraphemeWidth`); uniseg's
+  carried state is used for segmentation only. Its carried property makes a
+  following cluster's width depend on the previous cluster, so using it for
+  width broke chunk invariance (e.g. `e\u0301` then `x`, or a lone regional
+  indicator, read byte-at-a-time)
+- Clusters ending in ZWJ set `ForceMergeNext`; regional indicators use
+  `LastWasRI`; VS16/keycap/skin-tone modifiers widen a one-cell base to two
 - `GraphemeState` + `SnapshotState`/`NewGraphemeReaderFromState` capture and
   restore the buffer and tokenizer state for pause/handoff
 
@@ -508,6 +515,12 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
   `checkScreenInvariants` (full-width lines, span widths, cursor and margins in
   bounds), then round-trip Snapshot/Restore. Keep new screen features inside
   those invariants.
+- `fuzz_extra_test.go` adds `FuzzTerminalInputChunking` (whole vs 1/3/7-byte
+  reads must reach the same semantic screen state), `FuzzReplaceRangeInvariants`
+  (span width/UTF-8 invariants under arbitrary text and offsets), and
+  `FuzzLineEquivalentPacking` (repacking cells must not change `Line.Equivalent`).
+- Corpus seeds under `testdata/fuzz/<Target>/` are regression tests; keep them
+  when a fuzz failure is fixed.
 - Failing fuzz inputs are kept under `testdata/fuzz/FuzzTerminalInput/` and run
   as seeds by a normal `go test`. Run a longer session with
   `go test -run '^$' -fuzz '^FuzzTerminalInput$' -fuzztime 30s .`.

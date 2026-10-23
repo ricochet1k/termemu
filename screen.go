@@ -913,6 +913,18 @@ func byteIndexForCell(text []byte, cellOffset int, mode TextReadMode) (int, int)
 			width += cellWidth
 		}
 	}
+	// Zero-width clusters immediately after the boundary belong to the
+	// preceding cell (combining marks, format controls). Consume them with
+	// the left side of the split so overwriting the next cell does not drop
+	// them.
+	for width >= cellOffset && idx < len(text) {
+		_, consumed, cellWidth, newState, ok := stepTextCluster(text[idx:], state, mode)
+		if !ok || consumed <= 0 || cellWidth > 0 {
+			break
+		}
+		idx += consumed
+		state = newState
+	}
 	return idx, width
 }
 
@@ -1203,6 +1215,28 @@ func truncateLine(line *spanLine, width int, mode TextReadMode) {
 	replaceRange(line, width, lineCellWidth(line)-width, Span{}, mode)
 }
 
+// isolateCell splits sp so the cell starting at offset is its own span.
+// When the split would break a wide cluster, sp is returned as the target
+// unchanged (the whole cluster is the merge target).
+func isolateCell(sp Span, offset int, mode TextReadMode) (left, target, right Span) {
+	if offset > 0 {
+		l, r, wide := splitSpan(sp, offset, mode)
+		if wide.Width > 0 {
+			return Span{}, sp, Span{}
+		}
+		left = l
+		sp = r
+	}
+	if sp.Width <= 1 {
+		return left, sp, Span{}
+	}
+	t, r, wide := splitSpan(sp, 1, mode)
+	if wide.Width > 0 {
+		return left, sp, Span{}
+	}
+	return left, t, r
+}
+
 func (s *spanScreen) mergeIntoPreviousCell(text string) {
 	text = sanitizeUTF8(text)
 	y := s.cursorPos.Y
@@ -1223,31 +1257,31 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 		return
 	}
 
-	sp := &line.spans[idx]
-
-	// If we're at an offset within the span, we need to split it first.
-	// A split that falls inside a wide cluster cannot isolate the previous
-	// cell; keep the whole wide span as the merge target instead of
-	// dropping the broken cluster.
-	if offset > 0 {
-		left, right, wide := splitSpan(*sp, offset, s.textMode)
-		if wide.Width == 0 {
-			// Update spans: replace current span with left and right
-			newSpans := make([]Span, 0, len(line.spans)+1)
-			newSpans = append(newSpans, line.spans[:idx]...)
-			newSpans = append(newSpans, left, right)
-			newSpans = append(newSpans, line.spans[idx+1:]...)
-			line.spans = newSpans
-
-			// Now the cell we want to merge into is at idx+1
-			idx++
+	// Isolate the target cell from its neighbours. A blank run (or a text
+	// run) can cover many cells, and appending the mark to the whole span
+	// would attach it to the wrong cell. A split inside a wide cluster
+	// cannot isolate one cell; keep the whole wide span as the target.
+	left, target, right := isolateCell(line.spans[idx], offset, s.textMode)
+	if left.Width > 0 || right.Width > 0 {
+		origIdx := idx
+		newSpans := make([]Span, 0, len(line.spans)+2)
+		newSpans = append(newSpans, line.spans[:origIdx]...)
+		if left.Width > 0 {
+			newSpans = append(newSpans, left)
 		}
+		idx = len(newSpans)
+		newSpans = append(newSpans, target)
+		if right.Width > 0 {
+			newSpans = append(newSpans, right)
+		}
+		newSpans = append(newSpans, line.spans[origIdx+1:]...)
+		line.spans = newSpans
 	}
 
 	// Never merge text with a different style or link into the previous
 	// span. Keep it as a zero-width span so the cell content and style
 	// boundary both survive.
-	sp = &line.spans[idx]
+	sp := &line.spans[idx]
 	if sp.Style != s.style || sp.Link != s.link {
 		line.spans = append(line.spans, Span{})
 		copy(line.spans[idx+2:], line.spans[idx+1:])
