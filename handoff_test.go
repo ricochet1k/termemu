@@ -3,6 +3,7 @@
 package termemu
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -292,6 +293,36 @@ func TestNewFromHandoffRestoresScrollback(t *testing.T) {
 	}
 }
 
+func TestNewFromHandoffResizesSnapshot(t *testing.T) {
+	old := newTerminal(NewMockFrontend(), NewNoPTYBackend(nil, nil), TextReadModeRune)
+	if err := old.Resize(10, 3); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	feedText(t, old, "abcdefghij\r\nsecond\r\nthird")
+	h, err := old.Pause(context.Background())
+	if err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	// The receiving window is smaller than the captured one.
+	h.Size = Pos{X: 5, Y: 2}
+
+	newTerm, err := NewFromHandoff(nil, NewNoPTYBackend(bytes.NewReader(nil), io.Discard), h)
+	if err != nil {
+		t.Fatalf("NewFromHandoff: %v", err)
+	}
+	defer func() { _ = newTerm.Close() }()
+
+	if w, h := newTerm.Size(); w != 5 || h != 2 {
+		t.Fatalf("size = %dx%d, want 5x2", w, h)
+	}
+	if got := newTerm.Line(0); got != "abcde" {
+		t.Fatalf("line 0 = %q, want %q", got, "abcde")
+	}
+	if got := newTerm.Line(1); got != "secon" {
+		t.Fatalf("line 1 = %q, want %q", got, "secon")
+	}
+}
+
 func TestNewFromHandoffRejectsInvalidSizes(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -315,8 +346,14 @@ func TestNewFromHandoffRejectsInvalidSizes(t *testing.T) {
 			Alt:  ScreenState{Width: 10, Height: 10},
 		},
 	}
-	if _, err := NewFromHandoff(nil, backend2, h); err != ErrSnapshotSizeMismatch {
-		t.Fatalf("error = %v, want ErrSnapshotSizeMismatch", err)
+	// A snapshot captured at another size is resized into Handoff.Size.
+	newTerm, err := NewFromHandoff(nil, backend2, h)
+	if err != nil {
+		t.Fatalf("NewFromHandoff with a different snapshot size: %v", err)
+	}
+	defer func() { _ = newTerm.Close() }()
+	if w, h := newTerm.Size(); w != 80 || h != 24 {
+		t.Fatalf("terminal size = %dx%d, want 80x24", w, h)
 	}
 }
 

@@ -51,13 +51,13 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 		ctx = context.Background()
 	}
 
-	t.Lock()
+	t.lifecycleMu.Lock()
 	if t.closed {
-		t.Unlock()
+		t.lifecycleMu.Unlock()
 		return Handoff{}, errors.New("termemu: terminal is closed")
 	}
 	if t.paused {
-		t.Unlock()
+		t.lifecycleMu.Unlock()
 		return Handoff{}, errors.New("termemu: terminal is already paused")
 	}
 	t.paused = true
@@ -66,9 +66,9 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 	t.pauseReady = ready
 	t.pauseResume = resume
 	started := t.readLoopStarted
+	t.lifecycleMu.Unlock()
 	backend := t.backend
 	mode := t.textReadMode
-	t.Unlock()
 
 	if !started {
 		return t.captureHandoff(ReaderState{Mode: mode, Initial: true})
@@ -105,12 +105,12 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 // The resume signal is sent after the deadline is cleared so the loop cannot
 // immediately observe a stale expired deadline.
 func (t *terminal) abortPause() {
-	t.Lock()
+	t.lifecycleMu.Lock()
 	t.paused = false
 	resume := t.pauseResume
 	t.pauseReady = nil
 	t.pauseResume = nil
-	t.Unlock()
+	t.lifecycleMu.Unlock()
 	t.clearReadDeadline()
 	if resume != nil {
 		select {
@@ -143,16 +143,16 @@ func (t *terminal) captureHandoff(reader ReaderState) (Handoff, error) {
 // deadline before waking the loop so the first resumed read cannot observe an
 // expired deadline. Resume on a non-paused terminal is a no-op.
 func (t *terminal) Resume() error {
-	t.Lock()
+	t.lifecycleMu.Lock()
 	if !t.paused {
-		t.Unlock()
+		t.lifecycleMu.Unlock()
 		return nil
 	}
 	resume := t.pauseResume
 	t.paused = false
 	t.pauseReady = nil
 	t.pauseResume = nil
-	t.Unlock()
+	t.lifecycleMu.Unlock()
 
 	// Clear before waking the loop (see pauseLoop/abortPause ordering).
 	t.clearReadDeadline()
@@ -167,29 +167,29 @@ func (t *terminal) Resume() error {
 
 // shouldPause reports whether the read loop should park before its next read.
 func (t *terminal) shouldPause() bool {
-	t.Lock()
-	defer t.Unlock()
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
 	return t.paused && t.pauseReady != nil && t.pauseResume != nil
 }
 
 // isPaused reports whether a pause was requested (used to distinguish a
 // deadline wake from a genuine read error).
 func (t *terminal) isPaused() bool {
-	t.Lock()
-	defer t.Unlock()
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
 	return t.paused
 }
 
 // pauseLoop sends the loop's state to Pause and waits for Resume (true) or an
 // abort/exit (false). It returns false when the loop should exit.
 func (t *terminal) pauseLoop(state ReaderState) bool {
-	t.Lock()
+	t.lifecycleMu.Lock()
 	if !t.paused || t.pauseReady == nil || t.pauseResume == nil {
-		t.Unlock()
+		t.lifecycleMu.Unlock()
 		return true
 	}
 	ready, resume := t.pauseReady, t.pauseResume
-	t.Unlock()
+	t.lifecycleMu.Unlock()
 
 	select {
 	case ready <- state:
@@ -205,9 +205,7 @@ func (t *terminal) pauseLoop(state ReaderState) bool {
 
 // clearReadDeadline clears the backend read deadline, if supported.
 func (t *terminal) clearReadDeadline() {
-	t.Lock()
 	backend := t.backend
-	t.Unlock()
 	if setter, ok := backend.(interface{ SetReadDeadline(time.Time) error }); ok {
 		_ = setter.SetReadDeadline(time.Time{})
 	}
@@ -216,23 +214,22 @@ func (t *terminal) clearReadDeadline() {
 // clearReadDeadlineIfIdle clears the deadline unless a new Pause has already
 // installed one. This avoids a resumed loop clobbering a fresh pause request.
 func (t *terminal) clearReadDeadlineIfIdle() {
-	t.Lock()
+	t.lifecycleMu.Lock()
 	paused := t.paused
-	backend := t.backend
-	t.Unlock()
+	t.lifecycleMu.Unlock()
 	if paused {
 		return
 	}
-	if setter, ok := backend.(interface{ SetReadDeadline(time.Time) error }); ok {
-		_ = setter.SetReadDeadline(time.Time{})
-	}
+	t.clearReadDeadline()
 }
 
 // NewFromHandoff creates a terminal from a Handoff and starts its read loop
 // with the captured reader state. The terminal is created paused (no reads
-// happen) until the snapshot and scrollback have been restored. The caller
-// owns backend and must arrange any cross-process fd transfer beforehand
-// (PTYBackend.Adopt/AdoptMaster). On a restore error the backend is closed.
+// happen) until the snapshot and scrollback have been restored. Handoff.Size
+// is the target size; if the snapshot was captured at a different size its
+// content is resized to fit. The caller owns backend and must arrange any
+// cross-process fd transfer beforehand (PTYBackend.Adopt/AdoptMaster). On a
+// restore error the backend is closed.
 func NewFromHandoff(f Frontend, backend Backend, h Handoff, opts ...TerminalOption) (Terminal, error) {
 	if backend == nil {
 		return nil, fmt.Errorf("%w: nil backend", ErrHandoffInvalid)
@@ -240,8 +237,8 @@ func NewFromHandoff(f Frontend, backend Backend, h Handoff, opts ...TerminalOpti
 	if h.Size.X <= 0 || h.Size.Y <= 0 {
 		return nil, fmt.Errorf("%w: invalid size %dx%d", ErrHandoffInvalid, h.Size.X, h.Size.Y)
 	}
-	if h.Snapshot.Main.Width != h.Size.X || h.Snapshot.Main.Height != h.Size.Y ||
-		h.Snapshot.Alt.Width != h.Size.X || h.Snapshot.Alt.Height != h.Size.Y {
+	if h.Snapshot.Main.Width <= 0 || h.Snapshot.Main.Height <= 0 ||
+		h.Snapshot.Alt.Width <= 0 || h.Snapshot.Alt.Height <= 0 {
 		return nil, ErrSnapshotSizeMismatch
 	}
 
@@ -256,13 +253,19 @@ func NewFromHandoff(f Frontend, backend Backend, h Handoff, opts ...TerminalOpti
 		opt(t)
 	}
 
+	// The receiving process may have a different window size. Resize the
+	// screen and pty to Handoff.Size, then restore the captured content into
+	// that size (lines are truncated/padded, cursor and margins clamp).
 	t.mainScreen.setSize(h.Size.X, h.Size.Y)
 	t.altScreen.setSize(h.Size.X, h.Size.Y)
 	if err := backend.SetSize(h.Size.X, h.Size.Y); err != nil {
 		_ = backend.Close()
 		return nil, err
 	}
-	if err := t.Restore(h.Snapshot); err != nil {
+	snap := h.Snapshot
+	snap.Main.Width, snap.Main.Height = h.Size.X, h.Size.Y
+	snap.Alt.Width, snap.Alt.Height = h.Size.X, h.Size.Y
+	if err := t.Restore(snap); err != nil {
 		_ = backend.Close()
 		return nil, err
 	}

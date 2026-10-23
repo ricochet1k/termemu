@@ -172,6 +172,21 @@ func TestSendMouseRaw_Encodings(t *testing.T) {
 	if !strings.HasPrefix(string(buf[:n]), "\x1b[<") {
 		t.Fatalf("unexpected SGR mouse seq: %q", string(buf[:n]))
 	}
+
+	// urxvt encoding: CSI button;x;yM with 32+button.
+	t1.viewInts[VIMouseEncoding] = MEURXVT
+	go func() { _ = t1.SendMouseRaw(MBtn1, true, MControl, 7, 8) }()
+	n, _ = r.Read(buf)
+	if got := string(buf[:n]); got != "\x1b[48;7;8M" {
+		t.Fatalf("unexpected urxvt mouse seq: %q, want %q", got, "\x1b[48;7;8M")
+	}
+
+	// Release uses button 3 (MRelease), as in X10.
+	go func() { _ = t1.SendMouseRaw(MBtn1, false, 0, 7, 8) }()
+	n, _ = r.Read(buf)
+	if got := string(buf[:n]); got != "\x1b[35;7;8M" {
+		t.Fatalf("unexpected urxvt release seq: %q, want %q", got, "\x1b[35;7;8M")
+	}
 }
 
 func TestHandleCmdCSI_DeviceAttrsAndAlternateScreen(t *testing.T) {
@@ -381,7 +396,7 @@ func TestCSI_MouseEncoding(t *testing.T) {
 		{"?1006h enables SGR encoding", "[?1006h", MESGR},
 		{"?1006l resets to X10", "[?1006l", MEX10},
 		// urxvt mode (?1015)
-		{"?1015h enables UTF-8 encoding", "[?1015h", MEUTF8},
+		{"?1015h enables urxvt encoding", "[?1015h", MEURXVT},
 		{"?1015l resets to X10", "[?1015l", MEX10},
 	}
 

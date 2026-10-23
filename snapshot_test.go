@@ -166,7 +166,7 @@ func TestSnapshotDeepCopyIndependence(t *testing.T) {
 	}
 }
 
-func TestSnapshotRestoreSizeMismatch(t *testing.T) {
+func TestSnapshotRestoreDifferentSize(t *testing.T) {
 	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
 	feedText(t, term, "keep me")
 
@@ -176,17 +176,17 @@ func TestSnapshotRestoreSizeMismatch(t *testing.T) {
 	}
 	feedText(t, term, "resized")
 
-	before := term.Snapshot()
-	err := term.Restore(snap)
-	if !errors.Is(err, ErrSnapshotSizeMismatch) {
-		t.Fatalf("Restore error = %v, want ErrSnapshotSizeMismatch", err)
+	if err := term.Restore(snap); err != nil {
+		t.Fatalf("Restore: %v", err)
 	}
-	after := term.Snapshot()
-	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("failed Restore changed terminal state:\nbefore: %#v\nafter:  %#v", before, after)
+	if w, h := term.Size(); w != 80 || h != 14 {
+		t.Fatalf("Restore left terminal at %dx%d, want snapshot size 80x14", w, h)
 	}
-	if w, h := term.Size(); w != 40 || h != 10 {
-		t.Fatalf("Restore resized terminal to %dx%d", w, h)
+	if got := term.Line(0); !strings.HasPrefix(got, "keep me") {
+		t.Fatalf("restored line = %q, want the snapshot content", got)
+	}
+	if err := term.Restore(Snapshot{}); !errors.Is(err, ErrSnapshotSizeMismatch) {
+		t.Fatalf("Restore(zero snapshot) = %v, want ErrSnapshotSizeMismatch", err)
 	}
 }
 

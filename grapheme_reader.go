@@ -41,6 +41,11 @@ type GraphemeReader struct {
 	forceMergeNext bool
 	lastWasRI      bool
 	mode           TextReadMode
+	// standaloneWidth is true when the carried uniseg state comes from a
+	// cluster that ended at a read boundary. Its property can make the next
+	// cluster's width chunk-dependent, so the first cluster of the new read
+	// is measured standalone.
+	standaloneWidth bool
 }
 
 const graphemeReadBufferSize = 4096
@@ -65,7 +70,7 @@ func NewGraphemeReader(src io.Reader) *GraphemeReader {
 }
 
 func NewGraphemeReaderWithMode(src io.Reader, mode TextReadMode) *GraphemeReader {
-	return &GraphemeReader{src: src, state: -1, mode: mode}
+	return &GraphemeReader{src: src, state: -1, mode: mode, standaloneWidth: true}
 }
 
 // NewGraphemeReaderFromState creates a reader that resumes from st, including
@@ -76,11 +81,12 @@ func NewGraphemeReaderFromState(src io.Reader, st GraphemeState) *GraphemeReader
 		state = -1
 	}
 	r := &GraphemeReader{
-		src:            src,
-		state:          state,
-		forceMergeNext: st.ForceMergeNext,
-		lastWasRI:      st.LastWasRI,
-		mode:           st.Mode,
+		src:             src,
+		state:           state,
+		forceMergeNext:  st.ForceMergeNext,
+		lastWasRI:       st.LastWasRI,
+		mode:            st.Mode,
+		standaloneWidth: true,
 	}
 	if len(st.Pending) > 0 {
 		r.data = append([]byte(nil), st.Pending...)
@@ -175,6 +181,10 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 
 		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok := r.nextTokenInfo(r.data[r.start:r.end])
 		if !ok {
+			// The remaining bytes do not form a complete cluster yet. The
+			// next emitted cluster may need a standalone width because the
+			// state no longer has a complete lookahead.
+			r.standaloneWidth = true
 			if r.start == runStart {
 				before := r.Buffered()
 				err := r.fill()
@@ -268,6 +278,7 @@ func (r *GraphemeReader) ReadPrintableTokensInto(maxWidth int, dst []GraphemeTok
 
 		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok := r.nextTokenInfo(r.data[r.start:r.end])
 		if !ok {
+			r.standaloneWidth = true
 			if len(out) > 0 {
 				return out, nil
 			}
@@ -407,18 +418,11 @@ func stepGraphemeCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if !utf8.FullRune(buf) {
 		return nil, 0, 0, state, false
 	}
-	cluster, rest, _, newState := uniseg.Step(buf, state)
+	cluster, rest, boundaries, newState := uniseg.Step(buf, state)
 	if cluster == nil {
 		return nil, 0, 0, state, false
 	}
-	// uniseg's carried state supplies the previous rune's property, and its
-	// single-rune fast path uses that property for the next cluster's width.
-	// That makes widths chunk-dependent: after "🇸" every following rune
-	// measures 2, and after "e\u0301" every following rune measures 0. Measure
-	// each cluster standalone instead; continuation clusters (after ZWJ,
-	// combining marks, regional indicators, modifiers) are merged and zeroed
-	// by nextGraphemeTokenInfo.
-	width := standaloneGraphemeWidth(cluster)
+	width := boundaries >> uniseg.ShiftWidth
 	width = emojiPresentationWidth(cluster, width)
 	consumed := len(buf) - len(rest)
 	return cluster, consumed, width, newState, true
@@ -466,11 +470,18 @@ func nextRuneIsEmojiPresentation(buf []byte) bool {
 	return r == '\ufe0f' || r == '\u20e3' || (r >= 0x1f3fb && r <= 0x1f3ff)
 }
 
-func (r *GraphemeReader) nextTokenInfo(buf []byte) ([]byte, int, int, bool, int, bool, bool, bool) {
+func (r *GraphemeReader) nextTokenInfo(buf []byte) (cluster []byte, consumed int, width int, merge bool, newState int, nextForceMergeNext bool, nextLastWasRI bool, ok bool) {
 	if r.mode == TextReadModeGrapheme {
-		return nextGraphemeTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI)
+		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok = nextGraphemeTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI, r.standaloneWidth)
+	} else {
+		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok = nextRuneTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI)
 	}
-	return nextRuneTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI)
+	if ok {
+		// A token that consumes the whole buffer ends at a read boundary;
+		// the next read's first cluster width may need a standalone measure.
+		r.standaloneWidth = consumed == len(buf)
+	}
+	return
 }
 
 func nextRuneTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool) ([]byte, int, int, bool, int, bool, bool, bool) {
@@ -505,10 +516,41 @@ func nextRuneTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI boo
 	return cluster, consumed, width, merge, newState, nextForceMergeNext, lastWasRI, true
 }
 
-func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool) ([]byte, int, int, bool, int, bool, bool, bool) {
+// extendEmojiPresentation coalesces a one-cell base with a following
+// VS16/keycap/skin-tone modifier that uniseg may report as a separate cluster
+// (for example "0🏽"). It matches the streaming merge path, which widens the
+// previous cell when the mark arrives in its own read.
+func extendEmojiPresentation(buf, cluster []byte, consumed, width, newState int) ([]byte, int, int, int) {
+	if width != 1 || consumed >= len(buf) || startsWithGraphemeContinuation(cluster) {
+		return cluster, consumed, width, newState
+	}
+	if !nextRuneIsEmojiPresentation(buf[consumed:]) {
+		return cluster, consumed, width, newState
+	}
+	_, size := utf8.DecodeRune(buf[consumed:])
+	return buf[:consumed+size], consumed + size, 2, -1
+}
+
+func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool, standaloneWidth bool) ([]byte, int, int, bool, int, bool, bool, bool) {
+	// Printable ASCII is always its own one-cell cluster. Skipping uniseg
+	// here is the common case for terminal output and keeps grapheme mode
+	// close to rune mode's throughput. Continuation state (after a ZWJ or a
+	// regional indicator) must still go through the full tokenizer.
+	if !forceMergeNext && !lastWasRI && len(buf) > 0 && buf[0] >= 0x20 && buf[0] < 0x7f {
+		cluster, consumed, width, newState := extendEmojiPresentation(buf, buf[:1], 1, 1, -1)
+		return cluster, consumed, width, false, newState, false, false, true
+	}
 	cluster, consumed, width, newState, ok := stepGraphemeCluster(buf, state)
 	if !ok {
 		return nil, 0, 0, false, state, forceMergeNext, lastWasRI, false
+	}
+	cluster, consumed, width, newState = extendEmojiPresentation(buf, cluster, consumed, width, newState)
+	if standaloneWidth || lastWasRI {
+		// The carried state came from a cluster that ended at the previous
+		// read boundary. uniseg's width for this cluster can then depend on
+		// the previous rune's property, so measure it on its own.
+		width = standaloneGraphemeWidth(cluster)
+		width = emojiPresentationWidth(cluster, width)
 	}
 	merge := false
 	nextForceMergeNext := forceMergeNext

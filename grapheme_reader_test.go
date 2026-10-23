@@ -1,7 +1,9 @@
 package termemu
 
 import (
+	"bytes"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -276,4 +278,37 @@ func TestGraphemeReader_ReadPrintableBytesMaxWidth(t *testing.T) {
 	if out != "b" || width != 1 || merge {
 		t.Fatalf("expected trailing token, got %q width %d merge %v", out, width, merge)
 	}
+}
+
+func benchmarkGraphemeRead(b *testing.B, text string) {
+	data := []byte(text)
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		gr := NewGraphemeReaderWithMode(bytes.NewReader(data), TextReadModeGrapheme)
+		for {
+			text, _, _, err := gr.ReadPrintableBytes(0)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				b.Fatal(err)
+			}
+			if text == "" {
+				if _, err := gr.ReadByte(); err == io.EOF {
+					break
+				} else if err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkGraphemeReadASCII(b *testing.B) {
+	benchmarkGraphemeRead(b, strings.Repeat("the quick brown fox jumps over the lazy dog 0123456789\n", 400))
+}
+
+func BenchmarkGraphemeReadEmoji(b *testing.B) {
+	benchmarkGraphemeRead(b, strings.Repeat("👨\u200d👩\u200d👧\u200d👦 e\u0301 1\ufe0f\u20e3 🇺🇸👍🏽 ", 200))
 }

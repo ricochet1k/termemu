@@ -52,6 +52,7 @@ const (
 	MEX10 int = iota
 	MEUTF8
 	MESGR
+	MEURXVT
 )
 
 // ChangeReason says what kind of change caused the region to change, for optimization etc.
@@ -98,10 +99,11 @@ type Frontend interface {
 	Bell(v LockedView)
 	RegionChanged(v LockedView, r Region, c ChangeReason)
 
-	// ScrollLines is called when lines are about to be scrolled off the
-	// top of the main (not alternate) screen. If you want to save to a scrollback
-	// buffer, do it now.
-	ScrollLines(v LockedView, y int)
+	// ScrollLines is called for every scroll of the main (not alternate)
+	// screen with the signed delta. Negative means content moved up (rows
+	// left the top); positive means content moved down. Scrollback capture
+	// and ScrollbackRowsAppended are separate.
+	ScrollLines(v LockedView, delta int)
 	CursorMoved(v LockedView, x, y int)
 	StyleChanged(v LockedView, s Style)
 	ViewFlagChanged(v LockedView, vs ViewFlag, value bool)
@@ -138,7 +140,7 @@ type EmptyFrontend struct{}
 func (d *EmptyFrontend) Bell(v LockedView)                                           {}
 func (d *EmptyFrontend) RegionChanged(v LockedView, r Region, c ChangeReason)        {}
 func (d *EmptyFrontend) CursorMoved(v LockedView, x, y int)                          {}
-func (d *EmptyFrontend) ScrollLines(v LockedView, y int)                             {}
+func (d *EmptyFrontend) ScrollLines(v LockedView, delta int)                         {}
 func (d *EmptyFrontend) StyleChanged(v LockedView, s Style)                          {}
 func (d *EmptyFrontend) ViewFlagChanged(v LockedView, vs ViewFlag, value bool)       {}
 func (d *EmptyFrontend) ViewIntChanged(v LockedView, vs ViewInt, value int)          {}

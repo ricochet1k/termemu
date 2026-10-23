@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
@@ -174,5 +175,109 @@ func TestResizeEmitsSingleFullRegion(t *testing.T) {
 	w, h := term.Size()
 	if w != 100 || h != 30 {
 		t.Fatalf("expected size 100x30, got %dx%d", w, h)
+	}
+}
+
+// TestCloseAndErrDoNotTakeTerminalLock checks that lifecycle calls made while
+// the terminal lock is already held (as from a frontend callback) do not
+// deadlock.
+func TestCloseAndErrDoNotTakeTerminalLock(t *testing.T) {
+	_, term, _ := MakeTerminalWithMock(TextReadModeRune)
+	done := make(chan struct{})
+	go func() {
+		term.View(func(LockedView) {
+			_ = term.Close()
+			_ = term.Err()
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close/Err deadlocked while the terminal lock was held")
+	}
+}
+
+func TestScrollLinesReportsSignedDelta(t *testing.T) {
+	_, term, mf := MakeTerminalWithMock(TextReadModeRune)
+	if err := term.Resize(10, 3); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+
+	// Filling the last line scrolls once; each LF after that scrolls again.
+	feedText(t, term, "1\r\n2\r\n3\r\n4\r\n5\r\n")
+	mf.mu.Lock()
+	deltas := append([]int(nil), mf.ScrollDeltas...)
+	mf.mu.Unlock()
+	if len(deltas) == 0 {
+		t.Fatal("ScrollLines was not called")
+	}
+	for _, d := range deltas {
+		if d != -1 {
+			t.Fatalf("scroll deltas = %v, want all -1 (content moved up)", deltas)
+		}
+	}
+
+	// Inserting a line at the top of the scroll region scrolls down.
+	mf.mu.Lock()
+	mf.ScrollDeltas = nil
+	mf.mu.Unlock()
+	term.mustHandleCommand(t, "[1;2H")
+	term.mustHandleCommand(t, "[L")
+	mf.mu.Lock()
+	deltas = append([]int(nil), mf.ScrollDeltas...)
+	mf.mu.Unlock()
+	if len(deltas) != 1 || deltas[0] != 1 {
+		t.Fatalf("insert-line scroll deltas = %v, want [1]", deltas)
+	}
+}
+
+// sizeRecordingBackend applies SetSize after a delay and records the size that
+// was actually applied, to expose stale concurrent resize ordering.
+type sizeRecordingBackend struct {
+	mu    sync.Mutex
+	size  Pos
+	delay time.Duration
+}
+
+func (b *sizeRecordingBackend) Read(p []byte) (int, error)  { return 0, io.EOF }
+func (b *sizeRecordingBackend) Write(p []byte) (int, error) { return len(p), nil }
+func (b *sizeRecordingBackend) Close() error                { return nil }
+func (b *sizeRecordingBackend) SetSize(w, h int) error {
+	time.Sleep(b.delay)
+	b.mu.Lock()
+	b.size = Pos{X: w, Y: h}
+	b.mu.Unlock()
+	return nil
+}
+func (b *sizeRecordingBackend) appliedSize() Pos {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.size
+}
+
+func TestConcurrentResizeAndRestoreLeaveBackendAtScreenSize(t *testing.T) {
+	for i := 0; i < 25; i++ {
+		backend := &sizeRecordingBackend{delay: time.Millisecond}
+		term := newTerminal(&EmptyFrontend{}, backend, TextReadModeRune)
+		snap := term.Snapshot()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = term.Resize(100+i, 30)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = term.Restore(snap)
+		}()
+		wg.Wait()
+
+		w, h := term.Size()
+		want := Pos{X: w, Y: h}
+		if got := backend.appliedSize(); got != want {
+			t.Fatalf("iteration %d: backend size = %+v, screen size = %+v", i, got, want)
+		}
 	}
 }

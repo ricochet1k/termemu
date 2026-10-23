@@ -58,7 +58,9 @@ backend fds (`PTYBackend.Master()`/`Slave()` transferred with SCM_RIGHTS or
 `cmd.ExtraFiles`), wraps them with `Adopt`/`AdoptMaster`, and calls
 `NewFromHandoff`, which creates the terminal without reading, resizes/restores
 snapshot + scrollback, then starts the loop from `ReaderState` (buffered bytes
-and partial ESC command included). The old process pauses, sends the fds, then
+and partial ESC command included). `Handoff.Size` is the target size: if the
+receiving window differs, set it before calling `NewFromHandoff` and the
+snapshot content is resized to fit. The old process pauses, sends the fds, then
 closes/exits; the sender may close its copies after transfer because the fd is
 duplicated into the receiver.
 
@@ -282,10 +284,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Provides self-locking read methods plus `View(func(LockedView))` for atomic reads
 - `Snapshot()` deep-copies both screens plus view flags/ints/strings, keyboard
   modes, and the active OSC 8 link; it excludes scrollback and backend state
-- `Restore(Snapshot)` replaces that state, emits one full-screen
-  `RegionChanged` with `CRRestore` plus cursor/style callbacks, and returns
-  `ErrSnapshotSizeMismatch` without changing anything if the snapshot size
-  differs from the current terminal size (it never resizes implicitly).
+- `Restore(Snapshot)` replaces that state, resizing both screens and the
+  backend to the snapshot dimensions (lines are truncated/padded), emits one
+  full-screen `RegionChanged` with `CRRestore` plus cursor/style callbacks,
+  and returns `ErrSnapshotSizeMismatch` only for invalid screen dimensions.
   Scrollback is untouched by both methods.
 - Callback-safe variants: `LockedView.Snapshot()` and
   `LockedScrollback.Snapshot()` do not lock (zero views return empty
@@ -294,8 +296,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   variant; the view is read-only.
 - Handles keyboard input via `SendKey()`
 - Lifecycle: `Close()` closes the backend so the read loop exits (idempotent,
-  never blocks); `Done()` closes on loop exit; `Err()` reports the loop error
-  (nil for clean EOF). `Resize()` emits one full-screen `RegionChanged` with
+  never blocks and never takes the terminal lock); `Done()` closes on loop
+  exit; `Err()` reports the loop error (nil for clean EOF) without taking the
+  terminal lock. Loop/pause/close state lives under `lifecycleMu`, so
+  `Close`/`Err` are safe inside callbacks. `Resize()` emits one full-screen `RegionChanged` with
   `CRResize` so frontends repaint at the new size. A height shrink on the main
   screen pushes the top `oldH-newH` rows into scrollback (without extra scroll
   callbacks) and shifts remaining content up; the alt screen only resizes and
@@ -360,11 +364,14 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Two modes: `TextReadModeRune` (1 rune = 1 token) or `TextReadModeGrapheme` (1 grapheme cluster = 1 token)
 - Handles combining characters, zero-width joiners, emoji sequences
 - Returns merge tokens for combining chars that should merge into previous cell
-- Cluster widths are measured standalone (`standaloneGraphemeWidth`); uniseg's
-  carried state is used for segmentation only. Its carried property makes a
-  following cluster's width depend on the previous cluster, so using it for
-  width broke chunk invariance (e.g. `e\u0301` then `x`, or a lone regional
-  indicator, read byte-at-a-time)
+- Cluster widths are measured standalone (`standaloneGraphemeWidth`) when a
+  cluster starts after a read boundary or a regional indicator. uniseg's
+  carried property otherwise makes the next width depend on the previous
+  cluster (e.g. `e\u0301` then `x`, or a lone regional indicator read
+  byte-at-a-time). Within a contiguous buffer its lookahead state is safe
+- Printable ASCII uses a fast path that skips uniseg (the common case); a
+  one-cell ASCII base followed by VS16/keycap/skin-tone is coalesced and
+  widened like the streaming merge path
 - Clusters ending in ZWJ set `ForceMergeNext`; regional indicators use
   `LastWasRI`; VS16/keycap/skin-tone modifiers widen a one-cell base to two
 - `GraphemeState` + `SnapshotState`/`NewGraphemeReaderFromState` capture and
@@ -462,7 +469,10 @@ Frontends receive callbacks:
 - `ViewFlagChanged/ViewIntChanged/ViewStringChanged`: Terminal mode changed
   (includes `VFSynchronizedOutput` for `DECSET/DECRST 2026`; frontends may
   batch repaints while set — the core does no batching)
-- `ScrollLines(y)`: Lines scrolling off top (for scrollback buffer)
+- `ScrollLines(delta)`: signed main-screen scroll delta (negative = content
+  moved up / rows left the top, positive = content moved down). Emitted for
+  every scroll, including mid-screen regions; alt-screen scrolls do not emit
+  it. Scrollback capture is separate.
 - Optional `ClipboardSink.Clipboard(selection, data)`: OSC 52 write path;
   only called if the frontend implements it (queries never forwarded)
 - Optional `ScrollbackListener.ScrollbackRowsAppended(v, first, next)`: one

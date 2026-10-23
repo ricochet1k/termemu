@@ -3,7 +3,6 @@ package termemu
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"strings"
 	"unicode/utf8"
 )
@@ -43,13 +42,15 @@ type screen interface {
 	decaln()
 	printScreen()
 	setScrollCapture(func(lines []spanLine, wrapped []bool))
+	// setScrollDelta installs the callback for main-screen scroll deltas.
+	setScrollDelta(func(delta int))
 	// setLink records the OSC 8 hyperlink URI applied to subsequently
 	// written content spans. Internal only.
 	setLink(link string)
 
 	// snapshotState returns a deep copy of the screen's state and
-	// restoreState replaces it. Callers must ensure the dimensions match
-	// the current screen size. Internal only.
+	// restoreState replaces it, resizing to the snapshot dimensions.
+	// Internal only.
 	snapshotState() ScreenState
 	restoreState(ScreenState)
 }
@@ -89,6 +90,9 @@ type spanScreen struct {
 	// scrollCapture is called before lines scroll off. It receives the
 	// physical rows being lost, along with their wrapped flags.
 	scrollCapture func(lines []spanLine, wrapped []bool)
+	// scrollDelta forwards the signed scroll amount to the terminal (main
+	// screen only; the terminal leaves it nil for the alt screen).
+	scrollDelta func(delta int)
 }
 
 type spanLine struct {
@@ -310,8 +314,6 @@ func (s *spanScreen) setSize(w, h int) {
 	s.cursorPos.Y = clamp(s.cursorPos.Y, 0, h-1)
 	s.savedCursorPos.X = clamp(s.savedCursorPos.X, 0, w-1)
 	s.savedCursorPos.Y = clamp(s.savedCursorPos.Y, 0, h-1)
-
-	s.setStyle(s.style)
 }
 
 // takeTopRows removes the top n rows, shifts the remaining content up by n,
@@ -525,7 +527,7 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 	y1 = clamp(y1, 0, s.size.Y-1)
 	y2 = clamp(y2, 0, s.size.Y-1)
 	if y1 > y2 {
-		fmt.Fprintln(os.Stderr, "scroll ys out of order", y1, y2, dy)
+		debugPrintln(debugScroll, "scroll ys out of order: ", y1, y2, dy)
 		return
 	}
 	// Scrolling by more than the region height has the same effect as
@@ -533,6 +535,9 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 	// indices (and the capture count) inside the region.
 	height := y2 - y1 + 1
 	dy = clamp(dy, -height, height)
+	if dy != 0 && s.scrollDelta != nil {
+		s.scrollDelta(dy)
+	}
 
 	if dy > 0 {
 		for y := y2; y >= y1+dy; y-- {
@@ -658,6 +663,10 @@ func (s *spanScreen) setScrollCapture(cb func(lines []spanLine, wrapped []bool))
 	s.scrollCapture = cb
 }
 
+func (s *spanScreen) setScrollDelta(cb func(delta int)) {
+	s.scrollDelta = cb
+}
+
 func (s *spanScreen) setLink(link string) {
 	s.link = link
 }
@@ -688,33 +697,45 @@ func (s *spanScreen) snapshotState() ScreenState {
 	}
 }
 
-// restoreState replaces the screen state with st. The caller must check that
-// st.Width/st.Height match the current screen size. It emits no callbacks;
-// the terminal is responsible for the repaint notifications.
+// restoreState replaces the screen state with st, resizing the screen to
+// st.Width/st.Height. Existing lines are truncated/padded to the new width so
+// a snapshot captured at another size can be restored. It emits no callbacks;
+// the terminal is responsible for the single full repaint.
 func (s *spanScreen) restoreState(st ScreenState) {
-	lines := make([]spanLine, s.size.Y)
-	for y := range lines {
+	if st.Width <= 0 || st.Height <= 0 {
+		return
+	}
+	w, h := st.Width, st.Height
+	lines := make([]spanLine, h)
+	for y := 0; y < h; y++ {
 		if y >= len(st.Lines) {
-			lines[y] = blankSpanLine(s.size.X, st.Style)
+			lines[y] = blankSpanLine(w, st.Style)
 			continue
 		}
 		spans := make([]Span, len(st.Lines[y].Spans))
 		copy(spans, st.Lines[y].Spans)
-		lines[y] = spanLine{spans: spans, width: st.Lines[y].Width}
+		line := spanLine{spans: spans, width: st.Lines[y].Width}
+		resizeLine(&line, w, st.Style, s.textMode)
+		lines[y] = line
 	}
-	wrapped := make([]bool, s.size.Y)
+	wrapped := make([]bool, h)
 	copy(wrapped, st.Wrapped)
 
 	s.lines = lines
 	s.wrapped = wrapped
-	s.cursorPos = st.Cursor
+	s.size = Pos{X: w, Y: h}
+	s.cursorPos = clampPos(st.Cursor, w, h)
 	s.pendingWrap = st.PendingWrap
-	s.savedCursorPos = st.SavedCursor
+	s.savedCursorPos = clampPos(st.SavedCursor, w, h)
 	s.savedPendingWrap = st.SavedPendingWrap
 	s.style = st.Style
-	s.topMargin = st.TopMargin
-	s.bottomMargin = st.BottomMargin
+	s.topMargin = clamp(st.TopMargin, 0, h-1)
+	s.bottomMargin = clamp(st.BottomMargin, s.topMargin, h-1)
 	s.autoWrap = st.AutoWrap
+}
+
+func clampPos(p Pos, w, h int) Pos {
+	return Pos{X: clamp(p.X, 0, w-1), Y: clamp(p.Y, 0, h-1)}
 }
 
 func (s *spanScreen) printScreen() {

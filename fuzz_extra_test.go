@@ -44,6 +44,7 @@ func FuzzTerminalInputChunking(f *testing.F) {
 		[]byte("e\u0301x"),
 		[]byte("1\ufe0f\u20e3"),
 		[]byte("🇺🇸👍🏽"),
+		[]byte("🇸0"),
 		[]byte("a\x1b[31mred\x1b[0m"),
 		[]byte("a\x00b\tc\r\nd"),
 		[]byte{'a', 0xff, 'b', 0xc0, 0x80, 'c'},

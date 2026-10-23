@@ -77,15 +77,8 @@ func TestLockedViewSnapshotInCallbacks(t *testing.T) {
 		t.Fatalf("got %d scrollback snapshots for %d region callbacks", scrollbacks, regions)
 	}
 
-	// ScrollLines is a legacy callback the core does not currently emit, so
-	// invoke it from a View (same lock-held contract) to cover that path too.
-	var fromView Snapshot
-	term.View(func(v LockedView) {
-		f.ScrollLines(v, 0)
-		fromView = v.Snapshot()
-	})
-	if _, scrolls, _ := f.counts(); scrolls != 1 {
-		t.Fatalf("ScrollLines snapshot count = %d, want 1", scrolls)
+	if _, scrolls, _ := f.counts(); scrolls == 0 {
+		t.Fatal("ScrollLines was never called while scrolling output")
 	}
 
 	// Every usable callback snapshot must describe the live screen. The
@@ -109,6 +102,10 @@ func TestLockedViewSnapshotInCallbacks(t *testing.T) {
 	}
 
 	// The view snapshot taken after the feed matches the locking entry point.
+	var fromView Snapshot
+	term.View(func(v LockedView) {
+		fromView = v.Snapshot()
+	})
 	if want := term.Snapshot(); !reflect.DeepEqual(fromView, want) {
 		t.Fatal("LockedView.Snapshot does not match Terminal.Snapshot")
 	}

@@ -34,6 +34,8 @@ type MockFrontend struct {
 
 	Styles []Style
 
+	ScrollDeltas []int
+
 	ViewFlags   map[ViewFlag]bool
 	ViewInts    map[ViewInt]int
 	ViewStrings map[ViewString]string
@@ -75,10 +77,10 @@ func (m *MockFrontend) RegionChanged(v LockedView, r Region, c ChangeReason) {
 	}
 }
 
-func (m *MockFrontend) ScrollLines(v LockedView, y int) {
-	// no-op for now
-	_ = v
-	_ = y
+func (m *MockFrontend) ScrollLines(v LockedView, delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ScrollDeltas = append(m.ScrollDeltas, delta)
 }
 
 func (m *MockFrontend) CursorMoved(v LockedView, x, y int) {

@@ -521,8 +521,8 @@ func (t *terminal) privateModeState(mode int) int {
 		set = t.viewInts[VIMouseEncoding] == MEUTF8
 	case 1006: // SGR mouse encoding
 		set = t.viewInts[VIMouseEncoding] == MESGR
-	case 1015: // urxvt mouse encoding (shares the UTF-8 encoding state)
-		set = t.viewInts[VIMouseEncoding] == MEUTF8
+	case 1015: // urxvt mouse encoding
+		set = t.viewInts[VIMouseEncoding] == MEURXVT
 	case 2004: // Bracketed paste
 		set = t.viewFlags[VFBracketedPaste]
 	case 2026: // Synchronized output
@@ -1092,7 +1092,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 				case 1015: // urxvt mouse mode
 					if value {
-						t.setViewInt(VIMouseEncoding, MEUTF8)
+						t.setViewInt(VIMouseEncoding, MEURXVT)
 					} else {
 						t.setViewInt(VIMouseEncoding, MEX10)
 					}

@@ -83,6 +83,7 @@ func TestScreenRandomInputInvariants(t *testing.T) {
 			for seed := int64(1); seed <= 20; seed++ {
 				term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), mode)
 				rng := rand.New(rand.NewSource(seed))
+				var saved *Snapshot
 				for step := 0; step < 200; step++ {
 					var input []byte
 					for n := 1 + rng.Intn(6); n > 0; n-- {
@@ -101,8 +102,18 @@ func TestScreenRandomInputInvariants(t *testing.T) {
 						}
 					case 1:
 						snap := term.Snapshot()
+						saved = &snap
 						if err := term.Restore(snap); err != nil {
 							t.Fatalf("%s: restore: %v", context, err)
+						}
+					case 2:
+						if saved != nil {
+							if err := term.Restore(*saved); err != nil {
+								t.Fatalf("%s: restore saved: %v", context, err)
+							}
+							if w, h := term.Size(); w != saved.Main.Width || h != saved.Main.Height {
+								t.Fatalf("%s: restore size = %dx%d, want %dx%d", context, w, h, saved.Main.Width, saved.Main.Height)
+							}
 						}
 					}
 					checkScreenInvariants(t, term.screen(), context+" after resize/restore")

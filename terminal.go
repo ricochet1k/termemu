@@ -65,10 +65,9 @@ type Terminal interface {
 	// returned Snapshot does not affect the terminal, and vice versa.
 	Snapshot() Snapshot
 	// Restore replaces the terminal's screen state with a previously
-	// captured Snapshot and emits a full repaint. It locks internally.
-	// Restore is same-size only: it returns ErrSnapshotSizeMismatch (and
-	// leaves the terminal untouched) if the snapshot dimensions differ
-	// from the current terminal size. The scrollback buffer is untouched.
+	// captured Snapshot and emits a full repaint. It locks internally. A
+	// snapshot of a different size is resized to the snapshot dimensions
+	// and the backend is resized too. The scrollback buffer is untouched.
 	Restore(Snapshot) error
 
 	// Close shuts down the terminal: it closes the backend (if it
@@ -232,6 +231,15 @@ func (v LockedView) Snapshot() Snapshot {
 type terminal struct {
 	sync.Mutex
 
+	// lifecycleMu guards loop/pause/close state so Close and Err never wait
+	// on the terminal lock, which may be held by a frontend callback.
+	lifecycleMu sync.Mutex
+
+	// sizeMu serializes backend SetSize calls so a slow resize cannot land
+	// after a newer restore/resize and leave the pty at a stale size.
+	sizeMu  sync.Mutex
+	sizeGen uint64
+
 	frontend    Frontend
 	onAltScreen bool
 	mainScreen  screen
@@ -248,7 +256,7 @@ type terminal struct {
 	readLoopErr     error
 	textReadMode    TextReadMode
 
-	// Pause/Resume handshake. All fields are guarded by the terminal lock.
+	// Pause/Resume handshake. All fields are guarded by lifecycleMu.
 	// paused is the request flag checked by the read loop; pauseReady
 	// carries the loop's ReaderState to Pause, and pauseResume carries
 	// true (resume) or false (abort/exit) back to the loop.
@@ -333,6 +341,8 @@ func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 	// Wire scroll capture to feed incoming rows into the scrollback buffer.
 	t.mainScreen.setScrollCapture(t.scrollCapture)
 	t.altScreen.setScrollCapture(t.scrollCapture)
+	// Only the main screen reports scroll deltas to the frontend.
+	t.mainScreen.setScrollDelta(t.scrollLinesDelta)
 
 	// Give screens a view so their frontend callbacks can read terminal
 	// state without taking the lock again.
@@ -433,21 +443,19 @@ func cloneKeyboardMode(km keyboardMode) keyboardMode {
 }
 
 // Restore replaces the terminal's screen state with a previously captured
-// Snapshot and emits a full repaint. It locks internally. Restore is
-// same-size only: it returns ErrSnapshotSizeMismatch and leaves the terminal
-// untouched when the snapshot dimensions differ from the current terminal
-// size. The scrollback buffer is untouched.
+// Snapshot and emits a full repaint. It locks internally. A snapshot captured
+// at a different size is resized to its own dimensions (lines are truncated or
+// padded); the backend is resized as well when a size change is needed. The
+// scrollback buffer is untouched. ErrSnapshotSizeMismatch is returned for
+// invalid (zero/negative) or internally inconsistent screen dimensions.
 func (t *terminal) Restore(s Snapshot) error {
-	t.Lock()
-	defer t.Unlock()
-
-	mainSize := t.mainScreen.Size()
-	altSize := t.altScreen.Size()
-	if s.Main.Width != mainSize.X || s.Main.Height != mainSize.Y ||
-		s.Alt.Width != altSize.X || s.Alt.Height != altSize.Y {
+	if s.Main.Width <= 0 || s.Main.Height <= 0 || s.Alt.Width <= 0 || s.Alt.Height <= 0 ||
+		s.Main.Width != s.Alt.Width || s.Main.Height != s.Alt.Height {
 		return ErrSnapshotSizeMismatch
 	}
 
+	t.Lock()
+	oldSize := t.mainScreen.Size()
 	t.mainScreen.restoreState(s.Main)
 	t.altScreen.restoreState(s.Alt)
 	t.onAltScreen = s.OnAltScreen
@@ -477,6 +485,18 @@ func (t *terminal) Restore(s Snapshot) error {
 	t.frontend.RegionChanged(view, Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRRestore)
 	t.frontend.CursorMoved(view, t.screen().CursorPos().X, t.screen().CursorPos().Y)
 	t.frontend.StyleChanged(view, t.screen().Style())
+	backend := t.backend
+	sizeChanged := oldSize.X != size.X || oldSize.Y != size.Y
+	var gen uint64
+	if sizeChanged {
+		t.sizeGen++
+		gen = t.sizeGen
+	}
+	t.Unlock()
+
+	if backend != nil && sizeChanged {
+		return t.setBackendSize(size, gen)
+	}
 	return nil
 }
 
@@ -511,6 +531,8 @@ func (t *terminal) Resize(w, h int) error {
 	}
 	t.mainScreen.setSize(w, h)
 	t.altScreen.setSize(w, h)
+	t.sizeGen++
+	gen := t.sizeGen
 	// setSize preserves content and emits nothing, so tell frontends
 	// to repaint the full screen at the new dimensions.
 	t.frontend.RegionChanged(LockedView{t: t}, Region{X: 0, Y: 0, X2: w, Y2: h}, CRResize)
@@ -519,8 +541,24 @@ func (t *terminal) Resize(w, h int) error {
 	if backend == nil {
 		return nil
 	}
+	return t.setBackendSize(Pos{X: w, Y: h}, gen)
+}
 
-	return backend.SetSize(w, h)
+// setBackendSize applies a size to the backend only if gen is still the
+// newest screen size. sizeMu serializes the calls so a slow stale SetSize
+// cannot complete after a newer one.
+func (t *terminal) setBackendSize(size Pos, gen uint64) error {
+	t.sizeMu.Lock()
+	defer t.sizeMu.Unlock()
+
+	t.Lock()
+	current := t.sizeGen
+	backend := t.backend
+	t.Unlock()
+	if backend == nil || current != gen {
+		return nil
+	}
+	return backend.SetSize(size.X, size.Y)
 }
 
 func (t *terminal) startReadLoop() {
@@ -530,26 +568,26 @@ func (t *terminal) startReadLoop() {
 // startReadLoopFromState starts the read loop from a captured ReaderState.
 // NewWithMode uses startReadLoop; NewFromHandoff uses this directly.
 func (t *terminal) startReadLoopFromState(initial ReaderState) {
-	t.Lock()
+	t.lifecycleMu.Lock()
 	started := t.readLoopStarted
 	backend := t.backend
 	if started || backend == nil || t.closed {
-		t.Unlock()
+		t.lifecycleMu.Unlock()
 		return
 	}
 	t.readLoopStarted = true
-	t.Unlock()
+	t.lifecycleMu.Unlock()
 
 	go func() {
 		err := t.ptyReadLoop(initial)
-		t.Lock()
-		// io.EOF is a clean shutdown (e.g. NoPTYBackend at end of
-		// input); report it as nil so Err() == nil on success.
+		// io.EOF is a clean shutdown (e.g. NoPTYBackend at end of input);
+		// report it as nil so Err() == nil on success.
 		if errors.Is(err, io.EOF) {
 			err = nil
 		}
+		t.lifecycleMu.Lock()
 		t.readLoopErr = err
-		t.Unlock()
+		t.lifecycleMu.Unlock()
 		close(t.readLoopDone)
 	}()
 }
@@ -560,13 +598,19 @@ func (t *terminal) startReadLoopFromState(initial ReaderState) {
 // to wait for loop exit and Err to see how it terminated.
 func (t *terminal) Close() error {
 	t.closeOnce.Do(func() {
+		// Close must not take the terminal lock: it may be called from a
+		// frontend callback (which already holds it) or while a callback is
+		// running. lifecycleMu is only held briefly and never by callbacks.
+		t.lifecycleMu.Lock()
+		t.closed = true
+		paused := t.paused
+		resume := t.pauseResume
+		started := t.readLoopStarted
+		t.lifecycleMu.Unlock()
+
 		// A paused loop is parked on pauseResume. Wake it with false
 		// before closing the backend so it exits cleanly rather than
 		// surfacing the backend's closed-pipe error.
-		t.Lock()
-		paused := t.paused
-		resume := t.pauseResume
-		t.Unlock()
 		if paused && resume != nil {
 			select {
 			case resume <- false:
@@ -577,16 +621,13 @@ func (t *terminal) Close() error {
 		if c, ok := t.backend.(io.Closer); ok {
 			t.closeErr = c.Close()
 		}
-		t.Lock()
-		t.closed = true
-		// If the read loop was never started there is no goroutine to
-		// close the done channel, so close it here. When the loop is
-		// running the goroutine owns the close; startReadLoop refuses to
-		// start after Close so it can never double-close.
-		if !t.readLoopStarted {
+		// If the read loop was never started there is no goroutine to close
+		// the done channel, so close it here. When the loop is running the
+		// goroutine owns the close; startReadLoop refuses to start after
+		// Close so it can never double-close.
+		if !started {
 			close(t.readLoopDone)
 		}
-		t.Unlock()
 	})
 	return t.closeErr
 }
@@ -603,8 +644,8 @@ func (t *terminal) Done() <-chan struct{} {
 // otherwise the error that stopped the loop. Only meaningful after Done
 // is closed.
 func (t *terminal) Err() error {
-	t.Lock()
-	defer t.Unlock()
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
 	return t.readLoopErr
 }
 
@@ -749,6 +790,16 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 		}
 		_, err := fmt.Fprintf(t, "\033[<%v;%v;%v%c", btnByte, x, y, pressByte)
 		return err
+
+	case MEURXVT:
+		// urxvt's 1015 mode: decimal button/coordinates without the '<'
+		// introducer, and release encoded in the button byte (like X10).
+		btnByte := (byte(btn) & mWhichBtn) | byte(mods)
+		if !press {
+			btnByte |= byte(MRelease)
+		}
+		_, err := fmt.Fprintf(t, "\033[%v;%v;%vM", 32+btnByte, x, y)
+		return err
 	}
 	return fmt.Errorf("termemu: unsupported mouse encoding %d", mouseEncoding)
 }
@@ -792,6 +843,13 @@ func (t *terminal) GetViewString(flag ViewString) string {
 // Scrollback returns the terminal's scrollback buffer.
 func (t *terminal) Scrollback() *Scrollback {
 	return &t.scrollback
+}
+
+// scrollLinesDelta forwards a signed main-screen scroll delta to the
+// frontend. Negative means content moved up (rows left the top); positive
+// means content moved down. Called with the terminal lock held.
+func (t *terminal) scrollLinesDelta(delta int) {
+	t.frontend.ScrollLines(LockedView{t: t}, delta)
 }
 
 // scrollCapture is the callback wired to the screen's scrollCapture.

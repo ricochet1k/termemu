@@ -14,7 +14,7 @@ A small Go library for emulating a terminal and rendering output through a plugg
   parameter)
 - Minimal backend abstraction for PTY or no-PTY environments
 - Rune-per-cell or grapheme-cluster text tokenization
-- Mouse reporting (X10/UTF-8/SGR encodings)
+- Mouse reporting (X10/UTF-8/SGR/urxvt encodings)
 - Kitty keyboard protocol mode parsing and key encoding support
 - Synchronized output (`DECSET/DECRST 2026`) exposed as `VFSynchronizedOutput`
 - OSC 8 hyperlinks tracked per span (`Span.Link`)
@@ -92,7 +92,7 @@ func (loggingFrontend) Bell(v termemu.LockedView) {}
 func (loggingFrontend) RegionChanged(v termemu.LockedView, r termemu.Region, _ termemu.ChangeReason) {
 	fmt.Printf("region changed: (%d,%d)-(%d,%d)\n", r.X, r.Y, r.X2, r.Y2)
 }
-func (loggingFrontend) ScrollLines(v termemu.LockedView, y int) {}
+func (loggingFrontend) ScrollLines(v termemu.LockedView, delta int) {}
 func (loggingFrontend) CursorMoved(v termemu.LockedView, x, y int) {}
 func (loggingFrontend) StyleChanged(v termemu.LockedView, s termemu.Style) {}
 func (loggingFrontend) ViewFlagChanged(v termemu.LockedView, flag termemu.ViewFlag, value bool) {}
@@ -314,6 +314,9 @@ if err := term.Err(); err != nil {
 }
 ```
 
+`Close`, `Done`, and `Err` do not take the terminal state lock, so they can be
+called from a `Frontend` callback (which already holds it) without deadlocking.
+
 `PTYBackend.Close()` (also called by `Terminal.Close()`) closes the pty pair;
 later `Read`/`Write`/`Attach` fail with `io.ErrClosedPipe` instead of
 reopening it. `Resize(w, h)` emits one full-screen `RegionChanged` with the
@@ -381,9 +384,11 @@ term, err := termemu.NewFromHandoff(frontend, backend, h)
 `PTYBackend.Master()` and `Slave()` return the owned files (`Slave()` may be
 nil after `AdoptMaster`). The sender may close its copies after transferring
 them, because the descriptor is duplicated into the receiving process.
-`NewFromHandoff` validates the backend, size, and snapshot dimensions; on a
-restore error it closes the backend. Use `AdoptMaster` when only the master is
-available (no `Attach`/reuse after that).
+`NewFromHandoff` validates the backend and size; if the receiving terminal has
+a different size, set `h.Size` to the target size before calling it. The
+snapshot content is resized into that size. On a restore error it closes the
+backend. Use `AdoptMaster` when only the master is available (no
+`Attach`/reuse after that).
 
 Pause interrupts a blocked read by setting a deadline through the optional
 `SetReadDeadline` method (`PTYBackend`, `NoPTYBackend` when its reader supports
@@ -403,8 +408,8 @@ if err := term.Resume(); err != nil { /* ... */ }
 `Snapshot()` deep-copies both screen buffers plus cursor, style, margins,
 auto-wrap, wrapped flags, view flags/ints/strings, keyboard modes, and the
 active OSC 8 link. The scrollback buffer and backend/process state are not
-included. `Restore()` is same-size only (it returns
-`ErrSnapshotSizeMismatch` and leaves the terminal untouched otherwise) and
+included. `Restore()` accepts snapshots of any size: it resizes the screens
+(and the backend) to the snapshot dimensions, truncating or padding lines, and
 emits a full-screen `RegionChanged` with `CRRestore` so frontends repaint.
 
 From a `Frontend` callback or inside `Terminal.View`, use `v.Snapshot()` and
@@ -416,7 +421,7 @@ variant (the view is read-only).
 snap := term.Snapshot()
 // ... run more output or otherwise mutate the screen ...
 if err := term.Restore(snap); err != nil {
-    // errors.Is(err, termemu.ErrSnapshotSizeMismatch) if the size changed
+    // errors.Is(err, termemu.ErrSnapshotSizeMismatch) for an invalid snapshot
 }
 ```
 
@@ -472,7 +477,7 @@ are the packed internal representation (not palette indexes), not `{}`.
 - `Terminal.Close()/Done()/Err()` — shut down the read loop and observe how it exited.
 - `Terminal.Scrollback()` — returns the scrollback buffer.
 - `Scrollback.Snapshot()/Restore(ScrollbackSnapshot)` — deep-copy and restore scrollback history (separate from terminal snapshots; callback-safe snapshot via `LockedScrollback.Snapshot()`).
-- `Terminal.Snapshot()/Restore(Snapshot)` — deep-copy and restore terminal screen state (same size only; scrollback excluded; callback-safe snapshot via `LockedView.Snapshot()`).
+- `Terminal.Snapshot()/Restore(Snapshot)` — deep-copy and restore terminal screen state (restores at the snapshot size; scrollback excluded; callback-safe snapshot via `LockedView.Snapshot()`).
 - `PrintTerminal(t Terminal)` / `PrintTerminalTo(w, t)` — debug printing of screen contents.
 - `NewTTYFrontend(out)` — terminal frontend that writes ANSI to output.
 
