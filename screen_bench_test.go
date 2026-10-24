@@ -238,6 +238,60 @@ func BenchmarkTerminalWriteStyledWrapScroll(b *testing.B) {
 	}
 }
 
+// benchmarkRepaintRow measures rewriting a full row with content the screen
+// already holds: the idempotent repaint that progress bars, watch, and status
+// lines perform.
+func benchmarkRepaintRow(b *testing.B, styled bool) {
+	for _, factory := range screenFactories() {
+		factory := factory
+		b.Run(factory.name, func(b *testing.B) {
+			s := factory.new(&EmptyFrontend{})
+			s.setSize(benchWidth, benchHeight)
+			line := benchLine(benchWidth, 0)
+			styleA := NewStyle()
+			styleB := NewStyle()
+			_ = styleA.SetColor(ComponentFG, RGB(200, 120, 40))
+			_ = styleB.SetColor(ComponentBG, RGB(10, 20, 30))
+
+			write := func() {
+				s.setCursorPos(0, 0)
+				if !styled {
+					s.writeString(line, benchWidth, false, TextReadModeRune)
+					return
+				}
+				for x := 0; x < benchWidth; x += benchSegSize {
+					end := x + benchSegSize
+					if end > benchWidth {
+						end = benchWidth
+					}
+					if (x/benchSegSize)&1 == 0 {
+						s.setStyle(styleA)
+					} else {
+						s.setStyle(styleB)
+					}
+					s.writeString(line[x:end], end-x, false, TextReadModeRune)
+				}
+			}
+
+			write()
+			b.SetBytes(int64(benchWidth))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				write()
+			}
+		})
+	}
+}
+
+func BenchmarkRepaintPlain(b *testing.B) {
+	benchmarkRepaintRow(b, false)
+}
+
+func BenchmarkRepaintStyled(b *testing.B) {
+	benchmarkRepaintRow(b, true)
+}
+
 func BenchmarkTerminalRandomCellUpdates(b *testing.B) {
 	for _, factory := range screenFactories() {
 		factory := factory

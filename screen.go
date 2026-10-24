@@ -601,8 +601,9 @@ func (s *spanScreen) rawWriteSpan(x int, y int, sp Span, cr ChangeReason) {
 	if y >= s.size.Y || x+sp.Width > s.size.X {
 		panic(fmt.Sprintf("rawWriteSpan out of range: %v  %v,%v,%v %v\n", s.size, x, y, x+sp.Width, sp.Width))
 	}
-	replaceRange(&s.lines[y], x, sp.Width, sp, s.textMode)
-	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: x + sp.Width}, cr)
+	if replaceRange(&s.lines[y], x, sp.Width, sp, s.textMode) || cr != CRText {
+		s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: x + sp.Width}, cr)
+	}
 }
 
 func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReason) {
@@ -620,8 +621,9 @@ func (s *spanScreen) rawWriteRune(x int, y int, r rune, width int, cr ChangeReas
 		sp = Span{Style: s.style, Text: string(r), Width: width, Link: s.link}
 	}
 
-	replaceRange(&s.lines[y], x, width, sp, s.textMode)
-	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: x + width}, cr)
+	if replaceRange(&s.lines[y], x, width, sp, s.textMode) || cr != CRText {
+		s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: x + width}, cr)
+	}
 }
 
 func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
@@ -1486,10 +1488,13 @@ func locateSpanRange(spans []Span, x, end int) (startIdx, startOffset, endIdx, e
 	return
 }
 
-func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) {
+// replaceRange replaces the n cells at x with insert. It reports whether the
+// line changed; an exact single-span match with the same text, width, style,
+// and link is left untouched so callers can skip the repaint callback.
+func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) bool {
 	// Fast return for a no-op insert.
 	if n == 0 && insert.Width == 0 {
-		return
+		return false
 	}
 
 	spans := line.spans
@@ -1497,7 +1502,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	if len(spans) == 0 {
 		line.spans = append(line.spans[:0], insert)
 		line.width = insert.Width
-		return
+		return insert.Width > 0
 	}
 
 	// spanLine.width is kept in sync with the sum of span widths (the screen
@@ -1528,6 +1533,15 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	startPadCells := 0
 	endPadCells := 0
 	startIdx, startOffset, endIdx, endOffset := locateSpanRange(spans, x, x+n)
+	// Idempotent repaints (progress bars, watch, status lines, full-frame
+	// redraws of unchanged rows) put the same canonical span back where it
+	// already is. Leaving it untouched and skipping the callback avoids span
+	// churn and a redundant frontend repaint. A fragmented or differently
+	// packed window falls through so the line stays canonical.
+	if startIdx == endIdx && startIdx < len(spans) && startOffset == 0 &&
+		endOffset == spans[startIdx].Width && spans[startIdx] == insert {
+		return false
+	}
 	relocate := false
 	if x < totalWidth {
 		if startIdx < len(spans) && startOffset > 0 && startOffset < spans[startIdx].Width {
@@ -1590,7 +1604,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	if x == 0 && n >= totalWidth {
 		line.spans = append(line.spans[:0], insertParts...)
 		line.width = insertWidth
-		return
+		return true
 	}
 
 	// If we never intersected, treat it like an append.
@@ -1599,7 +1613,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 			line.spans = append(line.spans, insertParts...)
 			line.width = totalWidth + insertWidth
 		}
-		return
+		return insertWidth > 0
 	}
 
 	// Fast paths for in-place replacements inside a single span. Padding adds
@@ -1610,14 +1624,14 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		if startOffset == 0 && endOffset == sp.Width {
 			spans[startIdx] = ins
 			line.width = totalWidth - n + insertWidth
-			return
+			return true
 		}
 		// Compare the complete style and link. Color-only comparison used to
 		// keep the old span's mode bits (bold, italic, underline, ...) when
 		// overwriting text in place, and could skip the update entirely.
 		if ins.Width == n && sp.Style == ins.Style && sp.Link == ins.Link {
 			if sp.Text == "" && ins.Text == "" {
-				return
+				return false
 			}
 			if sp.Text != "" && ins.Text != "" {
 				// Both boundaries are cluster-aligned (the window was expanded
@@ -1629,7 +1643,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 					sp.Text = sp.Text[:startByte] + ins.Text + sp.Text[endByte:]
 					spans[startIdx] = sp
 					line.width = totalWidth
-					return
+					return true
 				}
 			}
 		}
@@ -1700,7 +1714,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		copy(newSpans[dest:], spans[suffixStart:])
 		line.spans = newSpans
 		line.width = newWidth
-		return
+		return true
 	}
 
 	// Reuse the existing backing array and shift the suffix if needed.
@@ -1728,6 +1742,7 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		copy(line.spans[destAfter:], spans[suffixStart:])
 	}
 	line.width = newWidth
+	return true
 }
 
 func truncateLine(line *spanLine, width int, mode TextReadMode) {
