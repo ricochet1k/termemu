@@ -59,6 +59,9 @@ func checkScreenInvariants(t *testing.T, s screen, context string) {
 	if top < 0 || top > bottom || bottom >= h {
 		t.Fatalf("%s: invalid scroll margins %d..%d for height %d", context, top, bottom, h)
 	}
+	if ss.originMode && (pos.Y < top || pos.Y > bottom) {
+		t.Fatalf("%s: cursor %+v outside origin-mode margins %d..%d", context, pos, top, bottom)
+	}
 }
 
 // screenInputChunks is a corpus of text, controls, escape commands, and
@@ -78,7 +81,7 @@ var screenInputChunks = []string{
 	"\x1b#8", "\x1bc", "\x1b7", "\x1b8", "\x1b[?u", "\x1b[>4;2m", "\x1b[=1;1u", "\x1b[<u",
 	"\x1b[6n", "\x1b[c", "\x1b[>c", "\x1b[>q", "\x1b[?2026$p",
 	"\x1b[@", "\x1b[3@", "\x1b[4h", "\x1b[4l", "\x1bH", "\x1b[g", "\x1b[3g",
-	"\x1b[2I", "\x1b[2Z",
+	"\x1b[2I", "\x1b[2Z", "\x1b[3b", "\x1b[?6h", "\x1b[?6l", "\x1b[5;12r",
 }
 
 func TestScreenRandomInputInvariants(t *testing.T) {

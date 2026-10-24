@@ -333,8 +333,8 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   into the new bounds. `scroll` clamps `|dy|` to the region height and ignores
   invalid margins (`top > bottom`).
 - DECSC/DECRC save/restore cursor, pending wrap, the complete `Style`
-  (`ScreenState.SavedStyle`), and the character set state
-  (`ScreenState.SavedCharsets`). `CSI r` (DECSTBM) homes the cursor; `CSI 2 J`
+  (`ScreenState.SavedStyle`), the character set state
+  (`ScreenState.SavedCharsets`), and origin mode (`ScreenState.SavedOriginMode`). `CSI r` (DECSTBM) homes the cursor; `CSI 2 J`
   erases without moving it. IL/DL use the cursor-to-bottom-margin region when
   the cursor is inside the margins and cursor-to-screen-bottom when it is above
   or below them (xterm/tmux behavior). Vertical margin scrolling only applies
@@ -349,9 +349,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - `snapshotState()`/`restoreState()` implement the internal `screen` hooks used
   by `Terminal.Snapshot`/`Restore`: they deep-copy/rebuild `spanLine`s
   (including zero-width spans and links), the `wrapped` flags, cursor, pending
-  wrap, saved cursor, style, character sets, insert mode, tab stops, margins,
-  and auto-wrap. `restoreState` emits no
-  callbacks; the terminal owns the repaint notifications.
+  wrap, saved cursor, style, character sets, insert mode, origin mode (plus
+  its DECSC slot), the REP character, tab stops, margins, and auto-wrap.
+  `restoreState` emits no callbacks; the terminal owns the repaint
+  notifications.
 - `setScrollCapture` installs a callback invoked (with the terminal lock held)
   before rows scroll off the top, passing the lost rows and their wrapped flags
 
@@ -380,13 +381,23 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   moves clamp to the screen and never scroll; only LF/VT/FF/IND and RI scroll
   at margins. ICH (`CSI @`) inserts blanks and shifts the row right; IRM
   (`CSI 4 h/l`) makes printable writes insert instead of overwrite. HTS
-  (`ESC H`) and TBC (`CSI g`) set/clear tab stops.
+  (`ESC H`) and TBC (`CSI g`) set/clear tab stops. DECOM (`CSI ? 6 h/l`)
+  makes CUP/HVP/VPA rows relative to the top margin, confines explicit cursor
+  movement to the scroll region, and moves home to the top margin. REP
+  (`CSI b`) re-emits the last graphic code point; the state is cleared by every
+  control character and escape sequence (after dispatch, so REP itself still
+  sees it), matching xterm and tmux.
 - Parses OSC sequences: 0/2 window title, 6/7 working directory
   (`VSCurrentDirectory`; OSC 7 no longer sets `VSCurrentFile`), 8 hyperlinks
   (tracked URI pushed to both screens via internal `setLink`), 52 clipboard
   writes (base64-decoded, forwarded to `ClipboardSink`; queries dropped)
 - `DECSET/DECRST 2026` sets/clears `VFSynchronizedOutput`
 - Parses keyboard protocol mode switches
+- IRM and DECOM behave as terminal-wide modes (xterm keeps both in
+  `xw->flags`): `copyTransientState` carries them across a main/alt switch
+  along with the cursor, clamping a carried cursor into the destination
+  screen's margins. `restoreCursorPos` also clamps into the *current* margins,
+  because DECRC may follow a DECSTBM that changed them.
 - Character sets (`charset.go`): ESC `(`/`)`/`*`/`+` designate G0-G3, `SO`/`SI`
   (0x0E/0x0F) invoke G1/G0 as GL, and ESC `n`/`o` invoke G2/G3 (LS2/LS3).
   Only ASCII and DEC Special Graphics (ESC `( 0`) are mapped; the national

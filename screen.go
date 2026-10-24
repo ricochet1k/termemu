@@ -38,6 +38,17 @@ type screen interface {
 	// instead of overwriting.
 	InsertMode() bool
 	SetInsertMode(value bool)
+	// OriginMode reports and sets DECOM (CSI ? 6 h/l). In origin mode the
+	// cursor cannot leave the scroll margins and CUP/VPA rows are relative
+	// to the top margin.
+	OriginMode() bool
+	SetOriginMode(value bool)
+	// homeCursor moves to the home position, which is (0,0) normally and the
+	// top-left of the scroll region in origin mode.
+	homeCursor()
+	// repeatLastChar implements REP (CSI b); clearLastChar invalidates it.
+	repeatLastChar(count int)
+	clearLastChar()
 	// Horizontal tab stops (HTS, TBC).
 	nextTabStop(x int, count int) int
 	prevTabStop(x int, count int) int
@@ -117,6 +128,17 @@ type spanScreen struct {
 	// insertMode is IRM: printable writes shift the rest of the row right
 	// instead of overwriting. Per-screen, like xterm's INSERT flag.
 	insertMode bool
+
+	// originMode is DECOM: vertical cursor addressing is relative to the top
+	// margin and the cursor is confined to the scroll region.
+	originMode      bool
+	savedOriginMode bool
+
+	// lastChar is the last graphic character as it appeared in the input
+	// stream, replayed by REP. Like xterm's parser-level lastchar it is a
+	// single code point: the current charset mapping and attributes are
+	// applied when it is replayed. 0 means nothing has been written yet.
+	lastChar rune
 
 	// tabs is the horizontal tab stop map, always len(size.X). Default stops
 	// are every defaultTabInterval columns.
@@ -389,7 +411,11 @@ func (s *spanScreen) setSize(w, h int) {
 	// stay near the same place. A cursor exactly at the old edge (or a saved
 	// cursor restored later by DECRC) must not remain out of bounds.
 	s.cursorPos.X = clamp(s.cursorPos.X, 0, w-1)
-	s.cursorPos.Y = clamp(s.cursorPos.Y, 0, h-1)
+	if s.originMode {
+		s.cursorPos.Y = clamp(s.cursorPos.Y, s.topMargin, s.bottomMargin)
+	} else {
+		s.cursorPos.Y = clamp(s.cursorPos.Y, 0, h-1)
+	}
 	s.savedCursorPos.X = clamp(s.savedCursorPos.X, 0, w-1)
 	s.savedCursorPos.Y = clamp(s.savedCursorPos.Y, 0, h-1)
 }
@@ -448,18 +474,21 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 	}
 	text = sanitizeUTF8(text)
 	s.textMode = mode
+	// Remember the last graphic character for REP before the charset mapping:
+	// REP re-maps and re-styles it when it is replayed.
+	s.noteLastChar(text)
 	if merge {
 		s.mergeIntoPreviousCell(text)
 		return
+	}
+	if width < 1 {
+		width = 1
 	}
 	// DEC Special Graphics replaces the printable stream characters, so the
 	// mapping happens before the run is measured against the screen width.
 	// Mapped runes are one cell wide, so width stays valid.
 	if s.charsets.gl() == charsetDECGraphics {
 		text = mapDECGraphics(text)
-	}
-	if width < 1 {
-		width = 1
 	}
 	if width > s.size.X {
 		// The run was read with a stale maxWidth (for example the terminal
@@ -663,11 +692,72 @@ func (s *spanScreen) SetInsertMode(value bool) {
 	s.insertMode = value
 }
 
+func (s *spanScreen) OriginMode() bool {
+	return s.originMode
+}
+
+func (s *spanScreen) SetOriginMode(value bool) {
+	s.originMode = value
+}
+
+func (s *spanScreen) homeCursor() {
+	y := 0
+	if s.originMode {
+		y = s.topMargin
+	}
+	s.setCursorPos(0, y)
+}
+
+// maxRepeatChars bounds REP so a single escape cannot wedge the terminal.
+const maxRepeatChars = 65535
+
+// repeatLastChar implements REP (CSI b): re-emit the last graphic character
+// count times. Like xterm, the repeat uses the current attributes and charset,
+// and a zero-width last character (a combining mark, for example) repeats
+// nothing.
+func (s *spanScreen) repeatLastChar(count int) {
+	if s.lastChar == 0 || count <= 0 {
+		return
+	}
+	width := cellWidth(s.lastChar)
+	if width <= 0 {
+		return
+	}
+	if count > maxRepeatChars {
+		count = maxRepeatChars
+	}
+	text := string(s.lastChar)
+	for i := 0; i < count; i++ {
+		s.writeString(text, width, false, s.textMode)
+	}
+}
+
+// clearLastChar invalidates REP. Any control character or escape sequence
+// does this: xterm only repeats when the immediately preceding parsed item was
+// a graphic character (sp->lastchar is reset to -1 for everything else), and
+// tmux behaves the same way.
+func (s *spanScreen) clearLastChar() {
+	s.lastChar = 0
+}
+
+// noteLastChar records the final code point of a printable run for REP.
+func (s *spanScreen) noteLastChar(text string) {
+	if text == "" {
+		return
+	}
+	r, _ := utf8.DecodeLastRuneInString(text)
+	s.lastChar = r
+}
+
 func (s *spanScreen) setCursorPos(x, y int) {
 	s.pendingWrap = false
 	oldY := s.cursorPos.Y
 	s.cursorPos.X = clamp(x, 0, s.size.X-1)
-	s.cursorPos.Y = clamp(y, 0, s.size.Y-1)
+	if s.originMode {
+		s.cursorPos.Y = clamp(y, s.topMargin, s.bottomMargin)
+	} else {
+		s.cursorPos.Y = clamp(y, 0, s.size.Y-1)
+	}
 	// Moving to a different row breaks that row's wrap continuation. A
 	// same-row cursor move (e.g. the column reset part of LF) must not:
 	// the physical row is still a continuation of the one above it.
@@ -922,7 +1012,13 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 			s.cursorPos.Y = s.bottomMargin
 		}
 	} else {
-		s.cursorPos.Y = clamp(s.cursorPos.Y, 0, s.size.Y-1)
+		lo, hi := 0, s.size.Y-1
+		if s.originMode {
+			// Origin mode confines the cursor to the scroll region, even
+			// for explicit cursor movements.
+			lo, hi = s.topMargin, s.bottomMargin
+		}
+		s.cursorPos.Y = clamp(s.cursorPos.Y, lo, hi)
 	}
 	if s.cursorPos.Y >= s.size.Y {
 		panic(fmt.Sprintf("moveCursor outside, %v %v  %v, %v, %v, %v", s.cursorPos, s.size, dx, dy, wrap, scroll))
@@ -947,6 +1043,7 @@ func (s *spanScreen) saveCursorPos() {
 	s.savedPendingWrap = s.pendingWrap
 	s.savedStyle = s.style
 	s.savedCharsets = s.charsets
+	s.savedOriginMode = s.originMode
 }
 
 func (s *spanScreen) designateCharset(slot int, cs charset) {
@@ -967,6 +1064,17 @@ func (s *spanScreen) copyTransientState(from screen) {
 		s.pendingWrap = other.pendingWrap
 		s.style = other.style
 		s.charsets = other.charsets
+		s.lastChar = other.lastChar
+		// IRM and DECOM behave as terminal-wide modes (xterm keeps them in
+		// xw->flags, not per screen), so they follow the cursor across a
+		// screen switch.
+		s.insertMode = other.insertMode
+		s.originMode = other.originMode
+		if s.originMode {
+			// Each screen keeps its own margins, so the incoming cursor has
+			// to be clamped into this screen's region.
+			s.cursorPos.Y = clamp(s.cursorPos.Y, s.topMargin, s.bottomMargin)
+		}
 		return
 	}
 	s.cursorPos = from.CursorPos()
@@ -978,6 +1086,12 @@ func (s *spanScreen) restoreCursorPos() {
 	s.pendingWrap = s.savedPendingWrap
 	s.style = s.savedStyle
 	s.charsets = s.savedCharsets
+	s.originMode = s.savedOriginMode
+	if s.originMode {
+		// xterm clamps a restored cursor into the margins that are current
+		// now, which may differ from the ones in effect at DECSC time.
+		s.cursorPos.Y = clamp(s.cursorPos.Y, s.topMargin, s.bottomMargin)
+	}
 	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
 	s.frontend.StyleChanged(s.view, s.style)
 }
@@ -1017,6 +1131,9 @@ func (s *spanScreen) snapshotState() ScreenState {
 		SavedCharsets:    s.savedCharsets,
 		Charsets:         s.charsets,
 		InsertMode:       s.insertMode,
+		OriginMode:       s.originMode,
+		SavedOriginMode:  s.savedOriginMode,
+		LastChar:         s.lastChar,
 		Tabs:             append([]bool(nil), s.tabs...),
 		Style:            s.style,
 		TopMargin:        s.topMargin,
@@ -1060,6 +1177,9 @@ func (s *spanScreen) restoreState(st ScreenState) {
 	s.savedCharsets = st.SavedCharsets
 	s.charsets = st.Charsets
 	s.insertMode = st.InsertMode
+	s.originMode = st.OriginMode
+	s.savedOriginMode = st.SavedOriginMode
+	s.lastChar = st.LastChar
 	s.tabs = make([]bool, w)
 	copy(s.tabs, st.Tabs)
 	for x := len(st.Tabs); x < w; x++ {

@@ -77,6 +77,21 @@ var tmuxDiffSequences = []struct {
 	{"ich_truncates", "0123456789\x1b[1;8H\x1b[5@X"},
 	{"irm", "abcdef\x1b[4h\x1b[1;1HXY\x1b[4lZ"},
 	{"irm_full_row", "abcde\x1b[4h\x1b[1;1HXYZW"},
+	{"rep", "abc\x1b[3bX"},
+	{"rep_default_param", "a\x1b[b"},
+	{"rep_zero_param", "a\x1b[0b"},
+	{"rep_cleared_by_sgr", "\x1b[31mA\x1b[0m\x1b[2b"},
+	{"rep_styled", "\x1b[31mA\x1b[2b\x1b[0m"},
+	{"rep_chained", "ab\x1b[2b\x1b[2b"},
+	{"rep_wide_char", "界\x1b[2b"},
+	{"rep_cleared_by_cursor_move", "abc\x1b[1;1H\x1b[2b"},
+	{"rep_cleared_by_control", "A\r\x1b[2b"},
+	{"origin_mode_cup", "\x1b[5;20r\x1b[?6h\x1b[1;1HA\x1b[3;1HB\x1b[99;1HC"},
+	{"origin_mode_cup_reset", "\x1b[5;20r\x1b[?6h\x1b[3;1HB\x1b[?6lC"},
+	{"origin_mode_vpa", "\x1b[5;20r\x1b[?6h\x1b[2dA\x1b[99dB"},
+	{"origin_mode_movement", "\x1b[5;20r\x1b[?6h\x1b[1;1H\x1b[9AA\x1b[99;1H\x1b[9BB"},
+	{"origin_mode_scroll", "\x1b[5;20r\x1b[?6h\x1b[1;1H\x1b[99;1H\nX"},
+	{"origin_mode_decsc", "\x1b[5;20r\x1b[?6h\x1b[2;1H\x1b7\x1b[?6l\x1b8X"},
 }
 
 var tmuxDiffSessionCounter atomic.Uint64

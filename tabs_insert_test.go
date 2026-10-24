@@ -135,22 +135,22 @@ func TestTabs_PerScreen(t *testing.T) {
 }
 
 func TestTabs_ResetOnSoftAndHardReset(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		seq  string
-	}{
-		{"RIS", "\x1bc"},
-		{"DECSTR", "\x1b[!p"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			term := tabTerm(t, 40, 4)
-			term.mustHandleCommand(t, "[3g")
-			feedText(t, term, tc.seq)
-			term.mustHandleCommand(t, "[H")
-			if got := tabCursor(t, term, "\t"); got != 8 {
-				t.Fatalf("TAB after %s = %d, want 8", tc.name, got)
-			}
-		})
+	// RIS resets the stops to the default map.
+	term := tabTerm(t, 40, 4)
+	term.mustHandleCommand(t, "[3g")
+	feedText(t, term, "\x1bc")
+	term.mustHandleCommand(t, "[H")
+	if got := tabCursor(t, term, "\t"); got != 8 {
+		t.Fatalf("TAB after RIS = %d, want 8", got)
+	}
+
+	// DECSTR keeps tab stops (xterm only clears them on a full reset).
+	term = tabTerm(t, 40, 4)
+	term.mustHandleCommand(t, "[3g")
+	feedText(t, term, "\x1b[!p")
+	term.mustHandleCommand(t, "[H")
+	if got := tabCursor(t, term, "\t"); got != 39 {
+		t.Fatalf("TAB after DECSTR = %d, want 39 (stops preserved)", got)
 	}
 }
 

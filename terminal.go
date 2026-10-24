@@ -111,14 +111,19 @@ type ScreenState struct {
 	// current character set state.
 	SavedCharsets charsetState
 	Charsets      charsetState
-	// InsertMode is IRM; Tabs is the horizontal tab stop map (nil means the
-	// default stops every 8 columns).
-	InsertMode   bool
-	Tabs         []bool
-	Style        Style
-	TopMargin    int
-	BottomMargin int
-	AutoWrap     bool
+	// InsertMode is IRM; OriginMode/SavedOriginMode are DECOM and its DECSC
+	// slot. LastChar is the last graphic code point replayed by REP (0 means
+	// none). Tabs is the horizontal tab stop map (nil means the default stops
+	// every 8 columns).
+	InsertMode      bool
+	OriginMode      bool
+	SavedOriginMode bool
+	LastChar        rune
+	Tabs            []bool
+	Style           Style
+	TopMargin       int
+	BottomMargin    int
+	AutoWrap        bool
 }
 
 // Snapshot is a deep copy of terminal state. It excludes the scrollback
@@ -1016,6 +1021,8 @@ func (t *terminal) resetTerminal() {
 		s.setScrollMarginTopBottom(0, size.Y-1)
 		s.SetAutoWrap(true)
 		s.resetCharsets()
+		s.SetInsertMode(false)
+		s.SetOriginMode(false)
 		s.resetTabStops()
 		s.eraseRegion(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRClear)
 		s.setCursorPos(0, 0)

@@ -243,6 +243,12 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 		}
 
 		t.dispatchEscapeCommand(state, cmd)
+		// The escape sequence ends the run of graphic characters, so REP
+		// cannot repeat across it (xterm/tmux behavior). It is cleared after
+		// dispatch so REP itself still sees the character it repeats.
+		t.withLock(func() {
+			t.screen().clearLastChar()
+		})
 
 	case 127: // DEL  Delete Character (treat as backspace)
 		t.withLock(func() {
@@ -251,6 +257,12 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 	default:
 		debugPrintf(debugTodo, "TODO: unhandled char %v %#v\n", b, string(b))
 	}
+
+	// Control characters end the run of graphic characters (REP must not
+	// repeat across them).
+	t.withLock(func() {
+		t.screen().clearLastChar()
+	})
 	return nil
 }
 
@@ -610,6 +622,8 @@ func (t *terminal) privateModeState(mode int) int {
 	switch mode {
 	case 1: // DECCKM
 		set = t.viewFlags[VFAppCursorKeys]
+	case 6: // DECOM
+		set = t.screen().OriginMode()
 	case 7: // DECAWM
 		set = t.screen().AutoWrap()
 	case 9: // Send MouseXY on press
@@ -648,15 +662,17 @@ func (t *terminal) privateModeState(mode int) int {
 }
 
 // handleDECSTR implements DECSTR (CSI ! p): soft terminal reset. It restores
-// default style, full scroll margins, auto-wrap, character sets, tab stops,
-// and cursor visibility without touching screen contents.
+// default style, full scroll margins, auto-wrap, character sets, insert/
+// origin mode, and cursor visibility without touching screen contents or tab
+// stops (xterm keeps tab stops across a soft reset).
 func (t *terminal) handleDECSTR() {
 	for _, s := range []screen{t.mainScreen, t.altScreen} {
 		s.setStyle(NewStyle())
 		s.setScrollMarginTopBottom(0, s.Size().Y-1)
 		s.SetAutoWrap(true)
 		s.resetCharsets()
-		s.resetTabStops()
+		s.SetInsertMode(false)
+		s.SetOriginMode(false)
 	}
 	t.setViewFlag(VFShowCursor, true)
 }
@@ -839,7 +855,11 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 		case 'd': // Line Position Absolute
 			defaultParam(1)
-			t.screen().setCursorPos(t.screen().CursorPos().X, params[0]-1)
+			row := params[0] - 1
+			if t.screen().OriginMode() {
+				row += t.screen().TopMargin()
+			}
+			t.screen().setCursorPos(t.screen().CursorPos().X, row)
 
 		case 'f', 'H': // Cursor Home
 			x := 1
@@ -850,8 +870,13 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			if len(params) >= 2 {
 				x = params[1]
 			}
+			// In origin mode the row is relative to the top margin.
+			row := y - 1
+			if t.screen().OriginMode() {
+				row += t.screen().TopMargin()
+			}
 			// debugPrintf("cursor home: %v, %v\n", x, y)
-			t.screen().setCursorPos(x-1, y-1)
+			t.screen().setCursorPos(x-1, row)
 
 		case 'h', 'l': // h=Set, l=Reset Mode
 			var value bool
@@ -1118,6 +1143,14 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			defaultParam(1)
 			t.screen().scroll(t.screen().TopMargin(), t.screen().BottomMargin(), params[0])
 
+		case 'b': // REP: repeat the preceding graphic character
+			defaultParam(1)
+			count := params[0]
+			if count <= 0 {
+				count = 1
+			}
+			t.screen().repeatLastChar(count)
+
 		case 'P': // Delete n characters
 			defaultParam(1)
 			t.screen().deleteChars(t.screen().CursorPos().X, t.screen().CursorPos().Y, params[0], CRClear)
@@ -1157,8 +1190,9 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 			// debugPrintf("cursor home: %v, %v\n", x, y)
 			t.screen().setScrollMarginTopBottom(top-1, bottom-1)
-			// DECSTBM homes the cursor (VT100/xterm behavior).
-			t.screen().setCursorPos(0, 0)
+			// DECSTBM homes the cursor (VT100/xterm behavior); in origin mode
+			// home is the top-left of the scroll region.
+			t.screen().homeCursor()
 
 		case 'n': // Device Status Report
 			defaultParam(0)
@@ -1203,6 +1237,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				switch p {
 				case 1: // Application / Normal Cursor Keys
 					t.setViewFlag(VFAppCursorKeys, value)
+
+				case 6: // Origin mode (DECOM)
+					t.screen().SetOriginMode(value)
+					t.screen().homeCursor()
 
 				case 7: // Wraparound
 					t.screen().SetAutoWrap(value)
