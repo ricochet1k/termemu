@@ -10,7 +10,12 @@ import (
 // reset plus style deltas, so this guards the diff logic.
 func TestANSILineRoundTripsStyles(t *testing.T) {
 	const input = "\x1b[31mred\x1b[0m default \x1b[1;44mboldbg\x1b[0m tail" +
-		"\x1b[38;2;10;20;30mtruecolor\x1b[39m end"
+		"\x1b[38;2;10;20;30mtruecolor\x1b[39m end" +
+		"\x1b[4munder\x1b[21mdouble\x1b[24mplain" +
+		"\x1b[5mblink\x1b[6mrapid\x1b[25mnone" +
+		"\x1b[9mstrike\x1b[29m ok \x1b[51mframed\x1b[52mencircled\x1b[54m off" +
+		"\x1b[53moverline\x1b[55m end" +
+		"\x1b[31mred\x1b[1mbold red\x1b[22mred again\x1b[39m"
 
 	src := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeRune)
 	if err := src.Resize(80, 3); err != nil {

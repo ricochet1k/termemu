@@ -73,14 +73,65 @@ func TestANSIEscapeFrom_ExtendedToDefault(t *testing.T) {
 	}
 }
 
-func TestANSIEscapeFrom_ModeChangeStillResets(t *testing.T) {
+func TestANSIEscapeFrom_ModeEncoding(t *testing.T) {
 	def := NewStyle()
-	bold := NewStyle()
-	bold.SetMode(ModeBold)
+	style := func(modes ...Mode) Style {
+		s := NewStyle()
+		s.SetMode(modes...)
+		return s
+	}
+	redBold := styleWithFG(Color256(ColRed))
+	redBold.SetMode(ModeBold)
+	redBlueDouble := styleWithFGBG(Color256(ColRed), Color256(ColBlue))
+	redBlueDouble.SetMode(ModeDoubleUnderline)
+	redBlueUnder := styleWithFGBG(Color256(ColRed), Color256(ColBlue))
+	redBlueUnder.SetMode(ModeUnderline)
+	redBoldBlueBG := styleWithFGBG(Color256(ColRed), Color256(ColBlue))
+	redBoldBlueBG.SetMode(ModeBold)
 
-	got := string(bold.ANSIEscapeFrom(def))
-	if len(got) < 4 || got[:4] != "\x1b[0m" {
-		t.Fatalf("mode change should start with full reset, got %q", got)
+	cases := []struct {
+		name string
+		prev Style
+		next Style
+		want string
+	}{
+		// Returning to a plain default style uses one SGR 0; otherwise modes
+		// are toggled individually.
+		{"add bold default colors", def, style(ModeBold), "\x1b[1m"},
+		{"remove bold default colors", style(ModeBold), def, "\x1b[0m"},
+		{"bold to dim", style(ModeBold), style(ModeDim), "\x1b[22m\x1b[2m"},
+		{"bold+dim to dim", style(ModeBold, ModeDim), style(ModeDim), "\x1b[22m\x1b[2m"},
+		{"underline to double", style(ModeUnderline), style(ModeDoubleUnderline), "\x1b[24m\x1b[21m"},
+		{"blink to rapid", style(ModeBlink), style(ModeRapidBlink), "\x1b[25m\x1b[6m"},
+		{"framed to encircled", style(ModeFramed), style(ModeEncircled), "\x1b[54m\x1b[52m"},
+		{"remove overline", style(ModeOverline), def, "\x1b[0m"},
+		{"remove italic", style(ModeItalic), def, "\x1b[0m"},
+		{"remove strike", style(ModeStrike), def, "\x1b[0m"},
+		{"add italic", def, style(ModeItalic), "\x1b[3m"},
+
+		// With non-default colors, individual mode codes avoid re-emitting
+		// the colors and win.
+		{"add bold over red", styleWithFG(Color256(ColRed)), redBold, "\x1b[1m"},
+		{"remove bold over red", redBold, styleWithFG(Color256(ColRed)), "\x1b[22m"},
+		{"underline to double over colors", redBlueUnder, redBlueDouble, "\x1b[24m\x1b[21m"},
+
+		// Dropping all modes: plain default uses SGR 0, unchanged colors use
+		// individual reset codes, and a new non-default color uses a reset.
+		{"modes+colors to default", redBold, def, "\x1b[0m"},
+		{"modes to unchanged red", redBold, styleWithFG(Color256(ColRed)), "\x1b[22m"},
+		{"modes to new blue", redBold, styleWithFG(Color256(ColBlue)), "\x1b[0m\x1b[34m"},
+		{"modes+fg to unchanged bg", redBoldBlueBG, styleWithBG(Color256(ColBlue)), "\x1b[22m\x1b[39m"},
+	}
+	for _, tc := range cases {
+		if got, want := string(tc.next.ANSIEscapeFrom(tc.prev)), tc.want; got != want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, want)
+		}
+	}
+
+	// A color change on its own never emits a reset.
+	red := styleWithFG(Color256(ColRed))
+	if got, want := string(red.ANSIEscapeFrom(NewStyle())), "\x1b[31m"; got != want {
+		t.Errorf("color only: got %q, want %q", got, want)
 	}
 
 	// A style identical to prev emits nothing.

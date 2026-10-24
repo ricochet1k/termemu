@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"math/bits"
 	"strconv"
 )
 
@@ -328,53 +329,130 @@ func (s Style) ANSIEscape() []byte {
 	return appendANSIEscape(nil, s)
 }
 
+// modeSGRGroup describes the SGR reset shared by a group of modes (for
+// example bold and faint are both cleared by SGR 22). Indexed by mode bit
+// position so the renderer does not scan every mode on each change.
+var modeSGRGroups = [13]struct {
+	reset int16 // SGR code that clears the whole group
+	mask  Mode  // all modes sharing this reset
+}{
+	{22, ModeBold | ModeDim},                  // ModeBold
+	{22, ModeBold | ModeDim},                  // ModeDim
+	{23, ModeItalic},                          // ModeItalic
+	{24, ModeUnderline | ModeDoubleUnderline}, // ModeUnderline
+	{25, ModeBlink | ModeRapidBlink},          // ModeBlink
+	{27, ModeReverse},                         // ModeReverse
+	{28, ModeInvisible},                       // ModeInvisible
+	{29, ModeStrike},                          // ModeStrike
+	{55, ModeOverline},                        // ModeOverline
+	{24, ModeUnderline | ModeDoubleUnderline}, // ModeDoubleUnderline
+	{54, ModeFramed | ModeEncircled},          // ModeFramed
+	{54, ModeFramed | ModeEncircled},          // ModeEncircled
+	{25, ModeBlink | ModeRapidBlink},          // ModeRapidBlink
+}
+
+func appendSGRCode(dst []byte, code int16) []byte {
+	dst = append(dst, ESC, '[')
+	dst = strconv.AppendInt(dst, int64(code), 10)
+	return append(dst, 'm')
+}
+
 // appendANSIEscapeFrom appends the minimal ANSI escape sequence that changes
 // from prev to s. It appends nothing when the styles match.
+//
+// Colors are always emitted as minimal diffs. When modes change, two encodings
+// are considered: individual mode set/reset codes, and a full reset followed
+// by the style. The shorter one wins, because a full reset also clears colors
+// that would otherwise need explicit 39/49 resets.
 func appendANSIEscapeFrom(dst []byte, prev, s Style) []byte {
-	// Check what changed
-	modesChanged := s.modeBits() != prev.modeBits()
+	prevModes := prev.modeBits()
+	modes := s.modeBits()
 	fgChanged := (s.fg &^ modeBitsMask) != (prev.fg &^ modeBitsMask)
 	bgChanged := (s.bg &^ modeBitsMask) != (prev.bg &^ modeBitsMask)
 
-	if !modesChanged && !fgChanged && !bgChanged {
+	if modes == prevModes && !fgChanged && !bgChanged {
 		return dst
 	}
 
-	// If modes changed, we need to reset and reapply all modes.
-	if modesChanged {
-		dst = append(dst, ESC, '[', '0', 'm')
-		combined := s.modeBits()
-		for i := 0; i < len(modeSGRCodes); i++ {
-			if combined&(1<<i) == 0 {
-				continue
+	if modes != prevModes {
+		if modes == 0 {
+			fg := Color(s.fg &^ modeBitsMask)
+			bg := Color(s.bg &^ modeBitsMask)
+			switch {
+			case fg.IsDefault() && bg.IsDefault():
+				// Back to a plain default style: one SGR 0 is shortest.
+				return append(dst, ESC, '[', '0', 'm')
+			case (fgChanged && !fg.IsDefault()) || (bgChanged && !bg.IsDefault()):
+				// A reset re-establishes the new colors and drops the modes
+				// in one sequence, cheaper than per-mode resets + colors.
+				return appendSGRResetAndColors(dst, s)
 			}
-			dst = append(dst, ESC, '[')
-			dst = strconv.AppendInt(dst, int64(modeSGRCodes[i]), 10)
-			dst = append(dst, 'm')
 		}
-		// If modes changed, we also need to re-emit colors since we reset.
-		fgChanged = true
-		bgChanged = true
+		dst = appendModeDelta(dst, prevModes, modes)
 	}
 
-	// Only emit color changes if they changed.
-	// A component returning to default needs an explicit reset (SGR 39/49)
-	// unless a full reset was already emitted for a mode change above.
+	return appendColorChanges(dst, s, fgChanged, bgChanged)
+}
+
+// appendModeDelta appends the individual SGR set/reset codes that turn
+// prevModes into modes. It walks only the changed bits.
+func appendModeDelta(dst []byte, prevModes, modes Mode) []byte {
+	removed := prevModes &^ modes
+	added := modes &^ prevModes
+	var resetDone, groupMask Mode
+	for r := removed; r != 0; r &= r - 1 {
+		i := bits.TrailingZeros16(uint16(r))
+		group := modeSGRGroups[i]
+		groupMask |= group.mask
+		if resetDone&group.mask != 0 {
+			continue
+		}
+		resetDone |= group.mask
+		dst = appendSGRCode(dst, group.reset)
+	}
+	// Re-apply modes in the reset groups that remain active; the reset
+	// cleared the whole group (bold/faint, underline variants, ...).
+	for m := modes & groupMask; m != 0; m &= m - 1 {
+		i := bits.TrailingZeros16(uint16(m))
+		dst = appendSGRCode(dst, modeSGRCodes[i])
+	}
+	for m := added &^ groupMask; m != 0; m &= m - 1 {
+		i := bits.TrailingZeros16(uint16(m))
+		dst = appendSGRCode(dst, modeSGRCodes[i])
+	}
+	return dst
+}
+
+// appendSGRResetAndColors appends SGR 0 followed by s's non-default colors.
+// The caller guarantees s has no modes.
+func appendSGRResetAndColors(dst []byte, s Style) []byte {
+	dst = append(dst, ESC, '[', '0', 'm')
+	if fg := Color(s.fg &^ modeBitsMask); !fg.IsDefault() {
+		dst = appendANSIEscapeColor(dst, fg, '3')
+	}
+	if bg := Color(s.bg &^ modeBitsMask); !bg.IsDefault() {
+		dst = appendANSIEscapeColor(dst, bg, '4')
+	}
+	return dst
+}
+
+// appendColorChanges appends the minimal color change from the current state
+// (prev) to s. A component returning to default emits SGR 39/49.
+func appendColorChanges(dst []byte, s Style, fgChanged, bgChanged bool) []byte {
 	if fgChanged {
-		if Color(s.fg&^modeBitsMask).IsDefault() && !modesChanged {
+		if fg := Color(s.fg &^ modeBitsMask); fg.IsDefault() {
 			dst = append(dst, ESC, '[', '3', '9', 'm')
 		} else {
-			dst = appendANSIEscapeColor(dst, Color(s.fg&^modeBitsMask), '3')
+			dst = appendANSIEscapeColor(dst, fg, '3')
 		}
 	}
 	if bgChanged {
-		if Color(s.bg&^modeBitsMask).IsDefault() && !modesChanged {
+		if bg := Color(s.bg &^ modeBitsMask); bg.IsDefault() {
 			dst = append(dst, ESC, '[', '4', '9', 'm')
 		} else {
-			dst = appendANSIEscapeColor(dst, Color(s.bg&^modeBitsMask), '4')
+			dst = appendANSIEscapeColor(dst, bg, '4')
 		}
 	}
-
 	return dst
 }
 

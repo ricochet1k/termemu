@@ -392,9 +392,14 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Each uint32: bit 31 = color type (256-color vs RGB), bits 24-30 = mode bits, bits 0-23 = color data
 - Modes: Bold, Dim, Italic, Underline, Blink, Reverse, Invisible, Strike, Overline, DoubleUnderline, Framed, Encircled, RapidBlink
 - `ANSIEscape()` generates SGR sequences for rendering
-- `ANSIEscapeFrom(prev)` emits minimal diffs; a component returning to
-  default emits `SGR 39` (fg) / `SGR 49` (bg) unless a mode change already
-  forced a full reset
+- `ANSIEscapeFrom(prev)` emits minimal diffs. Colors use `SGR 39`/`49` to
+  return to default. Mode changes prefer individual SGR set/reset codes
+  (`1`/`22`, `3`/`23`, `4`/`24`, `24`/`21`, `25`/`5`+`6`, `54`/`51`+`52`,
+  `55`/`53`, ...) so unchanged colors are not re-emitted. Going to a plain
+  default style emits one `SGR 0`; dropping all modes while switching to a new
+  non-default color also uses a reset followed by the colors
+- `modeSGRGroups`/`modeSGRCodes` are indexed by mode bit position; keep them in
+  sync when adding a mode (`TestModeSGRCodesCoverAllModes`)
 - Both delegate to `appendANSIEscapeFrom`/`appendANSIEscapeColor`, which
   append to a caller-provided buffer (no per-call slice allocation)
 - Line renderers (`spanScreen.renderLineANSI`, `ttyFrontend`'s
