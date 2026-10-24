@@ -310,6 +310,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   encoding: X10 writes raw parameter bytes (UTF-8-encoding them would corrupt
   values above 0x7F), 1005 encodes all three parameters as codepoints, and
   1002 drops motion events that carry no button (those belong to 1003).
+  `?1016` (SGR-Pixels) is exposed as `VFMousePixel`: the frontend should pass
+  pixel coordinates, and they are encoded verbatim. `?1007` (alternate
+  scroll) is handled here too: on the alt screen with no mouse mode active, a
+  wheel press becomes KeyUp/KeyDown. `?1046` clears `VFAltScreenAllowed`, and
+  both alt-screen entry paths ignore switch requests while it is clear.
 - Lifecycle: `Close()` closes the backend so the read loop exits (idempotent,
   never blocks and never takes the terminal lock); `Done()` closes on loop
   exit; `Err()` reports the loop error (nil for clean EOF) without taking the
@@ -439,6 +444,18 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   fields, and tmux is not a usable reference for it (tmux keeps the
   designation/shift bytes in its grid and leaves the mapping to the outer
   terminal, so `capture-pane` shows the raw ASCII).
+
+**Palette and default colors** (palette.go): the terminal owns a 256-entry RGB
+palette (`OSC 4`, reset by `OSC 104`) and default foreground/background/cursor
+colors (`OSC 10`/`11`/`12`, reset by `110`/`111`/`112`). Cells keep palette
+indexes; frontends resolve them with `LockedView.PaletteColor` /
+`DefaultForeground` / `DefaultBackground` / `CursorColor` (there are locking
+`Terminal` equivalents). Queries (`OSC 4;n;?`, `OSC 1x;?`) are answered with
+`rgb:rrrr/gggg/bbbb`. Any change emits one full-screen `RegionChanged` with
+`CRPalette` so frontends repaint; re-setting an identical color does not.
+Palette and default colors are part of `Snapshot` (and therefore handoff) and
+are reset by RIS. `ANSILine` still emits palette indexes, so a frontend that
+renders to another terminal should resolve changed entries itself.
 
 **Modes** (terminal.go): `LNM` (`CSI 20 h/l`) is terminal-wide (xterm keeps it
 in `xw->flags`), so it lives on `terminal.newlineMode` and round-trips through

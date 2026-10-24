@@ -247,6 +247,16 @@ func TestSnapshotSerialization(t *testing.T) {
 		KeyboardMain: keyboardMode{flags: 3, stack: []int{0, 1}},
 		KeyboardAlt:  keyboardMode{flags: 1, stack: []int{0}},
 		Link:         "https://link",
+		Palette: func() [paletteSize]Color {
+			var pal [paletteSize]Color
+			pal[0] = RGB(1, 2, 3)
+			pal[1] = RGB(4, 5, 6)
+			pal[255] = RGB(7, 8, 9)
+			return pal
+		}(),
+		DefaultFG:     RGB(10, 11, 12),
+		DefaultBG:     RGB(13, 14, 15),
+		DefaultCursor: RGB(16, 17, 18),
 	}
 	original := cloneSnapshotForTest(snap)
 

@@ -645,6 +645,8 @@ func (t *terminal) privateModeState(mode int) int {
 		set = t.viewFlags[VFShowCursor]
 	case 47, 1047, 1048, 1049: // Alt-screen family
 		set = t.onAltScreen
+	case 1046: // Alt-screen switching allowed
+		set = t.viewFlags[VFAltScreenAllowed]
 	case 1000:
 		set = t.viewInts[VIMouseMode] == MMPressRelease
 	case 1002:
@@ -653,6 +655,10 @@ func (t *terminal) privateModeState(mode int) int {
 		set = t.viewInts[VIMouseMode] == MMPressReleaseMoveAll
 	case 1004: // Focus reporting
 		set = t.viewFlags[VFReportFocus]
+	case 1007: // Alternate scroll mode
+		set = t.viewFlags[VFAltScroll]
+	case 1016: // SGR-Pixels mouse reporting
+		set = t.viewFlags[VFMousePixel]
 	case 1005: // UTF-8 mouse encoding
 		set = t.viewInts[VIMouseEncoding] == MEUTF8
 	case 1006: // SGR mouse encoding
@@ -1382,6 +1388,12 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				case 1004: // Report focus changed
 					t.setViewFlag(VFReportFocus, value)
 
+				case 1007: // Alternate scroll mode
+					t.setViewFlag(VFAltScroll, value)
+
+				case 1016: // SGR-Pixels mouse reporting
+					t.setViewFlag(VFMousePixel, value)
+
 				case 1005: // xterm UTF-8 extended mouse reporting
 					if value {
 						t.setViewInt(VIMouseEncoding, MEUTF8)
@@ -1424,6 +1436,9 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					} else {
 						t.screen().restoreCursorPos()
 					}
+
+				case 1046: // Allow (set) or forbid (reset) alt-screen switching
+					t.setViewFlag(VFAltScreenAllowed, value)
 
 				case 1049: // Save cursor, clear alt screen, switch; restore on reset
 					if value {
@@ -1577,7 +1592,7 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 		t.setViewString(VSWindowTitle, string(param2))
 
 	case 4:
-		debugPrintf(debugTodo, "TODO: change color : %#v\n", string(param2))
+		t.handleOSC4(param2)
 
 	case 6, 7:
 		// OSC 7 is the standard working-directory URI advertised by shells
@@ -1592,17 +1607,14 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 	case 52:
 		t.handleOSC52(param2)
 
-	case 10:
-		debugPrintln(debugTodo, "TODO: OSC foreground color: ", string(param2))
+	case 10, 11, 12: // default foreground, background, and cursor colors
+		t.handleOSCDynamicColor(param, param2)
 
-	case 11:
-		debugPrintln(debugTodo, "TODO: OSC background color: ", string(param2))
+	case 104: // reset color palette
+		t.handleOSC104(param2)
 
-	case 104:
-		debugPrintln(debugTodo, "TODO: Reset Color Palette", string(param2))
-
-	case 112:
-		debugPrintln(debugTodo, "TODO: Reset Cursor Color", string(param2))
+	case 110, 111, 112: // reset default fg / bg / cursor color
+		t.handleOSCDynamicColor(param, param2)
 
 	case 9: // OSC 9: desktop notification with a body only
 		if sink, ok := t.frontend.(NotificationSink); ok {

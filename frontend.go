@@ -10,6 +10,17 @@ const (
 	VFBracketedPaste
 	VFAppCursorKeys
 	VFAppKeypad
+	// VFAltScroll tracks DECSET/DECRST 1007 (alternate scroll mode): on the
+	// alternate screen, with no mouse mode active, wheel events are sent to
+	// the application as cursor up/down keys instead of mouse reports.
+	VFAltScroll
+	// VFMousePixel tracks DECSET/DECRST 1016 (SGR-Pixels mouse reporting).
+	// While set, the frontend should pass pixel coordinates to SendMouseRaw;
+	// the coordinates are encoded verbatim (SGR-Pixels pairs with mode 1006).
+	VFMousePixel
+	// VFAltScreenAllowed tracks DEC private mode 1046. While clear, requests
+	// to switch to the alternate screen (?47/?1047/?1049) are ignored.
+	VFAltScreenAllowed
 	// VFSynchronizedOutput tracks DECSET/DECRST 2026 (synchronized output).
 	// While set, the application is emitting a batch of updates and
 	// frontends may defer repaints until it is cleared. The core performs
@@ -95,6 +106,12 @@ const (
 	// CRRestore means a snapshot was restored with Terminal.Restore.
 	// Frontends must repaint the full screen from the restored state.
 	CRRestore
+
+	// CRPalette means the color palette or a default color changed (OSC
+	// 4/10/11/12/104/110/111/112), so every cell rendered with a palette or
+	// default color may look different. Frontends that resolve colors
+	// themselves must repaint the full screen.
+	CRPalette
 )
 
 // Frontend is a type that can display data from a Terminal.

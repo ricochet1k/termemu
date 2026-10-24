@@ -53,6 +53,14 @@ type Terminal interface {
 	GetViewInt(ViewInt) int
 	GetViewString(ViewString) string
 
+	// PaletteColor returns the RGB color mapped to a palette index (OSC 4),
+	// and the default color accessors report the OSC 10/11/12 colors. They
+	// lock internally; use the LockedView counterparts in callbacks.
+	PaletteColor(idx int) Color
+	DefaultForeground() Color
+	DefaultBackground() Color
+	CursorColor() Color
+
 	// Scrollback returns the terminal's scrollback buffer for ordinary
 	// code. Its methods take the terminal lock themselves, so they must
 	// not be called from inside View or a Frontend callback. Use
@@ -138,6 +146,12 @@ type Snapshot struct {
 	KeyboardAlt  keyboardMode
 	Link         string // active OSC 8 hyperlink, if any
 	NewlineMode  bool   // LNM (CSI 20 h/l)
+	// Palette and default colors are resolved by frontends rather than stored
+	// in cells, so they travel with the snapshot.
+	Palette       [paletteSize]Color
+	DefaultFG     Color
+	DefaultBG     Color
+	DefaultCursor Color
 }
 
 // LockedView is a read-only handle to terminal state. It is valid only for
@@ -283,6 +297,13 @@ type terminal struct {
 	// return. Like xterm's LINEFEED flag it is terminal-wide, not per screen.
 	newlineMode bool
 
+	// palette maps the 256 palette indexes to RGB values (OSC 4/104) and
+	// defaults holds the default foreground/background/cursor colors (OSC
+	// 10/11/12). Cells keep palette indexes; frontends resolve them through
+	// the LockedView accessors.
+	palette  [paletteSize]Color
+	defaults dynamicColors
+
 	readLoopStarted bool
 	readLoopDone    chan struct{}
 	readLoopErr     error
@@ -364,11 +385,17 @@ func newTerminal(f Frontend, backend Backend, mode TextReadMode) *terminal {
 		viewInts:      make([]int, viewIntCount),
 		viewStrings:   make([]string, viewStringCount),
 		textReadMode:  mode,
+		palette:       defaultPalette,
+		defaults:      defaultDynamicColors,
 		scrollRows:    make([]scrollRow, 0, DefaultScrollbackRows),
 		scrollNextID:  1,
 		scrollMaxRows: DefaultScrollbackRows,
 		readLoopDone:  make(chan struct{}),
 	}
+
+	// Alternate-screen switching is allowed unless an application clears
+	// DEC private mode 1046.
+	t.viewFlags[VFAltScreenAllowed] = true
 
 	// The cursor is visible by default (DECSET 25); applications hide it
 	// explicitly.
@@ -457,16 +484,20 @@ func (t *terminal) Snapshot() Snapshot {
 // snapshotLocked implements Snapshot with t.Lock held.
 func (t *terminal) snapshotLocked() Snapshot {
 	return Snapshot{
-		Main:         t.mainScreen.snapshotState(),
-		Alt:          t.altScreen.snapshotState(),
-		OnAltScreen:  t.onAltScreen,
-		ViewFlags:    append([]bool(nil), t.viewFlags...),
-		ViewInts:     append([]int(nil), t.viewInts...),
-		ViewStrings:  append([]string(nil), t.viewStrings...),
-		KeyboardMain: cloneKeyboardMode(t.keyboardMain),
-		KeyboardAlt:  cloneKeyboardMode(t.keyboardAlt),
-		Link:         t.hyperlink,
-		NewlineMode:  t.newlineMode,
+		Main:          t.mainScreen.snapshotState(),
+		Alt:           t.altScreen.snapshotState(),
+		OnAltScreen:   t.onAltScreen,
+		ViewFlags:     append([]bool(nil), t.viewFlags...),
+		ViewInts:      append([]int(nil), t.viewInts...),
+		ViewStrings:   append([]string(nil), t.viewStrings...),
+		KeyboardMain:  cloneKeyboardMode(t.keyboardMain),
+		KeyboardAlt:   cloneKeyboardMode(t.keyboardAlt),
+		Link:          t.hyperlink,
+		NewlineMode:   t.newlineMode,
+		Palette:       t.palette,
+		DefaultFG:     t.defaults.fg,
+		DefaultBG:     t.defaults.bg,
+		DefaultCursor: t.defaults.cursor,
 	}
 }
 
@@ -517,6 +548,8 @@ func (t *terminal) Restore(s Snapshot) error {
 
 	t.setHyperlink(s.Link)
 	t.newlineMode = s.NewlineMode
+	t.palette = s.Palette
+	t.defaults = dynamicColors{fg: s.DefaultFG, bg: s.DefaultBG, cursor: s.DefaultCursor}
 
 	view := LockedView{t: t}
 	size := t.screen().Size()
@@ -773,7 +806,26 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 	t.Lock()
 	mouseMode := t.viewInts[VIMouseMode]
 	mouseEncoding := t.viewInts[VIMouseEncoding]
+	altScroll := t.viewFlags[VFAltScroll] && t.onAltScreen
 	t.Unlock()
+
+	// Alternate scroll mode: on the alternate screen with no mouse reporting,
+	// a wheel event is delivered as a cursor up/down key (xterm 1007).
+	if mods&MWheel != 0 && mouseMode == MMNone {
+		if !altScroll {
+			return nil
+		}
+		code := KeyUp
+		if byte(btn)&mWhichBtn == byte(MBtn2) {
+			code = KeyDown
+		}
+		// #1007 only applies to press events.
+		if !press {
+			return nil
+		}
+		_, err := t.SendKey(KeyEvent{Code: code})
+		return err
+	}
 
 	// Only the documented flag bits carry meaning. Mask stray bits so the
 	// encoded button byte always fits the protocol (X10 has a single byte per
@@ -983,6 +1035,10 @@ func (t *terminal) setAltScreen(wantAlt bool) {
 	if t.onAltScreen == wantAlt {
 		return
 	}
+	// DEC private mode 1046 lets an application forbid the alternate screen.
+	if wantAlt && !t.viewFlags[VFAltScreenAllowed] {
+		return
+	}
 	from := t.screen()
 	t.onAltScreen = wantAlt
 	to := t.screen()
@@ -999,6 +1055,9 @@ func (t *terminal) setAltScreen(wantAlt bool) {
 // Re-entering the current screen is a no-op.
 func (t *terminal) enterAltScreen(clear bool) {
 	if t.onAltScreen {
+		return
+	}
+	if !t.viewFlags[VFAltScreenAllowed] {
 		return
 	}
 	if clear {
@@ -1034,6 +1093,9 @@ func (t *terminal) resetTerminal() {
 	t.setAltScreen(false)
 	t.newlineMode = false
 	t.setViewInt(VICursorShape, CursorShapeDefault)
+	t.setViewFlag(VFAltScreenAllowed, true)
+	t.palette = defaultPalette
+	t.defaults = defaultDynamicColors
 	for _, s := range []screen{t.mainScreen, t.altScreen} {
 		size := s.Size()
 		s.setStyle(NewStyle())
