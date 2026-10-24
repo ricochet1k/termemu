@@ -68,16 +68,12 @@ func newBenchTerminal(frontend Frontend, backend Backend, mode TextReadMode, new
 	if backend == nil {
 		return nil
 	}
-	term := &terminal{
-		frontend:     frontend,
-		mainScreen:   newFn(frontend),
-		altScreen:    newFn(frontend),
-		backend:      backend,
-		viewFlags:    make([]bool, viewFlagCount),
-		viewInts:     make([]int, viewIntCount),
-		viewStrings:  make([]string, viewStringCount),
-		textReadMode: mode,
-	}
+	term := newTerminal(frontend, backend, mode)
+	term.mainScreen = newFn(frontend)
+	term.altScreen = newFn(frontend)
+	term.mainScreen.setScrollCapture(term.scrollCapture)
+	term.altScreen.setScrollCapture(term.scrollCapture)
+	term.mainScreen.setScrollDelta(term.scrollLinesDelta)
 	term.startReadLoop()
 	return term
 }
