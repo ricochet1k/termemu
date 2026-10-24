@@ -1,7 +1,6 @@
 package termemu
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -250,21 +249,27 @@ func (s *spanScreen) renderLineANSI(y int) string {
 	if s.size.X == 0 {
 		return ""
 	}
-	var buf bytes.Buffer
+	// Start from a known state, then emit only style deltas between spans.
+	// The old implementation emitted a full reset and re-applied the style for
+	// every span, which dominated styled-line rendering.
+	buf := make([]byte, 0, s.size.X+16)
+	buf = append(buf, ESC, '[', '0', 'm')
+	prev := NewStyle()
 	for _, sp := range s.lines[y].spans {
 		if sp.Width == 0 {
 			continue
 		}
-		buf.Write(sp.Style.ANSIEscape())
+		buf = appendANSIEscapeFrom(buf, prev, sp.Style)
+		prev = sp.Style
 		if sp.Text == "" {
 			for i := 0; i < sp.Width; i++ {
-				buf.WriteRune(' ')
+				buf = append(buf, ' ')
 			}
 		} else {
-			buf.WriteString(sp.Text)
+			buf = append(buf, sp.Text...)
 		}
 	}
-	return buf.String()
+	return string(buf)
 }
 
 func (s *spanScreen) setStyle(style Style) {
@@ -1213,9 +1218,20 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	}
 	newWidth := totalWidth - n + insertWidth
 
-	// Ensure capacity then populate the new span layout.
+	// Ensure capacity then populate the new span layout. Growth leaves
+	// headroom (~1.5x, at least 4 extra spans) so appending a few spans does
+	// not reallocate and copy the whole line on every write; allocating an
+	// exact-size slice here made styled output allocate on nearly every cell.
 	if cap(spans) < newLen {
-		newSpans := make([]Span, newLen)
+		headroom := newLen / 2
+		if headroom < 4 {
+			headroom = 4
+		}
+		if headroom > 8 {
+			headroom = 8
+		}
+		newCap := newLen + headroom
+		newSpans := make([]Span, newLen, newCap)
 		copy(newSpans, spans[:prefixLen])
 		dest := prefixLen
 		if hasLeft {

@@ -22,9 +22,10 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
   `esctest` (interactive escape debugger), and `tmux` (tmux comparison
   harness).
 - Reference docs live under `docs/` (e.g. `keyboard-protocol.rst`).
-- Helper scripts live under `scripts/`; generated test artifacts
-  (`scripts/tmux_integration_test`, `scripts/integration_test_results.txt`)
-  are gitignored.
+- Helper scripts live under `scripts/`; `scripts/bench.sh` runs benchmarks
+  (optionally with CPU/heap profiles via `PROFILE=1`). Generated test
+  artifacts (`scripts/tmux_integration_test`,
+  `scripts/integration_test_results.txt`) are gitignored.
 - Test helpers and benchmarks live in `_test.go` files at root.
 - `backend.go` holds `Backend`, `PTYBackend`, `NoPTYBackend`, `TeeBackend`.
   `backend_unix.go` / `backend_other.go` hold `setControllingTTY` (the only
@@ -102,8 +103,14 @@ Use these exact commands unless the user asks otherwise.
 - Run with verbose output: `go test -v ./path/to/pkg`
 
 ### Benchmarks
-- Run all benchmarks: `go test ./... -run '^$' -bench .`
+- Run all benchmarks: `go test ./... -run '^$' -bench . -benchmem`
 - Run a single benchmark: `go test ./path/to/pkg -run '^$' -bench '^BenchmarkName$'`
+- Convenience wrapper with optional profiles: `scripts/bench.sh [pattern] [benchtime]`
+  and `PROFILE=1 scripts/bench.sh Scrollback` (writes `cpu.pprof`/`mem.pprof`).
+- `bench_extra_test.go` covers screen/terminal snapshot+restore, resize, ANSI
+  line rendering, escape-command parsing, scrollback, and retained memory
+  (`B/screen`, `B/cell`). `screen_bench_test.go` holds the write-throughput
+  benchmarks.
 
 ### Lint / static checks
 CI (`.github/workflows/`) runs `gofmt -l .`, `go vet ./...`, `golangci-lint`
@@ -362,6 +369,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - `ANSIEscapeFrom(prev)` emits minimal diffs; a component returning to
   default emits `SGR 39` (fg) / `SGR 49` (bg) unless a mode change already
   forced a full reset
+- Both delegate to `appendANSIEscapeFrom`/`appendANSIEscapeColor`, which
+  append to a caller-provided buffer (no per-call slice allocation)
+- Line renderers (`spanScreen.renderLineANSI`, `ttyFrontend`'s
+  `renderStyledLineANSI`) emit one leading `SGR 0` and then deltas between
+  adjacent spans; do not revert to a full escape per span
 
 **Grapheme Handling** (grapheme_reader.go):
 - `GraphemeReader` wraps an io.Reader and tokenizes text

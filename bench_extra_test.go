@@ -196,8 +196,10 @@ func BenchmarkHandleCommand(b *testing.B) {
 			b.SetBytes(int64(len(c.cmd)))
 			b.ReportAllocs()
 			b.ResetTimer()
+			var r bytes.Reader
 			for i := 0; i < b.N; i++ {
-				_ = t.handleCommand(bytes.NewReader(c.cmd))
+				r.Reset(c.cmd)
+				_ = t.handleCommand(&r)
 			}
 		})
 	}
@@ -282,11 +284,21 @@ var (
 )
 
 // BenchmarkScreenMemoryRetained reports heap bytes retained by one fully
-// populated 160x50 styled screen. It is deliberately not scaled by b.N: the
-// measured quantity is per-screen retention, not throughput.
+// populated 160x50 screen. It is deliberately not scaled by b.N: the measured
+// quantity is per-screen retention, not throughput.
 func BenchmarkScreenMemoryRetained(b *testing.B) {
-	// Measure retention separately from throughput: b.N would otherwise grow
-	// without bound because a screen is cheap to build.
+	for _, styled := range []bool{false, true} {
+		name := "plain"
+		if styled {
+			name = "styled"
+		}
+		b.Run(name, func(b *testing.B) {
+			measureScreenRetained(b, styled)
+		})
+	}
+}
+
+func measureScreenRetained(b *testing.B, styled bool) {
 	const numScreens = 200
 	slots := make([]screen, numScreens)
 	runtime.GC()
@@ -294,23 +306,28 @@ func BenchmarkScreenMemoryRetained(b *testing.B) {
 	runtime.ReadMemStats(&before)
 	for i := 0; i < numScreens; i++ {
 		s := newSpanScreen(&EmptyFrontend{})
-		fillBenchScreen(s, benchWidth, benchHeight, true)
+		fillBenchScreen(s, benchWidth, benchHeight, styled)
 		slots[i] = s
 	}
 	benchScreenSink = slots[0]
 	runtime.GC()
 	runtime.ReadMemStats(&after)
+	// Keep the slots slice live across the GC above; otherwise liveness
+	// analysis can declare it dead after the loop and the measurement sees
+	// nothing retained.
+	runtime.KeepAlive(slots)
 	perScreen := float64(after.HeapAlloc-before.HeapAlloc) / float64(numScreens)
-	b.ReportMetric(perScreen, "B/screen")
-	b.ReportMetric(perScreen/float64(benchWidth*benchHeight), "B/cell")
 	benchScreenSink = nil
 	slots = nil
 
 	b.ReportAllocs()
 	b.ResetTimer()
+	// ReportMetric must come after ResetTimer: ResetTimer clears custom metrics.
+	b.ReportMetric(perScreen, "B/screen")
+	b.ReportMetric(perScreen/float64(benchWidth*benchHeight), "B/cell")
 	for i := 0; i < b.N; i++ {
 		s := newSpanScreen(&EmptyFrontend{})
-		fillBenchScreen(s, benchWidth, benchHeight, true)
+		fillBenchScreen(s, benchWidth, benchHeight, styled)
 		benchScreenSink = s
 	}
 	benchScreenSink = nil

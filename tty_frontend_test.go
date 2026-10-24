@@ -100,10 +100,13 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 				t.Fatalf("line count differs: raw=%d TTYFrontend=%d", len(innerLines), len(outerLines))
 			}
 			for i := range innerLines {
-				diff := cmp.Diff(innerLines[i], outerLines[i], cmp.AllowUnexported(Style{}))
-				if diff == "" {
+				// Compare cell content, not span packing: the renderer emits
+				// style deltas, so runs with the same style (for example a
+				// text run followed by a blank run) merge when re-parsed.
+				if innerLines[i].Equivalent(outerLines[i]) {
 					continue
 				}
+				diff := cmp.Diff(innerLines[i], outerLines[i], cmp.AllowUnexported(Style{}))
 				t.Fatalf("line %d differs between raw and TTYFrontend: %v", i, diff)
 			}
 		})

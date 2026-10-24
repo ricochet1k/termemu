@@ -287,18 +287,23 @@ func (s *Style) Modes() []Mode {
 	return result
 }
 
-// ansiEscapeColor generates ANSI escape sequences for a single color
-func ansiEscapeColor(c Color, param byte) []byte {
-	var seq []byte
-
+// appendANSIEscapeColor appends the ANSI escape sequence for a single color
+// component to dst. param is the SGR parameter prefix ('3' for foreground,
+// '4' for background). Default colors produce no bytes.
+func appendANSIEscapeColor(dst []byte, c Color, param byte) []byte {
 	cval := c.raw()
 	isRGB := cval&colorTypeMask == colorTypeMask
 	isBright := !c.IsDefault() && !isRGB && (cval&colBright) == colBright
 
 	if isRGB {
 		r, g, b := c.RGB()
-		seq = append(seq, ESC, '[', param, '8', ';', '2', ';')
-		seq = fmt.Appendf(seq, "%d;%d;%dm", r, g, b)
+		dst = append(dst, ESC, '[', param, '8', ';', '2', ';')
+		dst = strconv.AppendInt(dst, int64(r), 10)
+		dst = append(dst, ';')
+		dst = strconv.AppendInt(dst, int64(g), 10)
+		dst = append(dst, ';')
+		dst = strconv.AppendInt(dst, int64(b), 10)
+		dst = append(dst, 'm')
 	} else if isBright {
 		// Bright colors: SGR 90-97 for FG (param='3'), 100-107 for BG (param='4')
 		brightIdx := int(cval & maskBrightIdx)
@@ -306,62 +311,70 @@ func ansiEscapeColor(c Color, param byte) []byte {
 		if param == '4' {
 			baseCode = 100
 		}
-		seq = append(seq, ESC, '[')
-		seq = append(seq, []byte(strconv.Itoa(baseCode+brightIdx))...)
-		seq = append(seq, 'm')
+		dst = append(dst, ESC, '[')
+		dst = strconv.AppendInt(dst, int64(baseCode+brightIdx), 10)
+		dst = append(dst, 'm')
 	} else {
 		colorVal := int(cval & mask256color)
 		if cval == colDefault {
-			// Don't emit anything for default color
+			// Don't emit anything for default color.
 		} else if colorVal < 8 {
-			seq = append(seq, ESC, '[', param, byte('0'+rune(colorVal)), 'm')
+			dst = append(dst, ESC, '[', param, byte('0'+rune(colorVal)), 'm')
 		} else {
-			seq = append(seq, ESC, '[', param, '8', ';', '5', ';')
-			seq = append(seq, []byte(strconv.Itoa(colorVal)+"m")...)
+			dst = append(dst, ESC, '[', param, '8', ';', '5', ';')
+			dst = strconv.AppendInt(dst, int64(colorVal), 10)
+			dst = append(dst, 'm')
 		}
 	}
+	return dst
+}
 
-	return seq
+// ansiEscapeColor generates ANSI escape sequences for a single color.
+func ansiEscapeColor(c Color, param byte) []byte {
+	return appendANSIEscapeColor(nil, c, param)
+}
+
+// appendANSIEscape appends a complete reset followed by s to dst.
+func appendANSIEscape(dst []byte, s Style) []byte {
+	dst = append(dst, ESC, '[', '0', 'm')
+	return appendANSIEscapeFrom(dst, NewStyle(), s)
 }
 
 // ANSIEscape generates a complete ANSI escape sequence for this style
 func (s Style) ANSIEscape() []byte {
-	var seq []byte
-
-	// Reset first
-	seq = append(seq, ESC, '[', '0', 'm')
-
-	def := NewStyle()
-	seq = append(seq, s.ANSIEscapeFrom(def)...)
-
-	return seq
+	return appendANSIEscape(nil, s)
 }
 
-// ANSIEscapeFrom generates a minimal ANSI escape sequence that changes from prev to this style
-func (s Style) ANSIEscapeFrom(prev Style) []byte {
-	var seq []byte
-
+// appendANSIEscapeFrom appends the minimal ANSI escape sequence that changes
+// from prev to s. It appends nothing when the styles match.
+func appendANSIEscapeFrom(dst []byte, prev, s Style) []byte {
 	// Check what changed
 	modesChanged := s.modeBits() != prev.modeBits()
 	fgChanged := (s.fg &^ modeBitsMask) != (prev.fg &^ modeBitsMask)
 	bgChanged := (s.bg &^ modeBitsMask) != (prev.bg &^ modeBitsMask)
 
 	if !modesChanged && !fgChanged && !bgChanged {
-		return nil
+		return dst
 	}
 
-	// If modes changed, we need to reset and reapply all modes
+	// If modes changed, we need to reset and reapply all modes.
 	if modesChanged {
-		seq = append(seq, ESC, '[', '0', 'm')
-		// Re-apply all modes in this style
-		for _, mode := range s.Modes() {
-			if code, ok := modeToSGRCode[mode]; ok {
-				seq = append(seq, ESC, '[')
-				seq = append(seq, []byte(strconv.Itoa(code))...)
-				seq = append(seq, 'm')
+		dst = append(dst, ESC, '[', '0', 'm')
+		combined := s.modeBits()
+		for i := Mode(0); i < 16; i++ {
+			m := Mode(1) << i
+			if combined&m == 0 {
+				continue
 			}
+			code, ok := modeToSGRCode[m]
+			if !ok {
+				continue
+			}
+			dst = append(dst, ESC, '[')
+			dst = strconv.AppendInt(dst, int64(code), 10)
+			dst = append(dst, 'm')
 		}
-		// If modes changed, we also need to re-emit colors since we reset
+		// If modes changed, we also need to re-emit colors since we reset.
 		fgChanged = true
 		bgChanged = true
 	}
@@ -371,20 +384,25 @@ func (s Style) ANSIEscapeFrom(prev Style) []byte {
 	// unless a full reset was already emitted for a mode change above.
 	if fgChanged {
 		if Color(s.fg&^modeBitsMask).IsDefault() && !modesChanged {
-			seq = append(seq, ESC, '[', '3', '9', 'm')
+			dst = append(dst, ESC, '[', '3', '9', 'm')
 		} else {
-			seq = append(seq, ansiEscapeColor(Color(s.fg&^modeBitsMask), '3')...)
+			dst = appendANSIEscapeColor(dst, Color(s.fg&^modeBitsMask), '3')
 		}
 	}
 	if bgChanged {
 		if Color(s.bg&^modeBitsMask).IsDefault() && !modesChanged {
-			seq = append(seq, ESC, '[', '4', '9', 'm')
+			dst = append(dst, ESC, '[', '4', '9', 'm')
 		} else {
-			seq = append(seq, ansiEscapeColor(Color(s.bg&^modeBitsMask), '4')...)
+			dst = appendANSIEscapeColor(dst, Color(s.bg&^modeBitsMask), '4')
 		}
 	}
 
-	return seq
+	return dst
+}
+
+// ANSIEscapeFrom generates a minimal ANSI escape sequence that changes from prev to this style
+func (s Style) ANSIEscapeFrom(prev Style) []byte {
+	return appendANSIEscapeFrom(nil, prev, s)
 }
 
 // styleJSON is the exported shadow type used for JSON and gob encoding of

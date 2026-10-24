@@ -252,18 +252,21 @@ func renderStyledLineANSI(line Line) []byte {
 		return nil
 	}
 
-	var buf bytes.Buffer
+	buf := make([]byte, 0, line.Width+16)
+	buf = append(buf, ESC, '[', '0', 'm')
+	prev := NewStyle()
 	for _, span := range line.Spans {
-		buf.Write(span.Style.ANSIEscape())
+		buf = appendANSIEscapeFrom(buf, prev, span.Style)
+		prev = span.Style
 		if span.Text != "" {
-			buf.WriteString(span.Text)
+			buf = append(buf, span.Text...)
 		} else {
 			for i := 0; i < span.Width; i++ {
-				buf.WriteByte(' ')
+				buf = append(buf, ' ')
 			}
 		}
 	}
-	return buf.Bytes()
+	return buf
 }
 
 func ansiMoveCursor(x, y int) string {

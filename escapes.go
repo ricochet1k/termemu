@@ -95,6 +95,10 @@ func (t *terminal) ptyReadLoop(initial ReaderState) error {
 type readLoopState struct {
 	gr         *GraphemeReader
 	pendingCmd []byte
+	// cmdBuf and cmdReader are reused across escape commands so a stream of
+	// SGR/CSI sequences does not allocate a buffer and a bytes.Reader each time.
+	cmdBuf    []byte
+	cmdReader bytes.Reader
 }
 
 func newReadLoopState(src io.Reader, st ReaderState) *readLoopState {
@@ -109,6 +113,7 @@ func newReadLoopState(src io.Reader, st ReaderState) *readLoopState {
 	return &readLoopState{
 		gr:         NewGraphemeReaderFromState(src, gs),
 		pendingCmd: append([]byte(nil), st.PendingCommand...),
+		cmdBuf:     make([]byte, 0, 64),
 	}
 }
 
@@ -212,7 +217,8 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 		// parses from memory, so a child that stops mid-sequence cannot
 		// block Snapshot/Restore (which need the lock) behind a pending
 		// ReadByte on the backend.
-		cmd, err := readEscapeCommand(gr, nil)
+		cmd, err := readEscapeCommand(state.cmdBuf[:0], gr, nil)
+		state.cmdBuf = cmd
 		if err != nil {
 			if len(cmd) == 0 {
 				// The ESC itself was already consumed; remember it so a
@@ -226,7 +232,7 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 			return err
 		}
 
-		t.dispatchEscapeCommand(cmd)
+		t.dispatchEscapeCommand(state, cmd)
 
 	case 127: // DEL  Delete Character (treat as backspace)
 		t.withLock(func() {
@@ -241,7 +247,8 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 // continueEscapeCommand resumes an ESC-initiated command from state.pendingCmd.
 // It is called at the top of ptyReadLoop before normal reads.
 func (t *terminal) continueEscapeCommand(state *readLoopState) error {
-	cmd, err := readEscapeCommand(state.gr, state.pendingCmd)
+	cmd, err := readEscapeCommand(state.cmdBuf[:0], state.gr, state.pendingCmd)
+	state.cmdBuf = cmd
 	if err != nil {
 		state.pendingCmd = append([]byte(nil), cmd...)
 		if len(state.pendingCmd) == 0 {
@@ -250,15 +257,16 @@ func (t *terminal) continueEscapeCommand(state *readLoopState) error {
 		return err
 	}
 	state.pendingCmd = nil
-	t.dispatchEscapeCommand(cmd)
+	t.dispatchEscapeCommand(state, cmd)
 	return nil
 }
 
 // dispatchEscapeCommand applies a complete ESC-initiated command under the
 // terminal lock.
-func (t *terminal) dispatchEscapeCommand(cmd []byte) {
+func (t *terminal) dispatchEscapeCommand(state *readLoopState, cmd []byte) {
+	state.cmdReader.Reset(cmd)
 	t.withLock(func() {
-		success := t.handleCommand(bytes.NewReader(cmd))
+		success := t.handleCommand(&state.cmdReader)
 		if *debugCmd || *debugTodo {
 			if success {
 				debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
@@ -284,15 +292,17 @@ type escapeReader interface {
 // Two-byte commands consume their argument, and everything else is a single
 // command byte. The bytes are buffered even when debugging is off; the debug
 // capture uses the returned slice directly.
-func readEscapeCommand(r escapeReader, partial []byte) ([]byte, error) {
+func readEscapeCommand(dst []byte, r escapeReader, partial []byte) ([]byte, error) {
 	// A lone ESC is stored as a sentinel when no command byte was read yet.
 	if len(partial) > 0 && partial[0] == 0x1b {
 		partial = partial[1:]
 	}
-	buf := append([]byte(nil), partial...)
-	drop := len(buf) > maxEscapeCommandBytes
+	buf := dst[:0]
+	drop := len(partial) > maxEscapeCommandBytes
 	if drop {
-		buf = nil
+		buf = buf[:0]
+	} else {
+		buf = append(buf, partial...)
 	}
 	replay := 0
 	read := func() (byte, error) {
@@ -990,6 +1000,8 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 			// debugPrintf("cursor home: %v, %v\n", x, y)
 			t.screen().setScrollMarginTopBottom(top-1, bottom-1)
+			// DECSTBM homes the cursor (VT100/xterm behavior).
+			t.screen().setCursorPos(0, 0)
 
 		case 'n': // Device Status Report
 			defaultParam(0)
