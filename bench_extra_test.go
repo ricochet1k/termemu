@@ -2,6 +2,7 @@ package termemu
 
 import (
 	"bytes"
+	"io"
 	"runtime"
 	"testing"
 )
@@ -174,6 +175,25 @@ func BenchmarkStyledLinesRegion(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = s.StyledLines(r)
+	}
+}
+
+func BenchmarkTTYRenderRegion(b *testing.B) {
+	t := newBenchTermOnly(b)
+	if err := t.Resize(benchWidth, benchHeight); err != nil {
+		b.Fatal(err)
+	}
+	fillBenchScreen(t.mainScreen, benchWidth, benchHeight, true)
+	f := NewTTYFrontend(io.Discard)
+	f.SetTerminal(t)
+	region := Region{X: 0, Y: 0, X2: benchWidth, Y2: benchHeight}
+	f.Attach(region)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		t.View(func(v LockedView) {
+			f.RegionChanged(v, region, CRText)
+		})
 	}
 }
 

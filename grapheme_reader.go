@@ -179,6 +179,27 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 			break
 		}
 
+		// Rune mode: an ASCII byte followed by another printable ASCII byte
+		// cannot be widened by a following emoji-presentation selector, so it
+		// is a plain one-cell token. Handling it here avoids the per-rune
+		// tokenizer (and uniseg) for the common case. The final ASCII byte of
+		// a run still goes through the tokenizer to check what follows.
+		if r.mode == TextReadModeRune && !mergeRun && !r.forceMergeNext {
+			b := r.data[r.start]
+			if b >= 0x20 && b < 0x7f && r.start+1 < r.end {
+				next := r.data[r.start+1]
+				if next >= 0x20 && next < 0x7f {
+					if maxWidth > 0 && widthUsed+1 > maxWidth && widthUsed > 0 {
+						break
+					}
+					r.start++
+					r.state = 0
+					widthUsed++
+					continue
+				}
+			}
+		}
+
 		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok := r.nextTokenInfo(r.data[r.start:r.end])
 		if !ok {
 			// The remaining bytes do not form a complete cluster yet. The
@@ -355,6 +376,9 @@ func isPrintableByte(b byte) bool {
 // isC1ControlCluster reports whether the first rune of cluster is a C1 control
 // rune (U+0080-U+009F), which must not be rendered.
 func isC1ControlCluster(cluster []byte) bool {
+	if len(cluster) == 0 || cluster[0] < 0x80 {
+		return false
+	}
 	r, _ := utf8.DecodeRune(cluster)
 	return r >= 0x80 && r <= 0x9f
 }
@@ -485,6 +509,16 @@ func (r *GraphemeReader) nextTokenInfo(buf []byte) (cluster []byte, consumed int
 }
 
 func nextRuneTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool) ([]byte, int, int, bool, int, bool, bool, bool) {
+	// Printable ASCII is always one cell wide and never cluster-carrying.
+	// Skipping uniseg here matches the grapheme-mode fast path and avoids a
+	// per-rune string allocation in the common case.
+	if !forceMergeNext && len(buf) > 0 && buf[0] >= 0x20 && buf[0] < 0x7f {
+		width := 1
+		if nextRuneIsEmojiPresentation(buf[1:]) {
+			width = 2
+		}
+		return buf[:1], 1, width, false, 0, false, lastWasRI, true
+	}
 	cluster, consumed, width, newState, ok := stepRuneCluster(buf, state)
 	if !ok {
 		return nil, 0, 0, false, state, forceMergeNext, lastWasRI, false

@@ -88,3 +88,46 @@ func TestInvalidUTF8IsSanitized(t *testing.T) {
 		t.Fatalf("expected replacement characters, got %q", line)
 	}
 }
+
+// TestRuneModeASCIIFastPathChunking guards the printable-ASCII shortcut in
+// ReadPrintableBytes: the shortcut skips the per-rune tokenizer when the next
+// byte is also printable ASCII, but must keep matching the tokenizer path when
+// a selector/emoji follows the ASCII run or reads split at any byte.
+func TestRuneModeASCIIFastPathChunking(t *testing.T) {
+	run := func(data []byte, chunk int) (string, int) {
+		t.Helper()
+		var r io.Reader
+		if chunk == 0 {
+			r = strings.NewReader(string(data))
+		} else {
+			r = &chunkReader{data: append([]byte(nil), data...), chunk: chunk}
+		}
+		term := NewWithMode(NewMockFrontend(), NewNoPTYBackend(r, io.Discard), TextReadModeRune)
+		_ = term.Resize(40, 3)
+		defer func() { _ = term.Close() }()
+		<-term.Done()
+		return term.Line(0), term.CursorPos().X
+	}
+
+	cases := []string{
+		"hello",
+		"x y z",
+		"1\ufe0f\u20e3",
+		"a1\ufe0f",
+		"abc👨\u200d👩",
+		"12👍🏽",
+		"!\ufe0f",
+		"~1\ufe0f",
+	}
+	for _, text := range cases {
+		t.Run(text, func(t *testing.T) {
+			wantLine, wantX := run([]byte(text), 0)
+			for _, chunk := range []int{1, 3, 7} {
+				gotLine, gotX := run([]byte(text), chunk)
+				if gotLine != wantLine || gotX != wantX {
+					t.Fatalf("chunk %d: line/cursor (%q,%d), want (%q,%d)", chunk, gotLine, gotX, wantLine, wantX)
+				}
+			}
+		})
+	}
+}

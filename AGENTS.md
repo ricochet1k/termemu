@@ -394,6 +394,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Printable ASCII uses a fast path that skips uniseg (the common case); a
   one-cell ASCII base followed by VS16/keycap/skin-tone is coalesced and
   widened like the streaming merge path
+- `ReadPrintableBytes` additionally consumes interior printable-ASCII bytes
+  in rune mode without calling the tokenizer when the next byte is also
+  printable ASCII (no selector can follow). The last byte of an ASCII run
+  still goes through the tokenizer; keep it that way so VS16/keycap widening
+  and read-boundary behavior stay identical (`TestRuneModeASCIIFastPathChunking`)
 - Clusters ending in ZWJ set `ForceMergeNext`; regional indicators use
   `LastWasRI`; VS16/keycap/skin-tone modifiers widen a one-cell base to two
 - `GraphemeState` + `SnapshotState`/`NewGraphemeReaderFromState` capture and
@@ -596,7 +601,7 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
 ### Adding a New Style Mode
 
 1. Add constant to `Mode` type in style.go
-2. Add to `modeToSGRCode` map for ANSI output
+2. Add its SGR code to the `modeSGRCodes` array (indexed by mode bit position)
 3. Update `colorModes` array if it's SGR 1-8
 4. Add parsing in CSI 'm' handler in escapes.go
 5. Add test in style_test.go (if exists) or screen_test.go
@@ -627,6 +632,12 @@ update `spanScreen`.
 wires it in `newTerminal`, and `spanScreen.scroll()` invokes it before overwriting
 lost rows. Keep the capture path allocation-light but correct: rows are copied
 because the screen reuses its `spanLine` storage.
+
+`scroll` saves the rows leaving the region in `scrollScratch` and recycles their
+span backing arrays into the vacated rows via `resetSpanLine`; `scrollCapture`
+receives that scratch and must not retain it. Do not recycle rows in place when
+the shifted copies still share the same backing array (for example
+`takeTopRows`), or the live rows get clobbered.
 
 `setLink` is the other screen-internal hook: `terminal.setHyperlink` (driven by
 OSC 8) pushes the URI to both screens; `writeString`/`rawWriteRune` stamp it

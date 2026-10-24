@@ -67,21 +67,23 @@ const (
 	ColorTypeRGB = 1
 )
 
-// Mode to SGR code mappings for output generation
-var modeToSGRCode = map[Mode]int{
-	ModeBold:            1,
-	ModeDim:             2,
-	ModeItalic:          3,
-	ModeUnderline:       4,
-	ModeBlink:           5,
-	ModeRapidBlink:      6,
-	ModeReverse:         7,
-	ModeInvisible:       8,
-	ModeStrike:          9,
-	ModeDoubleUnderline: 21,
-	ModeFramed:          51,
-	ModeEncircled:       52,
-	ModeOverline:        53,
+// modeSGRCodes maps a mode bit position (ModeBold is bit 0) to its SGR code.
+// Indexing by bit position avoids a map lookup in the ANSI render hot path;
+// 0 marks a position with no SGR code.
+var modeSGRCodes = [13]int16{
+	1,  // ModeBold
+	2,  // ModeDim
+	3,  // ModeItalic
+	4,  // ModeUnderline
+	5,  // ModeBlink
+	7,  // ModeReverse
+	8,  // ModeInvisible
+	9,  // ModeStrike
+	53, // ModeOverline
+	21, // ModeDoubleUnderline
+	51, // ModeFramed
+	52, // ModeEncircled
+	6,  // ModeRapidBlink
 }
 
 // Color represents a terminal color value. Use the constructor functions
@@ -168,32 +170,13 @@ func NewStyle() Style {
 	}
 }
 
-// modeBits extracts and combines mode bits from all three color values
-// Returns a combined Mode value with all set modes
+// modeBits extracts and combines mode bits from the color values into a
+// single Mode value. FG stores modes 0-6 in its mode bits; BG stores modes
+// 7-12 in bits 0-5, so shifting BG's bits up by 7 maps them directly.
 func (s *Style) modeBits() Mode {
-	// Extract bits 24-30 from each color value
 	fgModes := (s.fg >> modeBitsShift) & 0x7F
-	bgModes := (s.bg >> modeBitsShift) & 0x7F
-
-	// Combine into a single Mode value
-	// FG stores modes 0-6, BG stores modes 7-12 (but shifted down)
-	var combined Mode
-
-	// Map FG modes (bits 0-6)
-	for i := uint(0); i < 7; i++ {
-		if (fgModes & (1 << i)) != 0 {
-			combined |= Mode(1) << i
-		}
-	}
-
-	// Map BG modes (bits 7-12 in Mode enum, but stored in bits 0-5 of bg's mode bits)
-	for i := uint(0); i < 6; i++ {
-		if (bgModes & (1 << i)) != 0 {
-			combined |= Mode(1) << (i + 7)
-		}
-	}
-
-	return combined
+	bgModes := (s.bg >> modeBitsShift) & 0x3F
+	return Mode(fgModes) | Mode(bgModes)<<7
 }
 
 // SetColor sets a color component to the given Color value.
@@ -361,17 +344,12 @@ func appendANSIEscapeFrom(dst []byte, prev, s Style) []byte {
 	if modesChanged {
 		dst = append(dst, ESC, '[', '0', 'm')
 		combined := s.modeBits()
-		for i := Mode(0); i < 16; i++ {
-			m := Mode(1) << i
-			if combined&m == 0 {
-				continue
-			}
-			code, ok := modeToSGRCode[m]
-			if !ok {
+		for i := 0; i < len(modeSGRCodes); i++ {
+			if combined&(1<<i) == 0 {
 				continue
 			}
 			dst = append(dst, ESC, '[')
-			dst = strconv.AppendInt(dst, int64(code), 10)
+			dst = strconv.AppendInt(dst, int64(modeSGRCodes[i]), 10)
 			dst = append(dst, 'm')
 		}
 		// If modes changed, we also need to re-emit colors since we reset.

@@ -98,3 +98,38 @@ func TestANSIEscape_Unchanged(t *testing.T) {
 		t.Fatalf("default ANSIEscape: got %q, want %q", got, "\x1b[0m")
 	}
 }
+
+// TestModeSGRCodesCoverAllModes pins the bit-position table used by the ANSI
+// renderer to the SGR codes the emulator has always emitted.
+func TestModeSGRCodesCoverAllModes(t *testing.T) {
+	want := map[Mode]int16{
+		ModeBold:            1,
+		ModeDim:             2,
+		ModeItalic:          3,
+		ModeUnderline:       4,
+		ModeBlink:           5,
+		ModeRapidBlink:      6,
+		ModeReverse:         7,
+		ModeInvisible:       8,
+		ModeStrike:          9,
+		ModeDoubleUnderline: 21,
+		ModeFramed:          51,
+		ModeEncircled:       52,
+		ModeOverline:        53,
+	}
+	for mode, code := range want {
+		idx := 0
+		for m := mode; m > 1; m >>= 1 {
+			idx++
+		}
+		if idx >= len(modeSGRCodes) {
+			t.Fatalf("mode %d maps to bit %d outside modeSGRCodes", mode, idx)
+		}
+		if got := modeSGRCodes[idx]; got != code {
+			t.Errorf("modeSGRCodes[%d] (mode %d) = %d, want %d", idx, mode, got, code)
+		}
+	}
+	if got := len(want); got != len(modeSGRCodes) {
+		t.Errorf("modeSGRCodes covers %d modes, want %d", len(modeSGRCodes), got)
+	}
+}

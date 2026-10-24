@@ -1,10 +1,9 @@
 package termemu
 
 import (
-	"bytes"
-	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 )
 
@@ -35,6 +34,10 @@ type TTYFrontend struct {
 	cursor   Pos
 	showCur  bool
 	focused  bool
+
+	// spans is scratch space reused across line renders. It is only touched
+	// while the terminal lock is held (renderRegionLocked).
+	spans []Span
 }
 
 // NewTTYFrontend returns a frontend that writes to out (defaults to stdout).
@@ -73,7 +76,7 @@ func (t *TTYFrontend) Attach(r Region) {
 	}
 
 	term.View(func(v LockedView) {
-		renderSnapshotRegion(snap, v, r)
+		renderSnapshotRegion(&snap, v, r)
 	})
 }
 
@@ -163,8 +166,10 @@ func (t *TTYFrontend) renderRegionLocked(view LockedView, r Region) {
 		cursor:   t.cursor,
 		showCur:  t.showCur,
 		focused:  t.focused,
+		spans:    t.spans,
 	}
-	renderSnapshotRegion(snap, view, r)
+	renderSnapshotRegion(&snap, view, r)
+	t.spans = snap.spans
 	t.renderCursorLocked()
 }
 
@@ -177,6 +182,10 @@ type ttySnapshot struct {
 	cursor   Pos
 	showCur  bool
 	focused  bool
+
+	// spans is scratch space reused across line renders (only touched while
+	// the terminal lock is held).
+	spans []Span
 }
 
 // snapshotLocked copies the render state. Caller must hold t.mu.
@@ -194,7 +203,7 @@ func (t *TTYFrontend) snapshotLocked() ttySnapshot {
 // renderSnapshotRegion renders region r to snap.out using the snapshotted
 // frontend state and the callback's view. The caller must hold the terminal
 // lock and must not hold the TTYFrontend mutex (use a snapshot instead).
-func renderSnapshotRegion(snap ttySnapshot, view LockedView, r Region) {
+func renderSnapshotRegion(snap *ttySnapshot, view LockedView, r Region) {
 	if snap.out == nil || !snap.attached {
 		return
 	}
@@ -205,20 +214,21 @@ func renderSnapshotRegion(snap ttySnapshot, view LockedView, r Region) {
 		return
 	}
 
-	var buf bytes.Buffer
-	buf.WriteString(ansiSaveCursor)
-	buf.WriteString(ansiWrapDisable)
+	// One buffer for the whole repaint: roughly one byte per cell plus
+	// cursor moves and SGR sequences.
+	buf := make([]byte, 0, (r.X2-r.X)*(r.Y2-r.Y)+(r.Y2-r.Y)*24+64)
+	buf = append(buf, ansiSaveCursor...)
+	buf = append(buf, ansiWrapDisable...)
 	for y := r.Y; y < r.Y2; y++ {
-		buf.WriteString(ansiMoveCursor(r.X, y))
-		line := view.StyledLine(r.X, r.X2-r.X, y)
-		buf.Write(renderStyledLineANSI(line))
+		buf = appendANSIMoveCursor(buf, r.X, y)
+		buf, snap.spans = view.appendANSILine(buf, snap.spans, r.X, r.X2-r.X, y)
 	}
-	buf.WriteString(ansiReset)
-	buf.WriteString(ansiWrapEnable)
-	buf.WriteString(ansiRestoreCursor)
+	buf = append(buf, ansiReset...)
+	buf = append(buf, ansiWrapEnable...)
+	buf = append(buf, ansiRestoreCursor...)
 
-	_, _ = snap.out.Write(buf.Bytes())
-	renderSnapshotCursor(snap)
+	_, _ = snap.out.Write(buf)
+	renderSnapshotCursor(*snap)
 }
 
 // renderSnapshotCursor writes the cursor update for snap. It takes no locks.
@@ -234,7 +244,9 @@ func renderSnapshotCursor(snap ttySnapshot) {
 		_, _ = snap.out.Write([]byte(ansiCursorHide))
 		return
 	}
-	_, _ = snap.out.Write([]byte(ansiMoveCursor(snap.cursor.X, snap.cursor.Y) + ansiCursorShow))
+	buf := appendANSIMoveCursor(make([]byte, 0, 24), snap.cursor.X, snap.cursor.Y)
+	buf = append(buf, ansiCursorShow...)
+	_, _ = snap.out.Write(buf)
 }
 
 func (t *TTYFrontend) renderCursorLocked() {
@@ -248,29 +260,25 @@ func (t *TTYFrontend) renderCursorLocked() {
 // renderStyledLineANSI renders a line's text and SGR styling. OSC 8
 // hyperlinks (Span.Link) are intentionally not re-emitted.
 func renderStyledLineANSI(line Line) []byte {
-	if len(line.Spans) == 0 {
-		return nil
-	}
+	return appendStyledLineANSI(nil, line)
+}
 
-	buf := make([]byte, 0, line.Width+16)
-	buf = append(buf, ESC, '[', '0', 'm')
-	prev := NewStyle()
-	for _, span := range line.Spans {
-		buf = appendANSIEscapeFrom(buf, prev, span.Style)
-		prev = span.Style
-		if span.Text != "" {
-			buf = append(buf, span.Text...)
-		} else {
-			for i := 0; i < span.Width; i++ {
-				buf = append(buf, ' ')
-			}
-		}
-	}
-	return buf
+// appendStyledLineANSI appends line's cells to dst, emitting one leading reset
+// and then SGR deltas between adjacent spans.
+func appendStyledLineANSI(dst []byte, line Line) []byte {
+	return appendLineSpansANSI(dst, line.Spans)
+}
+
+func appendANSIMoveCursor(dst []byte, x, y int) []byte {
+	dst = append(dst, ESC, '[')
+	dst = strconv.AppendInt(dst, int64(y+1), 10)
+	dst = append(dst, ';')
+	dst = strconv.AppendInt(dst, int64(x+1), 10)
+	return append(dst, 'H')
 }
 
 func ansiMoveCursor(x, y int) string {
-	return fmt.Sprintf("\x1b[%d;%dH", y+1, x+1)
+	return string(appendANSIMoveCursor(make([]byte, 0, 12), x, y))
 }
 
 func clampRegion(r Region, w, h int) Region {

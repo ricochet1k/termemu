@@ -172,6 +172,18 @@ func (v LockedView) ANSILine(y int) string {
 	return v.t.screen().renderLineANSI(y)
 }
 
+// appendANSILine appends the ANSI rendering of region (x,w,y) to dst,
+// reusing spanScratch for the clipped spans. It is for in-package renderers
+// running under the terminal lock, which must pass the returned scratch back
+// on the next call.
+func (v LockedView) appendANSILine(dst []byte, spanScratch []Span, x, w, y int) ([]byte, []Span) {
+	if v.t == nil || y < 0 || y >= v.t.screen().Size().Y {
+		return dst, spanScratch
+	}
+	spans, _ := v.t.screen().clippedStyledSpans(spanScratch[:0], x, w, y)
+	return appendLineSpansANSI(dst, spans), spans
+}
+
 // StyledLine returns the styled content of a line region.
 func (v LockedView) StyledLine(x, w, y int) Line {
 	if v.t == nil {

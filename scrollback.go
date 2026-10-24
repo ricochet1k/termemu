@@ -167,8 +167,31 @@ func (s *Scrollback) scrollbackSnapshotLocked() ScrollbackSnapshot {
 	var snap ScrollbackSnapshot
 	n := len(s.t.scrollRows)
 	snap.Rows = make([]Row, n)
+
+	// Copy all spans into one arena with per-row cap-limited sub-slices.
+	// Rows never share elements, so mutating a row cannot affect another,
+	// and a snapshot of N rows costs one span allocation instead of N.
+	total := 0
 	for i := 0; i < n; i++ {
-		snap.Rows[i] = rowFromScrollRow(s.t.scrollRows[(s.t.scrollBaseIdx+i)%n])
+		total += len(s.t.scrollRows[(s.t.scrollBaseIdx+i)%n].spans)
+	}
+	arena := make([]Span, total)
+	off := 0
+	for i := 0; i < n; i++ {
+		r := s.t.scrollRows[(s.t.scrollBaseIdx+i)%n]
+		k := len(r.spans)
+		var spans []Span
+		if k > 0 {
+			spans = arena[off : off+k : off+k]
+			copy(spans, r.spans)
+			off += k
+		}
+		snap.Rows[i] = Row{
+			Spans:   spans,
+			Width:   r.width,
+			Wrapped: r.wrapped,
+			ID:      r.id,
+		}
 	}
 	snap.Base = s.scrollBaseIDLocked()
 	snap.Next = s.t.scrollNextID
@@ -294,7 +317,7 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 	// Walk forward collecting all raw rows in the logical line. The start
 	// row is always included; subsequent rows belong to the line only when
 	// they are flagged as a continuation of the row before them.
-	var rawRows []scrollRow
+	rawRows := make([]scrollRow, 0, 8)
 	for i, steps := start, 0; ; steps++ {
 		r := s.t.scrollRows[i]
 		if r.id == 0 {
@@ -429,7 +452,8 @@ func reflowRows(spans []Span, totalWidth, targetWidth int) []Row {
 		return nil
 	}
 
-	var rows []Row
+	// The reflow produces exactly ceil(totalWidth/targetWidth) rows.
+	rows := make([]Row, 0, (totalWidth+targetWidth-1)/targetWidth)
 	si, so := 0, 0
 	remaining := totalWidth
 	for remaining > 0 {

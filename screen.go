@@ -19,6 +19,10 @@ type screen interface {
 
 	Line(y int) string
 	StyledLine(x, w, y int) Line
+	// clippedStyledSpans appends the spans of region (x,w,y) to dst, reusing
+	// dst's backing array. It returns the appended spans and the effective
+	// width after clamping. Used by StyledLine and in-package renderers.
+	clippedStyledSpans(dst []Span, x, w, y int) ([]Span, int)
 	StyledLines(r Region) []Line
 	renderLineANSI(y int) string
 	setStyle(style Style)
@@ -89,6 +93,13 @@ type spanScreen struct {
 	autoWrap bool
 
 	textMode TextReadMode
+
+	// scrollScratch/scrollScratchW hold the rows scrolling off during a
+	// scroll so their span storage can be recycled into the vacated rows
+	// instead of allocating new blank lines. scrollCapture must not retain
+	// these slices (the terminal copies the rows it needs).
+	scrollScratch  []spanLine
+	scrollScratchW []bool
 
 	// scrollCapture is called before lines scroll off. It receives the
 	// physical rows being lost, along with their wrapped flags.
@@ -181,16 +192,34 @@ func (s *spanScreen) Line(y int) string {
 }
 
 func (s *spanScreen) StyledLine(x, w, y int) Line {
+	spans, width := s.clippedStyledSpans(nil, x, w, y)
+	return Line{
+		Spans: spans,
+		Width: width,
+	}
+}
+
+// clippedStyledSpans collects the spans overlapping region (x,w,y) into dst.
+// The spans share Text with the screen, so the returned slice must not be
+// mutated in a way that changes the stored spans (append-only reuse is fine).
+func (s *spanScreen) clippedStyledSpans(dst []Span, x, w, y int) ([]Span, int) {
 	if w < 0 || x+w > s.size.X {
 		w = s.size.X - x
 	}
 	if w < 0 {
 		w = 0
 	}
+	if y < 0 || y >= len(s.lines) {
+		return dst, w
+	}
 
-	// We can construct the line by taking a slice of the spans and clipping edges
 	originalSpans := s.lines[y].spans
-	var spans []Span
+	spans := dst
+	if spans == nil {
+		// Fresh result (StyledLine): preallocate for the worst case so the
+		// append loop does not grow repeatedly.
+		spans = make([]Span, 0, len(originalSpans))
+	}
 
 	pos := 0
 	for _, sp := range originalSpans {
@@ -236,14 +265,11 @@ func (s *spanScreen) StyledLine(x, w, y int) Line {
 		pos = endPos
 	}
 
-	return Line{
-		Spans: spans,
-		Width: w,
-	}
+	return spans, w
 }
 
 func (s *spanScreen) StyledLines(r Region) []Line {
-	var lines []Line
+	lines := make([]Line, 0, max(0, r.Y2-r.Y))
 	for y := r.Y; y < r.Y2; y++ {
 		lines = append(lines, s.StyledLine(r.X, r.X2-r.X, y))
 	}
@@ -254,27 +280,34 @@ func (s *spanScreen) renderLineANSI(y int) string {
 	if s.size.X == 0 {
 		return ""
 	}
-	// Start from a known state, then emit only style deltas between spans.
-	// The old implementation emitted a full reset and re-applied the style for
-	// every span, which dominated styled-line rendering.
 	buf := make([]byte, 0, s.size.X+16)
-	buf = append(buf, ESC, '[', '0', 'm')
+	return string(appendLineSpansANSI(buf, s.lines[y].spans))
+}
+
+// appendLineSpansANSI appends spans as an ANSI line: one leading reset, then
+// style deltas between adjacent spans. A full reset per span (the old
+// behavior) dominated styled-line rendering.
+func appendLineSpansANSI(dst []byte, spans []Span) []byte {
+	if len(spans) == 0 {
+		return dst
+	}
+	dst = append(dst, ESC, '[', '0', 'm')
 	prev := NewStyle()
-	for _, sp := range s.lines[y].spans {
+	for _, sp := range spans {
 		if sp.Width == 0 {
 			continue
 		}
-		buf = appendANSIEscapeFrom(buf, prev, sp.Style)
+		dst = appendANSIEscapeFrom(dst, prev, sp.Style)
 		prev = sp.Style
 		if sp.Text == "" {
 			for i := 0; i < sp.Width; i++ {
-				buf = append(buf, ' ')
+				dst = append(dst, ' ')
 			}
 		} else {
-			buf = append(buf, sp.Text...)
+			dst = append(dst, sp.Text...)
 		}
 	}
-	return string(buf)
+	return dst
 }
 
 func (s *spanScreen) setStyle(style Style) {
@@ -342,6 +375,8 @@ func (s *spanScreen) takeTopRows(n int) ([]spanLine, []bool) {
 	copy(s.lines, s.lines[n:])
 	copy(s.wrapped, s.wrapped[n:])
 	for y := len(s.lines) - n; y < len(s.lines); y++ {
+		// The vacated slots still share storage with the shifted rows (they
+		// are the pre-copy originals), so they cannot be reset in place.
 		s.lines[y] = blankSpanLine(s.size.X, s.style)
 		s.wrapped[y] = false
 	}
@@ -585,41 +620,47 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 		s.scrollDelta(dy)
 	}
 
-	if dy > 0 {
-		for y := y2; y >= y1+dy; y-- {
-			s.lines[y] = s.lines[y-dy]
-			if y < len(s.wrapped) {
-				s.wrapped[y] = s.wrapped[y-dy]
-			}
-		}
-		for y := y1; y < y1+dy; y++ {
-			s.lines[y] = blankSpanLine(s.size.X, s.style)
-			if y < len(s.wrapped) {
-				s.wrapped[y] = false
-			}
-		}
-		s.frontend.RegionChanged(s.view, Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
-		debugPrintln(debugScroll, "scroll changed region:", Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
-		s.frontend.RegionChanged(s.view, Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X}, CRScroll)
+	// Save the |dy| rows that scroll out of the region so their span storage
+	// can be recycled into the vacated rows instead of allocating new blank
+	// lines. The scratch slices are reused between scrolls; scrollCapture
+	// copies the rows it needs (it must not retain them).
+	n := dy
+	if n < 0 {
+		n = -n
+	}
+	if cap(s.scrollScratch) < n {
+		s.scrollScratch = make([]spanLine, n)
+	}
+	if cap(s.scrollScratchW) < n {
+		s.scrollScratchW = make([]bool, n)
+	}
+	saved := s.scrollScratch[:n]
+	savedW := s.scrollScratchW[:n]
+
+	var saveStart int
+	if dy < 0 {
+		saveStart = y1 // rows scrolling off the top (captured into scrollback)
 	} else {
-		// dy < 0: content shifts up, lines at the top scroll off.
-		// Only capture when the scroll region starts at the top of the
-		// screen (y1 == 0, already clamped above). A mid-screen scroll
-		// region (e.g. CSI r margins with top > 1) recycles lines within
-		// the region, so pushing those interior rows into scrollback
-		// would corrupt history; xterm only scrolls into scrollback from
-		// the top of the screen.
-		captureCount := -dy
+		saveStart = y2 - n + 1 // rows scrolling off the bottom
+	}
+	for i := 0; i < n; i++ {
+		y := saveStart + i
+		saved[i] = s.lines[y]
+		savedW[i] = false
+		if y < len(s.wrapped) {
+			savedW[i] = s.wrapped[y]
+		}
+	}
+
+	if dy < 0 {
+		// Content shifts up; lines at the top scroll off. Only capture when
+		// the scroll region starts at the top of the screen (y1 == 0, already
+		// clamped above). A mid-screen scroll region (e.g. CSI r margins with
+		// top > 1) recycles lines within the region, so pushing those interior
+		// rows into scrollback would corrupt history; xterm only scrolls into
+		// scrollback from the top of the screen.
 		if s.scrollCapture != nil && y1 == 0 {
-			captured := make([]spanLine, captureCount)
-			capturedW := make([]bool, captureCount)
-			for i := 0; i < captureCount; i++ {
-				captured[i] = s.lines[y1+i]
-				if y1+i < len(s.wrapped) {
-					capturedW[i] = s.wrapped[y1+i]
-				}
-			}
-			s.scrollCapture(captured, capturedW)
+			s.scrollCapture(saved, savedW)
 		}
 
 		for y := y1; y <= y2+dy; y++ {
@@ -628,12 +669,35 @@ func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
 				s.wrapped[y] = s.wrapped[y-dy]
 			}
 		}
-		for y := y2 + dy + 1; y <= y2; y++ {
-			s.lines[y] = blankSpanLine(s.size.X, s.style)
+	} else {
+		for y := y2; y >= y1+dy; y-- {
+			s.lines[y] = s.lines[y-dy]
 			if y < len(s.wrapped) {
-				s.wrapped[y] = false
+				s.wrapped[y] = s.wrapped[y-dy]
 			}
 		}
+	}
+
+	// Fill the vacated rows: bottom rows when scrolling up, top rows when
+	// scrolling down.
+	fillStart := y1
+	if dy < 0 {
+		fillStart = y2 + dy + 1
+	}
+	for i := 0; i < n; i++ {
+		y := fillStart + i
+		resetSpanLine(&saved[i], s.size.X, s.style)
+		s.lines[y] = saved[i]
+		if y < len(s.wrapped) {
+			s.wrapped[y] = false
+		}
+	}
+
+	if dy > 0 {
+		s.frontend.RegionChanged(s.view, Region{Y: y1 + dy, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
+		debugPrintln(debugScroll, "scroll changed region:", Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X})
+		s.frontend.RegionChanged(s.view, Region{Y: y1, Y2: y1 + dy, X: 0, X2: s.size.X}, CRScroll)
+	} else {
 		s.frontend.RegionChanged(s.view, Region{Y: y1, Y2: y2 + dy + 1, X: 0, X2: s.size.X}, CRScroll)
 		s.frontend.RegionChanged(s.view, Region{Y: y2 + dy + 1, Y2: y2 + 1, X: 0, X2: s.size.X}, CRScroll)
 	}
@@ -823,6 +887,18 @@ func (s *spanScreen) printScreen() {
 
 func blankSpanLine(width int, style Style) spanLine {
 	return spanLine{spans: []Span{{Style: style, Width: width}}, width: width}
+}
+
+// resetSpanLine turns line into a blank line of width cells, reusing its span
+// backing array when possible so scrolling does not allocate per row.
+func resetSpanLine(line *spanLine, width int, style Style) {
+	if cap(line.spans) >= 1 {
+		line.spans = line.spans[:1]
+		line.spans[0] = Span{Style: style, Width: width}
+		line.width = width
+		return
+	}
+	*line = blankSpanLine(width, style)
 }
 
 func resizeLine(line *spanLine, width int, style Style, mode TextReadMode) {
