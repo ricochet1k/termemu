@@ -93,6 +93,16 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			// The batched frontend writes one frame when the feed reaches its
+			// batch boundary. A pipe Write returns once the outer read loop has
+			// taken the bytes, not once it has parsed them, so close the writer
+			// and wait for the outer loop to drain before comparing.
+			_ = w.Close()
+			<-outer.Done()
+			if err := outer.Err(); err != nil {
+				t.Fatal(err)
+			}
+
 			innerLines := inner.StyledLines(screenRegion)
 			outerLines := outer.StyledLines(screenRegion)
 
@@ -110,5 +120,60 @@ func TestTTYFrontendNestedTerminalSpacing(t *testing.T) {
 				t.Fatalf("line %d differs between raw and TTYFrontend: %v", i, diff)
 			}
 		})
+	}
+}
+
+// TestTTYFrontendBatchesDamage checks the batch contract: callbacks only
+// accumulate, PrepareBatch/WriteBatch emit one frame, and an unchanged row is
+// not re-emitted.
+func TestTTYFrontendBatchesDamage(t *testing.T) {
+	var out bytes.Buffer
+	f := NewTTYFrontend(&out)
+	term := newTerminal(f, NewNoPTYBackend(bytes.NewReader(nil), io.Discard), TextReadModeGrapheme)
+	f.SetTerminal(term)
+	if err := term.Resize(10, 3); err != nil {
+		t.Fatal(err)
+	}
+	f.Attach(Region{X: 0, Y: 0, X2: 10, Y2: 3})
+	if out.Len() == 0 {
+		t.Fatal("Attach did not paint")
+	}
+
+	before := out.Len()
+	term.View(func(v LockedView) {
+		f.RegionChanged(v, Region{X: 0, Y: 0, X2: 10, Y2: 1}, CRText)
+	})
+	if out.Len() != before {
+		t.Fatalf("RegionChanged wrote %d bytes before the batch flush", out.Len()-before)
+	}
+
+	// The attach frame already painted row 0, so this flush is a no-op.
+	term.flushFrontend()
+	if out.Len() != before {
+		t.Fatalf("flush repainted an unchanged row: %d bytes", out.Len()-before)
+	}
+
+	// A cursor move is batched too, and written by the flush.
+	term.View(func(v LockedView) { f.CursorMoved(v, 2, 1) })
+	if out.Len() != before {
+		t.Fatalf("CursorMoved wrote %d bytes before the batch flush", out.Len()-before)
+	}
+	term.flushFrontend()
+	if out.Len() == before {
+		t.Fatal("flush did not write the pending cursor move")
+	}
+	if !bytes.Contains(out.Bytes()[before:], []byte("\x1b[2;3H")) {
+		t.Fatalf("cursor update missing from %q", out.Bytes()[before:])
+	}
+
+	// A changed row is painted at the next flush.
+	mark := out.Len()
+	term.View(func(v LockedView) {
+		term.screen().setCursorPos(0, 0)
+		term.screen().writeString("hi", 2, false, TextReadModeGrapheme)
+	})
+	term.flushFrontend()
+	if !bytes.Contains(out.Bytes()[mark:], []byte("hi")) {
+		t.Fatalf("changed row not painted: %q", out.Bytes()[mark:])
 	}
 }

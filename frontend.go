@@ -23,8 +23,8 @@ const (
 	VFAltScreenAllowed
 	// VFSynchronizedOutput tracks DECSET/DECRST 2026 (synchronized output).
 	// While set, the application is emitting a batch of updates and
-	// frontends may defer repaints until it is cleared. The core performs
-	// no batching itself; it only exposes the flag.
+	// frontends may defer repaints until it is cleared. Damage batching
+	// itself is opt-in through BatchFrontend.
 	VFSynchronizedOutput
 	viewFlagCount
 )
@@ -140,6 +140,27 @@ type Frontend interface {
 	ViewFlagChanged(v LockedView, vs ViewFlag, value bool)
 	ViewIntChanged(v LockedView, vs ViewInt, value int)
 	ViewStringChanged(v LockedView, vs ViewString, value string)
+}
+
+// BatchFrontend is an optional Frontend extension for damage-batched
+// rendering. A frontend that implements it still receives every callback per
+// change, but may accumulate the damage and render only when the terminal
+// calls the batch methods.
+//
+// PrepareBatch is called with the terminal lock held and receives a
+// LockedView. It must render everything accumulated since the previous frame
+// into frontend-owned memory and must not perform I/O. WriteBatch is called
+// after the terminal lock is released and writes that memory; calls are
+// serialized by the frontend and frame order is preserved.
+//
+// The terminal calls the pair at these boundaries: when the read loop is about
+// to block waiting for more input (so a lone write is still painted
+// immediately), before the loop parks for Pause, after out-of-band screen
+// updates such as Resize and Restore, and whenever the loop otherwise stops.
+// After either method returns, no damage may be left unrendered.
+type BatchFrontend interface {
+	PrepareBatch(v LockedView)
+	WriteBatch()
 }
 
 // ClipboardSink is an optional Frontend extension for the OSC 52 clipboard

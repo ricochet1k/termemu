@@ -22,6 +22,12 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // TestTTYFrontendAttachConcurrent churns Attach/Detach while terminal output
 // flows through the read loop. Attach used to hold the frontend mutex while
 // taking the terminal lock — the opposite order of RegionChanged (terminal

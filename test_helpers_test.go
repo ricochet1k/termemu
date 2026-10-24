@@ -153,9 +153,13 @@ func (t *terminal) testFeedTerminalInputFromBackend(data []byte, mode TextReadMo
 	st := &readLoopState{gr: NewGraphemeReaderWithMode(r, mode)}
 	for r.Len() > 0 || st.gr.Buffered() > 0 || len(st.pendingCmd) > 0 {
 		if err := t.ptyReadOne(st); err != nil {
+			t.flushFrontend()
 			return err
 		}
 	}
+	// The production read loop flushes when it is about to block; this
+	// synchronous helper reaches the same boundary when the input is gone.
+	t.flushFrontend()
 	return nil
 }
 

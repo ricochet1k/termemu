@@ -61,6 +61,8 @@ func (t *terminal) ptyReadLoop(initial ReaderState) error {
 
 	for {
 		if t.shouldPause() {
+			// Never leave a prepared frame pending while parking.
+			t.flushFrontend()
 			if !t.pauseLoop(state.snapshot()) {
 				return nil
 			}
@@ -86,7 +88,14 @@ func (t *terminal) ptyReadLoop(initial ReaderState) error {
 				t.clearReadDeadline()
 				continue
 			}
+			t.flushFrontend()
 			return err
+		}
+		// About to block on the backend: this is the batch boundary for
+		// frontends that coalesce damage. When more input is already
+		// buffered, keep accumulating and paint once for the whole burst.
+		if state.gr.Buffered() == 0 {
+			t.flushFrontend()
 		}
 	}
 }

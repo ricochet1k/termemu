@@ -271,3 +271,44 @@ func TestIntegration_AttachSetsColorterm(t *testing.T) {
 		})
 	}
 }
+
+// TestIntegration_TTYFrontendBatched drives a real PTY through a batching
+// TTYFrontend. The read loop prepares frames under the terminal lock and the
+// frontend writes them from the same goroutine after unlocking; the -race
+// build checks that writeMu and t.mu keep that safe against Attach/Detach.
+func TestIntegration_TTYFrontendBatched(t *testing.T) {
+	backend := &PTYBackend{}
+	var out lockedBuffer
+	f := NewTTYFrontend(&out)
+	tt := NewWithMode(f, backend, TextReadModeRune)
+	if tt == nil {
+		t.Fatal("NewWithMode returned nil terminal")
+	}
+	if err := tt.Resize(40, 4); err != nil {
+		t.Fatalf("resize failed: %v", err)
+	}
+	f.Attach(Region{X: 0, Y: 0, X2: 40, Y2: 4})
+
+	cmd := exec.Command("sh", "-c", "printf hello_batched")
+	if err := backend.Attach(cmd); err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer func() { _ = cmd.Wait() }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), "hello_batched") {
+		if time.Now().After(deadline) {
+			t.Fatalf("batched frontend output never contained the text: %q", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	f.Detach()
+	if err := tt.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+	waitDone(t, tt, 5*time.Second)
+}

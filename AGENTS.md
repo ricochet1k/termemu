@@ -629,7 +629,14 @@ Frontends receive callbacks:
 - `StyleChanged(Style)`: Current style changed
 - `ViewFlagChanged/ViewIntChanged/ViewStringChanged`: Terminal mode changed
   (includes `VFSynchronizedOutput` for `DECSET/DECRST 2026`; frontends may
-  batch repaints while set — the core does no batching)
+  defer repaints while set)
+- Optional `BatchFrontend.PrepareBatch(v)` / `WriteBatch()`: damage-batched
+  rendering. Callbacks still fire per change; `PrepareBatch` renders the
+  accumulated damage under the terminal lock and `WriteBatch` writes it after
+  the lock is released. The read loop calls the pair when it is about to
+  block for more input (or stops/parks), and `Resize`/`Restore` call it after
+  their out-of-band updates. Non-batching frontends keep the per-change
+  contract.
 - `ScrollLines(delta)`: signed main-screen scroll delta (negative = content
   moved up / rows left the top, positive = content moved down). Emitted for
   every scroll, including mid-screen regions; alt-screen scrolls do not emit
@@ -657,7 +664,14 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
 `NewTTYFrontend(out)` needs no terminal argument: `NewWithMode` detects the
 `SetTerminal` interface and wires the terminal automatically. Callers use
 `Attach(Region)` before rendering and `Detach()` when done (see
-`examples/tty`).
+`examples/tty`). `TTYFrontend` implements `BatchFrontend`: `RegionChanged`
+unions damage, `PrepareBatch` renders one frame under the terminal lock and
+skips rows whose emitted bytes match a per-row shadow, and `WriteBatch` does
+the actual `Write` without the terminal lock. Scroll damage (`CRScroll`)
+invalidates the affected rows' shadows instead of comparing them, since a
+scrolled row almost always differs. Keep `t.mu` (frontend state) and `writeMu`
+(output writes) out of any path that takes the terminal lock: `writeMu` is a
+leaf lock, and callbacks take `t.mu` while the terminal lock is already held.
 
 ## Testing Patterns
 
