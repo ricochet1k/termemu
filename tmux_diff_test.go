@@ -193,6 +193,9 @@ func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height
 	if err := term.Resize(width, height); err != nil {
 		t.Fatalf("Resize: %v", err)
 	}
+	// The terminal starts at its default size, so the resize above pushes
+	// blank rows into scrollback; that is a setup artifact, not output.
+	term.Scrollback().Clear()
 	if err := term.testFeedTerminalInputFromBackend([]byte(wire), TextReadModeGrapheme); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("feed: %v", err)
 	}
@@ -265,6 +268,10 @@ func startTmuxDiffServer(t *testing.T, tmuxPath string) string {
 		"new-session", "-d", "-s", "keepalive", "-x", "80", "-y", "24",
 		"sh -c "+shellQuote("exec sleep 3600"))
 	tmuxCommand(t, tmuxPath, sock, "set-option", "-g", "status", "off")
+	// tmux's default scroll-on-clear pushes erased screen contents into
+	// history; xterm (and termemu) discard them, so turn the option off to
+	// compare scrollback after CSI 2 J.
+	tmuxCommand(t, tmuxPath, sock, "set-option", "-g", "scroll-on-clear", "off")
 	tmuxCommand(t, tmuxPath, sock, "set-option", "-g", "window-size", "manual")
 	t.Cleanup(func() {
 		cmd := exec.Command(tmuxPath, "-L", sock, "kill-server")
@@ -283,6 +290,13 @@ type tmuxRenderResult struct {
 }
 
 func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height int, raw bool) tmuxRenderResult {
+	t.Helper()
+	return tmuxRenderPane(t, tmuxPath, sock, data, width, height, raw, 0)
+}
+
+// tmuxRenderPane is tmuxRender with an optional history capture: historyRows >
+// 0 also captures that many rows of scrollback above the visible screen.
+func tmuxRenderPane(t *testing.T, tmuxPath, sock string, data []byte, width, height int, raw bool, historyRows int) tmuxRenderResult {
 	t.Helper()
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "input")
@@ -321,10 +335,14 @@ func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height 
 	// Wait for tmux to settle on the final frame; capture-pane can race the
 	// pty bytes that `cat` just wrote.
 	time.Sleep(50 * time.Millisecond)
-	prev := tmuxCommand(t, tmuxPath, sock, "capture-pane", "-p", "-e", "-t", session)
+	captureArgs := []string{"capture-pane", "-p", "-e", "-t", session}
+	if historyRows > 0 {
+		captureArgs = []string{"capture-pane", "-p", "-e", "-S", strconv.Itoa(-historyRows), "-t", session}
+	}
+	prev := tmuxCommand(t, tmuxPath, sock, captureArgs...)
 	for i := 0; i < 100; i++ {
 		time.Sleep(10 * time.Millisecond)
-		cur := tmuxCommand(t, tmuxPath, sock, "capture-pane", "-p", "-e", "-t", session)
+		cur := tmuxCommand(t, tmuxPath, sock, captureArgs...)
 		if cur == prev {
 			break
 		}
@@ -343,6 +361,139 @@ func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height 
 		cursorVisible: visible != 0,
 		altActive:     alt != 0,
 	}
+}
+
+// tmuxScrollbackSequences exercise the scrollback path: enough output to push
+// rows off the top of a short screen, with wrapping, wide characters, tabs,
+// erases, and blank lines mixed in.
+var tmuxScrollbackSequences = []struct {
+	name   string
+	seq    string
+	width  int
+	height int
+}{
+	{"history_plain", numberedLines(1, 40), 40, 6},
+	{"history_exact_fit", numberedLines(1, 6), 40, 6},
+	{"history_one_over", numberedLines(1, 7), 40, 6},
+	{"history_blank_lines", "one\n\n\n\nfour\nfive\nsix\nseven\neight", 40, 6},
+	{"history_wrapped", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ\nshort\n" + numberedLines(1, 12), 20, 5},
+	{"history_wide", "界界界界界界界界界界\n" + numberedLines(1, 8) + "界界世\n", 10, 4},
+	// Tabs are skipped: capture-pane reports the tab character itself rather
+	// than the expanded columns, which the screen comparison cannot model.
+	{"history_erase_screen", numberedLines(1, 9) + "\x1b[2Jafter\n" + numberedLines(20, 24), 40, 6},
+	{"history_erase_line", numberedLines(1, 8) + "\x1b[2Kcleared\n", 30, 5},
+	// Mid-screen scroll regions are skipped: tmux's capture-pane interleaves
+	// region scrolls into history in a way that does not match its own visible
+	// screen. termemu recycles region rows in place, like xterm.
+	{"history_alt_roundtrip", numberedLines(1, 10) + "\x1b[?1049h" + numberedLines(50, 60) + "\x1b[?1049l" + numberedLines(11, 12), 40, 5},
+	{"history_long_128", numberedLines(1, 128), 80, 24},
+}
+
+// numberedLines returns n CRLF-terminated lines labelled from start.
+func numberedLines(start, n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "line%05d\n", start+i)
+	}
+	return b.String()
+}
+
+// TestDifferentialTmuxScrollback compares the scrollback history (not just the
+// visible screen) against tmux. Like the other differential tests it is opt-in:
+//
+//	TERMEMU_TMUX_DIFF=1 go test -run '^TestDifferentialTmuxScrollback$' -v .
+func TestDifferentialTmuxScrollback(t *testing.T) {
+	if os.Getenv("TERMEMU_TMUX_DIFF") == "" {
+		t.Skip("set TERMEMU_TMUX_DIFF=1 to run the tmux differential test")
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not installed")
+	}
+	sock := startTmuxDiffServer(t, tmuxPath)
+
+	for _, tc := range tmuxScrollbackSequences {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			runScrollbackDifferentialCase(t, tmuxPath, sock, tc.seq, tc.width, tc.height)
+		})
+	}
+}
+
+func runScrollbackDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height int) {
+	t.Helper()
+	t.Logf("sequence: width=%d height=%d %q", width, height, seq)
+
+	const historyRows = 500
+	want := tmuxRenderPane(t, tmuxPath, sock, []byte(seq), width, height, false, historyRows)
+	wantRows := splitCaptureRows(want.screen)
+
+	// The pane tty translates LF to CRLF before tmux sees it; feed termemu the
+	// same wire bytes.
+	wire := strings.ReplaceAll(seq, "\n", "\r\n")
+	term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeGrapheme)
+	if err := term.Resize(width, height); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	// The terminal starts at its default size, so the resize above pushes
+	// blank rows into scrollback; that is a setup artifact, not output.
+	term.Scrollback().Clear()
+	if err := term.testFeedTerminalInputFromBackend([]byte(wire), TextReadModeGrapheme); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("feed: %v", err)
+	}
+
+	var gotRows []string
+	sb := term.Scrollback()
+	base, next := sb.Range()
+	for id := base; id < next; id++ {
+		row, ok := sb.Row(id)
+		if !ok {
+			t.Fatalf("scrollback row %d missing", id)
+		}
+		gotRows = append(gotRows, row.PlainTextString())
+	}
+	for y := 0; y < height; y++ {
+		gotRows = append(gotRows, term.Line(y))
+	}
+	for i := range gotRows {
+		gotRows[i] = strings.TrimRight(gotRows[i], " ")
+	}
+
+	wantRows = trimScrollbackRows(wantRows)
+	gotRows = trimScrollbackRows(gotRows)
+
+	if len(gotRows) != len(wantRows) {
+		t.Fatalf("row count: termemu %d (history+screen), tmux %d\ntermemu: %q\ntmux:    %q",
+			len(gotRows), len(wantRows), gotRows, wantRows)
+	}
+	for i := range wantRows {
+		if gotRows[i] != wantRows[i] {
+			t.Fatalf("row %d differs\ntermemu: %q\ntmux:    %q", i, gotRows[i], wantRows[i])
+		}
+	}
+}
+
+// splitCaptureRows splits a capture-pane result into rows with trailing blanks
+// removed.
+func splitCaptureRows(capture string) []string {
+	rows := strings.Split(capture, "\n")
+	for i := range rows {
+		rows[i] = strings.TrimRight(rows[i], " ")
+	}
+	return rows
+}
+
+// trimScrollbackRows drops trailing blank rows and the leading blank rows that
+// tmux and termemu disagree about (the pane starts with a cleared screen, and
+// capture-pane reports fewer leading history rows than were actually cleared).
+func trimScrollbackRows(rows []string) []string {
+	for len(rows) > 0 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+	for len(rows) > 0 && rows[0] == "" {
+		rows = rows[1:]
+	}
+	return rows
 }
 
 func tmuxCommand(t *testing.T, tmuxPath, sock string, args ...string) string {

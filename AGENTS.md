@@ -658,7 +658,12 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
 - Corpus seeds under `testdata/fuzz/<Target>/` are regression tests; keep them
   when a fuzz failure is fixed.
 - `tmux_diff_test.go` is an opt-in differential test (`TERMEMU_TMUX_DIFF=1`,
-  or `scripts/run_tmux_diff.sh`). It starts a private tmux server, compares
+  or `scripts/run_tmux_diff.sh`). Its normal corpus feeds termemu the same
+  bytes tmux sees (the pane tty's ONLCR turns LF into CRLF); a raw corpus runs
+  the pane with `stty -opost` to compare bare LF/VT/FF semantics, and
+  `TestDifferentialTmuxScrollback` compares history rows (captured with
+  `-S -N`) against the scrollback ring plus the visible screen, with tmux's
+  `scroll-on-clear` option disabled. It starts a private tmux server, compares
   the captured screen and cursor against termemu, and normalizes termemu's
   output through the same tmux. `TestDifferentialTmux` checks curated
   sequences including styles; `TestDifferentialTmuxRandom` runs seeded random
