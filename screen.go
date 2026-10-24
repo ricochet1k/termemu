@@ -1171,13 +1171,11 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		return
 	}
 
-	// The line width is the sum of all span widths. Never derive it from the
-	// boundary scan below: the scan stops at the end of the replacement window,
-	// not at the end of the line.
-	totalWidth := 0
-	for _, sp := range spans {
-		totalWidth += sp.Width
-	}
+	// spanLine.width is kept in sync with the sum of span widths (the screen
+	// invariants assert it), so trust it instead of re-summing every call.
+	// Never derive it from the boundary locator below: that scan stops at the
+	// end of the replacement window, not at the end of the line.
+	totalWidth := lineCellWidth(line)
 
 	// Clamp negative inputs.
 	if x < 0 {
