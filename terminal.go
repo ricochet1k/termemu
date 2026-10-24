@@ -775,6 +775,11 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 	mouseEncoding := t.viewInts[VIMouseEncoding]
 	t.Unlock()
 
+	// Only the documented flag bits carry meaning. Mask stray bits so the
+	// encoded button byte always fits the protocol (X10 has a single byte per
+	// parameter, so bit 7 must not leak into it).
+	mods &= MShift | MMeta | MControl | MMotion | MWheel
+
 	switch mouseMode {
 	case MMNone:
 		return nil
@@ -787,7 +792,10 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 			return nil
 		}
 	case MMPressReleaseMove:
-		if byte(mods)&mWhichBtn == byte(MRelease) {
+		// 1002 reports motion only while a button is held. A motion event
+		// with no button (X's button 3) belongs to 1003 (all-motion), so drop
+		// it here.
+		if mods&MMotion != 0 && btn&MRelease == MRelease {
 			return nil
 		}
 	case MMPressReleaseMoveAll:
@@ -807,7 +815,9 @@ func (t *terminal) SendMouseRaw(btn MouseBtn, press bool, mods MouseFlag, x, y i
 			y = 255 - 32
 		}
 
-		mouseCmd := []byte("\033[M" + string(32+btnByte) + string(byte(32+x)) + string(byte(32+y)))
+		// X10 is a byte protocol: the parameters are raw bytes, not UTF-8
+		// runes (encoding them as runes splits values above 0x7F).
+		mouseCmd := []byte{ESC, '[', 'M', 32 + btnByte, byte(32 + x), byte(32 + y)}
 		_, err := t.Write(mouseCmd)
 		return err
 

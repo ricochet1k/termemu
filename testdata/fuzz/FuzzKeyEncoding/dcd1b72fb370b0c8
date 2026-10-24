@@ -1,0 +1,9 @@
+go test fuzz v1
+byte('>')
+[]byte("0")
+[]byte("")
+[]byte("0")
+[]byte("\x9e\xa8\xfc0\xb0000\xa2\x92\xb9")
+byte('\x04')
+byte('I')
+byte('\\')

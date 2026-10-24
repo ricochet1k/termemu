@@ -1,0 +1,8 @@
+go test fuzz v1
+byte('B')
+byte('\x01')
+byte('\x01')
+byte('¥')
+bool(true)
+uint16(300)
+uint16(617)

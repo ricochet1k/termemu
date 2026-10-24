@@ -1786,7 +1786,15 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 	// run) can cover many cells, and appending the mark to the whole span
 	// would attach it to the wrong cell. A split inside a wide cluster
 	// cannot isolate one cell; keep the whole wide span as the target.
+	//
+	// The target's first cell is the target cell itself, except when the
+	// target is a wide cluster that contains it: the mark then belongs to a
+	// cluster starting offset cells earlier.
 	left, target, right := isolateCell(line.spans[idx], offset, s.textMode)
+	targetStart := cell
+	if offset > 0 && target.Width > 1 {
+		targetStart = cell - offset
+	}
 	if left.Width > 0 || right.Width > 0 {
 		origIdx := idx
 		newSpans := make([]Span, 0, len(line.spans)+2)
@@ -1841,7 +1849,10 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 		// Width doesn't change for an ordinary merge.
 	}
 
-	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: cell, X2: cell + 1}, CRText)
+	// Repaint the whole merged span: for a wide cluster the mark changed a
+	// cell range that starts before the cursor.
+	end := targetStart + line.spans[idx].Width
+	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: targetStart, X2: end}, CRText)
 }
 
 // emojiPresentationAdding reports whether text contains a code point that can

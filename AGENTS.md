@@ -305,7 +305,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   snapshots). `Terminal.Snapshot` / `*Scrollback.Snapshot` lock and must not be
   called from a Frontend callback or `View`. There is no view Restore
   variant; the view is read-only.
-- Handles keyboard input via `SendKey()`
+- Handles keyboard input via `SendKey()` and mouse reports via
+  `SendMouseRaw()`. Mouse flags are masked to the documented bits before
+  encoding: X10 writes raw parameter bytes (UTF-8-encoding them would corrupt
+  values above 0x7F), 1005 encodes all three parameters as codepoints, and
+  1002 drops motion events that carry no button (those belong to 1003).
 - Lifecycle: `Close()` closes the backend so the read loop exits (idempotent,
   never blocks and never takes the terminal lock); `Done()` closes on loop
   exit; `Err()` reports the loop error (nil for clean EOF) without taking the
@@ -332,6 +336,9 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   truncation is padded back), clamps the cursor/saved cursor and scroll margins
   into the new bounds. `scroll` clamps `|dy|` to the region height and ignores
   invalid margins (`top > bottom`).
+- `mergeIntoPreviousCell` reports the whole merged span in its
+  `RegionChanged` (a mark merged into a wide cluster changes two cells), so
+  frontends repaint the cluster instead of just the cursor cell.
 - DECSC/DECRC save/restore cursor, pending wrap, the complete `Style`
   (`ScreenState.SavedStyle`), the character set state
   (`ScreenState.SavedCharsets`), and origin mode (`ScreenState.SavedOriginMode`). `CSI r` (DECSTBM) homes the cursor; `CSI 2 J`
@@ -660,6 +667,13 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
   random append/evict/clear/snapshot operations.
 - `keys_coverage_test.go` enforces that every `KeyCode` encodes in legacy and
   Kitty modes, and property-checks the functional-code and keypad tables.
+- `fuzz_input_modes_test.go` adds `FuzzKeyEncoding` (arbitrary KeyEvent × Kitty
+  flags), `FuzzMouseEncoding` (every encoding and mouse mode, decoding the
+  report back), `FuzzEscapeCommandResume` (byte-at-a-time partial-command
+  replay must match a whole-buffer parse), and `FuzzTTYFrontendRoundTrip`
+  (render through `TTYFrontend`, re-parse, compare cells; OSC 8 links are
+  ignored because the renderer does not re-emit them).`TestKeyEncodingProperties`
+  and `TestMouseEncodingProperties` keep the same checks in the normal suite.
 
 ## Common Development Tasks
 
