@@ -18,7 +18,11 @@ import (
 
 // tmuxDiffSequences are validated terminal sequences for differential testing
 // against tmux. They deliberately avoid OSC 8 hyperlinks (capture-pane support
-// and encoding differ between tmux versions) and image protocols.
+// and encoding differ between tmux versions) and image protocols. They also
+// avoid DEC character sets (ESC ( 0, SO/SI): tmux does not translate them in
+// its grid, it keeps the designation/shift bytes as cells and leaves the
+// mapping to the outer terminal, so capture-pane never shows the rendered
+// glyphs. Charsets are unit-tested against xterm's dec2ucs table instead.
 var tmuxDiffSequences = []struct {
 	name string
 	seq  string

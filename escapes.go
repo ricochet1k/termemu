@@ -212,6 +212,16 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 			t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
 		})
 
+	case 14: // SO ^N Shift Out: invoke G1 as GL
+		t.withLock(func() {
+			t.screen().invokeCharset(1)
+		})
+
+	case 15: // SI ^O Shift In: invoke G0 as GL
+		t.withLock(func() {
+			t.screen().invokeCharset(0)
+		})
+
 	case 27: // ESC ^[ Escape Character
 		// Read the whole command before taking the lock: handleCommand
 		// parses from memory, so a child that stops mid-sequence cannot
@@ -451,6 +461,15 @@ func (t *terminal) handleCommand(r escapeReader) bool {
 	case '*': // G2
 		fallthrough
 	case '+': // G3
+		slot := 0
+		switch b {
+		case ')':
+			slot = 1
+		case '*':
+			slot = 2
+		case '+':
+			slot = 3
+		}
 		C, err := r.ReadByte()
 		if err != nil {
 			if err != io.EOF {
@@ -458,8 +477,13 @@ func (t *terminal) handleCommand(r escapeReader) bool {
 			}
 			return false
 		}
-		_ = C
-		return true
+		t.screen().designateCharset(slot, charsetFromDesignationByte(C))
+
+	case 'n': // LS2: invoke G2 as GL
+		t.screen().invokeCharset(2)
+
+	case 'o': // LS3: invoke G3 as GL
+		t.screen().invokeCharset(3)
 
 	case '=': // Application Keypad
 		t.setViewFlag(VFAppKeypad, true)
@@ -547,13 +571,14 @@ func (t *terminal) privateModeState(mode int) int {
 }
 
 // handleDECSTR implements DECSTR (CSI ! p): soft terminal reset. It restores
-// default style, full scroll margins, auto-wrap, and cursor visibility without
-// touching screen contents.
+// default style, full scroll margins, auto-wrap, character sets, and cursor
+// visibility without touching screen contents.
 func (t *terminal) handleDECSTR() {
 	for _, s := range []screen{t.mainScreen, t.altScreen} {
 		s.setStyle(NewStyle())
 		s.setScrollMarginTopBottom(0, s.Size().Y-1)
 		s.SetAutoWrap(true)
+		s.resetCharsets()
 	}
 	t.setViewFlag(VFShowCursor, true)
 }

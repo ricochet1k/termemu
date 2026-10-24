@@ -107,10 +107,14 @@ type ScreenState struct {
 	SavedCursor      Pos
 	SavedPendingWrap bool // pending-wrap state saved by DECSC
 	SavedStyle       Style
-	Style            Style
-	TopMargin        int
-	BottomMargin     int
-	AutoWrap         bool
+	// SavedCharsets is the G0-G3/GL state saved by DECSC; Charsets is the
+	// current character set state.
+	SavedCharsets charsetState
+	Charsets      charsetState
+	Style         Style
+	TopMargin     int
+	BottomMargin  int
+	AutoWrap      bool
 }
 
 // Snapshot is a deep copy of terminal state. It excludes the scrollback
@@ -1007,6 +1011,7 @@ func (t *terminal) resetTerminal() {
 		s.setStyle(NewStyle())
 		s.setScrollMarginTopBottom(0, size.Y-1)
 		s.SetAutoWrap(true)
+		s.resetCharsets()
 		s.eraseRegion(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRClear)
 		s.setCursorPos(0, 0)
 	}

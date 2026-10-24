@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\x1b(0lqqqk\x1b)0\x0ex\x0f\x1b*m\x1bnz\x1b7\x1b(B\x1b8")

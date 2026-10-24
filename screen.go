@@ -42,6 +42,12 @@ type screen interface {
 	shiftCursorUp(n int)
 	saveCursorPos()
 	restoreCursorPos()
+	// designateCharset designates cs into slot (G0-G3).
+	designateCharset(slot int, cs charset)
+	// invokeCharset selects slot (G0-G3) as the GL set (SO/SI, LS2/LS3).
+	invokeCharset(slot int)
+	// resetCharsets restores the default ASCII designations with G0 invoked.
+	resetCharsets()
 	// copyTransientState copies the shared cursor/style state across a screen
 	// switch without emitting callbacks.
 	copyTransientState(from screen)
@@ -87,6 +93,12 @@ type spanScreen struct {
 	savedCursorPos   Pos
 	savedPendingWrap bool
 	savedStyle       Style
+
+	// charsets holds the G0-G3 designations and the invoked GL slot. It is
+	// shared across the main/alt switch (copyTransientState) and saved by
+	// DECSC.
+	charsets      charsetState
+	savedCharsets charsetState
 
 	topMargin, bottomMargin int
 
@@ -416,6 +428,12 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 	if merge {
 		s.mergeIntoPreviousCell(text)
 		return
+	}
+	// DEC Special Graphics replaces the printable stream characters, so the
+	// mapping happens before the run is measured against the screen width.
+	// Mapped runes are one cell wide, so width stays valid.
+	if s.charsets.gl() == charsetDECGraphics {
+		text = mapDECGraphics(text)
 	}
 	if width < 1 {
 		width = 1
@@ -764,6 +782,19 @@ func (s *spanScreen) saveCursorPos() {
 	s.savedCursorPos = s.cursorPos
 	s.savedPendingWrap = s.pendingWrap
 	s.savedStyle = s.style
+	s.savedCharsets = s.charsets
+}
+
+func (s *spanScreen) designateCharset(slot int, cs charset) {
+	s.charsets.designate(slot, cs)
+}
+
+func (s *spanScreen) invokeCharset(slot int) {
+	s.charsets.invoke(slot)
+}
+
+func (s *spanScreen) resetCharsets() {
+	s.charsets.reset()
 }
 
 func (s *spanScreen) copyTransientState(from screen) {
@@ -771,6 +802,7 @@ func (s *spanScreen) copyTransientState(from screen) {
 		s.cursorPos = other.cursorPos
 		s.pendingWrap = other.pendingWrap
 		s.style = other.style
+		s.charsets = other.charsets
 		return
 	}
 	s.cursorPos = from.CursorPos()
@@ -781,6 +813,7 @@ func (s *spanScreen) restoreCursorPos() {
 	s.cursorPos = s.savedCursorPos
 	s.pendingWrap = s.savedPendingWrap
 	s.style = s.savedStyle
+	s.charsets = s.savedCharsets
 	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
 	s.frontend.StyleChanged(s.view, s.style)
 }
@@ -817,6 +850,8 @@ func (s *spanScreen) snapshotState() ScreenState {
 		SavedCursor:      s.savedCursorPos,
 		SavedPendingWrap: s.savedPendingWrap,
 		SavedStyle:       s.savedStyle,
+		SavedCharsets:    s.savedCharsets,
+		Charsets:         s.charsets,
 		Style:            s.style,
 		TopMargin:        s.topMargin,
 		BottomMargin:     s.bottomMargin,
@@ -856,6 +891,8 @@ func (s *spanScreen) restoreState(st ScreenState) {
 	s.savedCursorPos = clampPos(st.SavedCursor, w, h)
 	s.savedPendingWrap = st.SavedPendingWrap
 	s.savedStyle = st.SavedStyle
+	s.savedCharsets = st.SavedCharsets
+	s.charsets = st.Charsets
 	s.style = st.Style
 	s.topMargin = clamp(st.TopMargin, 0, h-1)
 	s.bottomMargin = clamp(st.BottomMargin, s.topMargin, h-1)

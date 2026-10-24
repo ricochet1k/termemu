@@ -34,6 +34,7 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
   Resume/NewFromHandoff and reader state), `screen.go` (the only screen
   implementation), `scrollback.go` (scrollback ring buffer + reflow),
   `escapes.go` (ANSI parser), `grapheme_reader.go` (grapheme tokenizer),
+  `charset.go` (G0-G3 designations, GL selection, DEC Special Graphics),
   `style.go` (colors/modes), `keys.go` (input encoding), `tty_frontend.go`
   (ANSI renderer frontend).
 - `serialize_test.go` covers JSON/gob round-trips for the public value types.
@@ -42,7 +43,8 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
 All public value types (`Style`, `Span`, `Line`, `Region`, `Pos`, `Row`,
 `ScrollbackSnapshot`, `ScreenState`, `Snapshot`, `ReaderState`, `Handoff`)
 round-trip through
-`encoding/json` and `encoding/gob`. `Style` and `keyboardMode` implement
+`encoding/json` and `encoding/gob`. `Style`, `keyboardMode`, and `charsetState`
+implement
 custom `MarshalJSON`/`UnmarshalJSON` and `GobEncode`/`GobDecode` over exported
 shadow structs, so `Snapshot.KeyboardMain/KeyboardAlt` serialize even though
 their type is unexported. `Style` encodes its three packed uint32 components
@@ -324,8 +326,9 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   truncation is padded back), clamps the cursor/saved cursor and scroll margins
   into the new bounds. `scroll` clamps `|dy|` to the region height and ignores
   invalid margins (`top > bottom`).
-- DECSC/DECRC save/restore cursor, pending wrap, and the complete `Style`
-  (`ScreenState.SavedStyle`). `CSI r` (DECSTBM) homes the cursor; `CSI 2 J`
+- DECSC/DECRC save/restore cursor, pending wrap, the complete `Style`
+  (`ScreenState.SavedStyle`), and the character set state
+  (`ScreenState.SavedCharsets`). `CSI r` (DECSTBM) homes the cursor; `CSI 2 J`
   erases without moving it. IL/DL use the cursor-to-bottom-margin region when
   the cursor is inside the margins and cursor-to-screen-bottom when it is above
   or below them (xterm/tmux behavior). Vertical margin scrolling only applies
@@ -340,7 +343,7 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - `snapshotState()`/`restoreState()` implement the internal `screen` hooks used
   by `Terminal.Snapshot`/`Restore`: they deep-copy/rebuild `spanLine`s
   (including zero-width spans and links), the `wrapped` flags, cursor, pending
-  wrap, saved cursor, style, margins, and auto-wrap. `restoreState` emits no
+  wrap, saved cursor, style, character sets, margins, and auto-wrap. `restoreState` emits no
   callbacks; the terminal owns the repaint notifications.
 - `setScrollCapture` installs a callback invoked (with the terminal lock held)
   before rows scroll off the top, passing the lost rows and their wrapped flags
@@ -369,6 +372,20 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   writes (base64-decoded, forwarded to `ClipboardSink`; queries dropped)
 - `DECSET/DECRST 2026` sets/clears `VFSynchronizedOutput`
 - Parses keyboard protocol mode switches
+- Character sets (`charset.go`): ESC `(`/`)`/`*`/`+` designate G0-G3, `SO`/`SI`
+  (0x0E/0x0F) invoke G1/G0 as GL, and ESC `n`/`o` invoke G2/G3 (LS2/LS3).
+  Only ASCII and DEC Special Graphics (ESC `( 0`) are mapped; the national
+  replacement sets and unknown designations fall back to ASCII. The mapping
+  happens in `spanScreen.writeString` (via `mapDECGraphics`) before the run is
+  measured, and only when the invoked GL set is DEC graphics, so ordinary
+  ASCII output pays a single comparison. Mapped runes are one cell wide and
+  UTF-8 continuation bytes cannot fall in 0x5F-0x7E, so the run width stays
+  valid and multi-byte text passes through. DECSC/DECRC save the character
+  set state with the cursor; RIS and DECSTR reset it. The state is shared
+  across the main/alt switch (`copyTransientState`) like the other transient
+  fields, and tmux is not a usable reference for it (tmux keeps the
+  designation/shift bytes in its grid and leaves the mapping to the outer
+  terminal, so `capture-pane` shows the raw ASCII).
 
 **Style System** (style.go):
 - `Style` struct uses bit-packing: 3 uint32 fields (fg, bg, underlineColor)
