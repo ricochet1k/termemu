@@ -20,6 +20,11 @@ A small Go library for emulating a terminal and rendering output through a plugg
 - OSC 8 hyperlinks tracked per span (`Span.Link`)
 - OSC 52 clipboard write path via the optional `ClipboardSink` interface
 - OSC 6/7 working-directory announcements mapped to `VSCurrentDirectory`
+- 256-color palette and default fg/bg/cursor colors as terminal state
+  (`OSC 4`/`10`/`11`/`12`, resettable via `104`/`110`–`112`, queryable by the
+  child), resolved by frontends through `LockedView.PaletteColor` etc.
+- Shell integration: `OSC 133` prompt marks (`ShellIntegration`) and
+  `OSC 9`/`777` notifications (`NotificationSink`)
 - Screen snapshots (`Snapshot`/`Restore`) for saving and replaying terminal state
 
 ## Requirements
