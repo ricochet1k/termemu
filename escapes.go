@@ -141,142 +141,202 @@ func (s *readLoopState) snapshot() ReaderState {
 
 func (t *terminal) ptyReadOne(state *readLoopState) error {
 	gr := state.gr
-	maxWidth := 0
-	t.withLock(func() {
-		if t.screen().AutoWrap() {
-			maxWidth = t.screen().Size().X - t.screen().CursorPos().X
-			if maxWidth < 1 {
-				maxWidth = 1
+	for {
+		// Finish a command that was split at a buffer boundary before looking
+		// at new bytes. continueEscapeCommand blocks outside the lock and only
+		// takes it to dispatch the completed command.
+		if len(state.pendingCmd) > 0 {
+			return t.continueEscapeCommand(state)
+		}
+		// Bytes that are already read from the backend are applied under a
+		// single lock acquisition. processBuffered never reads from the
+		// backend, so this cannot hold the lock across a blocking read.
+		if gr.Buffered() > 0 {
+			progress, err := t.processBuffered(state)
+			if err != nil || progress || len(state.pendingCmd) > 0 {
+				return err
 			}
 		}
+		// Nothing usable is buffered (a read boundary or a trailing partial
+		// grapheme cluster): block for more input without holding the lock.
+		before := gr.Buffered()
+		err := gr.fill()
+		if err != nil && (gr.Buffered() == 0 || gr.Buffered() == before) {
+			if gr.Buffered() > 0 {
+				// The source ended with bytes still buffered; apply them
+				// before reporting the error.
+				p, perr := t.processBuffered(state)
+				if perr != nil {
+					return perr
+				}
+				if p || len(state.pendingCmd) > 0 {
+					// Report the drained work first; the next call sees the
+					// now-empty buffer and returns err.
+					return nil
+				}
+			}
+			if err != io.EOF {
+				debugPrintln(debugErrors, "ERR fill:", err)
+			}
+			return err
+		}
+		if gr.Buffered() == before {
+			return io.EOF
+		}
+	}
+}
+
+// processBuffered applies every complete command and printable run already
+// held in the reader's buffer under one terminal lock acquisition. It never
+// fills from the backend, so no lock is held across blocking I/O: a partial
+// escape command is stashed in state.pendingCmd (resumed by
+// continueEscapeCommand) and a partial grapheme cluster is left in the buffer
+// for the blocking path. progress reports whether any bytes were consumed.
+func (t *terminal) processBuffered(state *readLoopState) (progress bool, err error) {
+	gr := state.gr
+	t.withLock(func() {
+		for gr.Buffered() > 0 {
+			if isPrintableByte(gr.data[gr.start]) {
+				maxWidth := 0
+				if t.screen().AutoWrap() {
+					maxWidth = t.screen().Size().X - t.screen().CursorPos().X
+					if maxWidth < 1 {
+						maxWidth = 1
+					}
+				}
+				data, width, merge, meta, rerr := gr.readPrintableRunBuffered(maxWidth)
+				if rerr != nil {
+					err = rerr
+					return
+				}
+				if len(data) == 0 {
+					// Incomplete trailing cluster: let the blocking path
+					// read the rest outside the lock.
+					return
+				}
+				t.screen().writeStringMeta(data, width, merge, t.textReadMode, meta)
+				if *debugTxt {
+					debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", data, len(data))
+				}
+				progress = true
+				continue
+			}
+
+			start := gr.start
+			b, rerr := gr.ReadByte()
+			if rerr != nil {
+				err = rerr
+				return
+			}
+			if b == 27 { // ESC: scan the command from buffered bytes only
+				cmd, cerr := readEscapeCommand(state.cmdBuf[:0], bufferedEscapeReader{gr}, nil)
+				state.cmdBuf = cmd
+				if cerr != nil {
+					if len(cmd) == 0 {
+						// Only the ESC fit in the chunk. Rewind so the next
+						// pass (after blocking for more input outside the
+						// lock) reparses it from the buffer.
+						gr.start = start
+						gr.state = -1
+						gr.forceMergeNext = false
+						gr.lastWasRI = false
+					} else {
+						// Park the partial command without copying it: cmdBuf
+						// is reused as the destination when the command is
+						// resumed, so the bytes are complete.
+						state.pendingCmd = cmd
+						progress = true
+					}
+					if cerr != io.EOF {
+						debugPrintln(debugErrors, "ERR readEscapeCommand:", cerr)
+						err = cerr
+					}
+					return
+				}
+				t.dispatchEscapeCommandLocked(state, cmd)
+				// The escape sequence ends the run of graphic characters, so
+				// REP cannot repeat across it (xterm/tmux behavior).
+				t.screen().clearLastChar()
+				progress = true
+				continue
+			}
+			t.handleControlLocked(b)
+			progress = true
+		}
 	})
-	data, width, merge, meta, err := gr.readPrintableRun(maxWidth)
-	if err != nil {
-		if err != io.EOF {
-			debugPrintln(debugErrors, "ERR ReadPrintableBytes:", err)
-		}
-		return err
-	}
-	if len(data) > 0 {
-		t.withLock(func() {
-			t.screen().writeStringMeta(data, width, merge, t.textReadMode, meta)
-		})
-		if *debugTxt {
-			debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", data, len(data))
-		}
-		return nil
-	}
+	return progress, err
+}
 
-	b, err := gr.ReadByte()
-	if err != nil {
-		if err != io.EOF {
-			debugPrintln(debugErrors, "ERR ReadByte:", err)
-		}
-		return err
+// bufferedEscapeReader never reads from the source: it exposes only bytes that
+// are already buffered and reports io.EOF once they run out. readEscapeCommand
+// therefore returns the partial command instead of blocking for the rest.
+type bufferedEscapeReader struct {
+	r *GraphemeReader
+}
+
+func (b bufferedEscapeReader) ReadByte() (byte, error) {
+	if b.r.Buffered() == 0 {
+		return 0, io.EOF
 	}
+	return b.r.ReadByte()
+}
 
-	// ABCDEFGHIJKLMNOPQRSTUVWXYZ
+func (b bufferedEscapeReader) peekBuffered() []byte { return b.r.peekBuffered() }
 
+func (b bufferedEscapeReader) discardBuffered(n int) { b.r.discardBuffered(n) }
+
+// handleControlLocked applies a non-ESC control byte and clears REP state. The
+// caller must hold the terminal lock.
+func (t *terminal) handleControlLocked(b byte) {
 	switch b {
 	case 0: // NUL Null byte, ignore
 
 	case 5: // ENQ ^E Return Terminal Status
 		debugPrintln(debugTodo, "TODO: ENQ")
 	case 7: // BEL ^G Bell
-		t.withLock(func() {
-			t.frontend.Bell(LockedView{t: t})
-		})
+		t.frontend.Bell(LockedView{t: t})
 
 	case 8: // BS ^H Backspace
-		t.withLock(func() {
-			t.screen().moveCursor(-1, 0, false, false)
-		})
+		t.screen().moveCursor(-1, 0, false, false)
 
 	case 9: // HT ^I Horizontal TAB
-		t.withLock(func() {
-			cursorPos := t.screen().CursorPos()
-			cursorPos.X = t.screen().nextTabStop(cursorPos.X, 1)
-			t.screen().setCursorPos(cursorPos.X, cursorPos.Y)
-		})
+		cursorPos := t.screen().CursorPos()
+		cursorPos.X = t.screen().nextTabStop(cursorPos.X, 1)
+		t.screen().setCursorPos(cursorPos.X, cursorPos.Y)
 
 	case 10: // LF ^J Linefeed (newline)
 		// A line feed moves down without changing the column (VT100/xterm);
 		// the tty driver normally sends CRLF. LNM (CSI 20 h) makes LF do a
 		// carriage return as well.
-		t.withLock(func() {
-			t.screen().moveCursor(0, 1, false, true)
-			if t.newlineMode {
-				t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
-			}
-		})
-
-	case 11: // VT ^K Vertical TAB
-		t.withLock(func() {
-			t.screen().moveCursor(0, 1, false, true)
-		})
-
-	case 12: // FF ^L Formfeed (also: New page NP)
-		t.withLock(func() {
-			t.screen().moveCursor(0, 1, false, true)
-		})
-
-	case 13: // CR ^M Carriage Return
-		t.withLock(func() {
+		t.screen().moveCursor(0, 1, false, true)
+		if t.newlineMode {
 			t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
-		})
-
-	case 14: // SO ^N Shift Out: invoke G1 as GL
-		t.withLock(func() {
-			t.screen().invokeCharset(1)
-		})
-
-	case 15: // SI ^O Shift In: invoke G0 as GL
-		t.withLock(func() {
-			t.screen().invokeCharset(0)
-		})
-
-	case 27: // ESC ^[ Escape Character
-		// Read the whole command before taking the lock: handleCommand
-		// parses from memory, so a child that stops mid-sequence cannot
-		// block Snapshot/Restore (which need the lock) behind a pending
-		// ReadByte on the backend.
-		cmd, err := readEscapeCommand(state.cmdBuf[:0], gr, nil)
-		state.cmdBuf = cmd
-		if err != nil {
-			if len(cmd) == 0 {
-				// The ESC itself was already consumed; remember it so a
-				// resumed loop can continue the command.
-				cmd = []byte{0x1b}
-			}
-			state.pendingCmd = append([]byte(nil), cmd...)
-			if err != io.EOF {
-				debugPrintln(debugErrors, "ERR readEscapeCommand:", err)
-			}
-			return err
 		}
 
-		t.dispatchEscapeCommand(state, cmd)
-		// The escape sequence ends the run of graphic characters, so REP
-		// cannot repeat across it (xterm/tmux behavior). It is cleared after
-		// dispatch so REP itself still sees the character it repeats.
-		t.withLock(func() {
-			t.screen().clearLastChar()
-		})
+	case 11: // VT ^K Vertical TAB
+		t.screen().moveCursor(0, 1, false, true)
+
+	case 12: // FF ^L Formfeed (also: New page NP)
+		t.screen().moveCursor(0, 1, false, true)
+
+	case 13: // CR ^M Carriage Return
+		t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
+
+	case 14: // SO ^N Shift Out: invoke G1 as GL
+		t.screen().invokeCharset(1)
+
+	case 15: // SI ^O Shift In: invoke G0 as GL
+		t.screen().invokeCharset(0)
 
 	case 127: // DEL  Delete Character (treat as backspace)
-		t.withLock(func() {
-			t.screen().moveCursor(-1, 0, false, false)
-		})
+		t.screen().moveCursor(-1, 0, false, false)
 	default:
 		debugPrintf(debugTodo, "TODO: unhandled char %v %#v\n", b, string(b))
 	}
 
 	// Control characters end the run of graphic characters (REP must not
 	// repeat across them).
-	t.withLock(func() {
-		t.screen().clearLastChar()
-	})
-	return nil
+	t.screen().clearLastChar()
 }
 
 // continueEscapeCommand resumes an ESC-initiated command from state.pendingCmd.
@@ -292,7 +352,14 @@ func (t *terminal) continueEscapeCommand(state *readLoopState) error {
 		return err
 	}
 	state.pendingCmd = nil
-	t.dispatchEscapeCommand(state, cmd)
+	t.withLock(func() {
+		t.dispatchEscapeCommandLocked(state, cmd)
+		// The escape sequence ends the run of graphic characters, so REP
+		// cannot repeat across it (xterm/tmux behavior). Clear it here too:
+		// a command split at a buffer boundary resumes through this path
+		// instead of the one-shot ESC case.
+		t.screen().clearLastChar()
+	})
 	return nil
 }
 
@@ -300,26 +367,32 @@ func (t *terminal) continueEscapeCommand(state *readLoopState) error {
 // terminal lock.
 func (t *terminal) dispatchEscapeCommand(state *readLoopState, cmd []byte) {
 	t.withLock(func() {
-		// Hot CSI commands are parsed from the completed command bytes into a
-		// fixed parameter array. Everything else, including private markers,
-		// intermediates and malformed forms, falls back to the general parser.
-		var success bool
-		fastOK := false
-		if len(cmd) > 1 && cmd[0] == '[' {
-			success, fastOK = t.tryFastCSI(cmd)
-		}
-		if !fastOK {
-			state.cmdReader.Reset(cmd)
-			success = t.handleCommand(&state.cmdReader)
-		}
-		if *debugCmd || *debugTodo {
-			if success {
-				debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
-			} else {
-				debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
-			}
-		}
+		t.dispatchEscapeCommandLocked(state, cmd)
 	})
+}
+
+// dispatchEscapeCommandLocked is dispatchEscapeCommand for a caller that
+// already holds the terminal lock (the buffered batch path).
+func (t *terminal) dispatchEscapeCommandLocked(state *readLoopState, cmd []byte) {
+	// Hot CSI commands are parsed from the completed command bytes into a
+	// fixed parameter array. Everything else, including private markers,
+	// intermediates and malformed forms, falls back to the general parser.
+	var success bool
+	fastOK := false
+	if len(cmd) > 1 && cmd[0] == '[' {
+		success, fastOK = t.tryFastCSI(cmd)
+	}
+	if !fastOK {
+		state.cmdReader.Reset(cmd)
+		success = t.handleCommand(&state.cmdReader)
+	}
+	if *debugCmd || *debugTodo {
+		if success {
+			debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
+		} else {
+			debugPrintf(debugTodo, "TODO: Unhandled command: %#v\n", string(cmd))
+		}
+	}
 }
 
 // tryFastCSI parses and dispatches the hot, plain CSI commands in one pass over

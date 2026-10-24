@@ -169,10 +169,14 @@ The terminal has a background read loop goroutine (`ptyReadLoop`) that continuou
 Tests and applications may read state concurrently because the plain read
 methods take the lock themselves.
 
-**Why `ptyReadOne` can't hold the lock for its entire duration:**
-The function does blocking I/O reads (`ReadPrintableBytes`, `ReadByte`, `handleCommand`).
-Holding the lock during blocking reads would deadlock if anyone tries to access the terminal.
-Instead, it acquires the lock around each state mutation, then releases before the next read.
+**Why `ptyReadOne` can't hold the lock across a blocking read:**
+It only reads from the backend when the reader's buffer is empty, and it does
+that without the lock. Every command and printable run already in the buffer
+is then applied by `processBuffered` under a single lock acquisition. A command
+split at the buffer boundary is parked in `pendingCmd` (without copying, it
+aliases the reusable `cmdBuf`) and resumed with a blocking read outside the
+lock. Do not make `processBuffered` fill from the backend or call the locking
+public read methods: that would reintroduce the deadlock.
 
 **Frontend callback contract:**
 All `Frontend` interface methods are called with the terminal lock already held
@@ -376,22 +380,29 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   `discardBuffered`) instead of calling `ReadByte` per byte; other readers and
   replayed partial bytes use the byte-at-a-time fallback. Keep the two paths'
   terminator/malformed-byte semantics identical
-- `ptyReadOne(readLoopState)` buffers one complete ESC command with
-  `readEscapeCommand` *before* taking the terminal lock, then dispatches
-  `handleCommand` from an in-memory `bytes.Reader`. A child that stops
-  mid-sequence therefore never blocks `Snapshot`/`Restore` (or any other lock
-  user) on backend I/O. On an ESC read error the bytes consumed so far are
-  stored in `pendingCmd` for pause/handoff resume.
+- `ptyReadOne(readLoopState)` blocks for backend bytes only when the reader
+  buffer is empty, outside the lock. `processBuffered` then applies every
+  complete escape command and printable run already buffered under one lock
+  acquisition (the lock-traffic win), using `readPrintableRunBuffered` and a
+  `bufferedEscapeReader` that return `io.EOF` at the buffer end instead of
+  reading the backend. A command split at that boundary is stored in
+  `pendingCmd` (aliasing `cmdBuf`, no copy) and resumed by
+  `continueEscapeCommand` with a normal blocking read before the lock is taken,
+  so a child that stops mid-sequence still cannot block `Snapshot`/`Restore`.
+  Keep the pause/handoff invariant: `ReaderState` still captures the buffered
+  bytes plus the partially consumed command.
 - `dispatchEscapeCommand` first tries `tryFastCSI`, which parses the completed
   command bytes in one pass into a fixed parameter store and dispatches the hot
   plain forms (`H`/`f`, `m`, `A`-`D`, `J`, `K`). `J`/`K`/SGR/CUP share their
   application helpers with the general parser. Anything else (private markers,
   intermediates, sub-parameters, malformed bytes, other finals) falls back to
   `handleCommand` unchanged, so the partial-command replay path is unaffected.
-- The printable-run `maxWidth` is computed before the blocking read. If the
-  terminal is resized while idle, `writeString` re-checks the current screen
-  width and `writeLongString` splits an oversized stale run at grapheme
-  boundaries, so the next output is laid out at the new width.
+- The printable-run `maxWidth` is computed by `processBuffered` from live
+  screen state under the same lock that applies each buffered run. If a run is
+  read through the public `ReadPrintableBytes` and the terminal is resized in
+  the meantime, `writeString` re-checks the current screen width and
+  `writeLongString` splits an oversized stale run at grapheme boundaries, so
+  the output is still laid out at the new width.
 - Distinguishes printable text runs from control codes
 - CSI parameters are separated by `;` and sub-parameters by `:`. Handlers use
   the primary (first) value of each parameter; SGR also reads the
@@ -509,6 +520,10 @@ clears INSERT and ORIGIN among the mode flags).
   still goes through the tokenizer; keep it that way so VS16/keycap widening
   and read-boundary behavior stay identical (`TestRuneModeASCIIFastPathChunking`).
   Grapheme mode still requires `!lastWasRI && !forceMergeNext`
+- `readPrintableRunBuffered` is `readPrintableRun` with filling disabled: it
+  consumes only buffered bytes and reports an incomplete trailing cluster as
+  empty, so the read loop can apply a whole chunk under one lock and then
+  block for the remainder outside it
 - `splitSpan` and `byteIndexForCell` map cell offsets to byte offsets directly
   when a span's text is all ASCII (`Width == len(Text)`), in both modes
 - Clusters ending in ZWJ set `ForceMergeNext`; regional indicators use

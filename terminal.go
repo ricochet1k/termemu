@@ -557,7 +557,7 @@ func (t *terminal) Restore(s Snapshot) error {
 	t.frontend.RegionChanged(view, Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRRestore)
 	t.frontend.CursorMoved(view, t.screen().CursorPos().X, t.screen().CursorPos().Y)
 	t.frontend.StyleChanged(view, t.screen().Style())
-	t.prepareFrontendLocked()
+	batch := t.prepareFrontendLocked()
 	backend := t.backend
 	sizeChanged := oldSize.X != size.X || oldSize.Y != size.Y
 	var gen uint64
@@ -566,7 +566,7 @@ func (t *terminal) Restore(s Snapshot) error {
 		gen = t.sizeGen
 	}
 	t.Unlock()
-	t.writeFrontend()
+	t.writeFrontend(batch)
 
 	if backend != nil && sizeChanged {
 		return t.setBackendSize(size, gen)
@@ -610,9 +610,9 @@ func (t *terminal) Resize(w, h int) error {
 	// setSize preserves content and emits nothing, so tell frontends
 	// to repaint the full screen at the new dimensions.
 	t.frontend.RegionChanged(LockedView{t: t}, Region{X: 0, Y: 0, X2: w, Y2: h}, CRResize)
-	t.prepareFrontendLocked()
+	batch := t.prepareFrontendLocked()
 	t.Unlock()
-	t.writeFrontend()
+	t.writeFrontend(batch)
 
 	if backend == nil {
 		return nil
@@ -1040,17 +1040,21 @@ func (t *terminal) withLock(f func()) {
 
 // prepareFrontendLocked asks a batching frontend to render accumulated damage
 // into its pending output buffer. The caller must hold the terminal lock; no
-// I/O happens here. Non-batching frontends are unaffected.
-func (t *terminal) prepareFrontendLocked() {
+// I/O happens here. It returns the frontend that prepared the frame (nil when
+// the frontend does not batch) so WriteBatch is called on the same frontend
+// even if SetFrontend runs after the lock is released.
+func (t *terminal) prepareFrontendLocked() BatchFrontend {
 	if b, ok := t.frontend.(BatchFrontend); ok {
 		b.PrepareBatch(LockedView{t: t})
+		return b
 	}
+	return nil
 }
 
-// writeFrontend asks a batching frontend to write the output prepared by
-// prepareFrontendLocked. It must be called without the terminal lock.
-func (t *terminal) writeFrontend() {
-	if b, ok := t.frontend.(BatchFrontend); ok {
+// writeFrontend asks the batching frontend captured by prepareFrontendLocked
+// to write its prepared output. It must be called without the terminal lock.
+func (t *terminal) writeFrontend(b BatchFrontend) {
+	if b != nil {
 		b.WriteBatch()
 	}
 }
@@ -1059,9 +1063,9 @@ func (t *terminal) writeFrontend() {
 // called without holding the terminal lock.
 func (t *terminal) flushFrontend() {
 	t.Lock()
-	t.prepareFrontendLocked()
+	b := t.prepareFrontendLocked()
 	t.Unlock()
-	t.writeFrontend()
+	t.writeFrontend(b)
 }
 
 // setAltScreen switches to the alternate (wantAlt=true) or main screen.

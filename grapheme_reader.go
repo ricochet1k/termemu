@@ -190,7 +190,22 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 // can then skip re-validating the UTF-8, rescanning for spaces, and decoding
 // the final rune.
 func (r *GraphemeReader) readPrintableRun(maxWidth int) (string, int, bool, printableRunMeta, error) {
+	return r.readPrintableRunFill(maxWidth, true)
+}
+
+// readPrintableRunBuffered is readPrintableRun for bytes that are already
+// buffered. It never reads from the source: an incomplete trailing cluster or
+// an exhausted buffer returns no data so the caller can decide (outside any
+// terminal lock) whether to block for more input.
+func (r *GraphemeReader) readPrintableRunBuffered(maxWidth int) (string, int, bool, printableRunMeta, error) {
+	return r.readPrintableRunFill(maxWidth, false)
+}
+
+func (r *GraphemeReader) readPrintableRunFill(maxWidth int, fill bool) (string, int, bool, printableRunMeta, error) {
 	if r.Buffered() == 0 {
+		if !fill {
+			return "", 0, false, printableRunMeta{}, nil
+		}
 		err := r.fill()
 		if err != nil && r.Buffered() == 0 {
 			return "", 0, false, printableRunMeta{}, err
@@ -208,6 +223,9 @@ func (r *GraphemeReader) readPrintableRun(maxWidth int) (string, int, bool, prin
 	for {
 		if r.start >= r.end {
 			if runStart == r.start {
+				if !fill {
+					return "", 0, false, printableRunMeta{}, nil
+				}
 				err := r.fill()
 				runStart = r.start
 				if err != nil && r.Buffered() == 0 {
@@ -273,6 +291,9 @@ func (r *GraphemeReader) readPrintableRun(maxWidth int) (string, int, bool, prin
 			// state no longer has a complete lookahead.
 			r.standaloneWidth = true
 			if r.start == runStart {
+				if !fill {
+					return "", 0, false, printableRunMeta{}, nil
+				}
 				before := r.Buffered()
 				err := r.fill()
 				runStart = r.start
