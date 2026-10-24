@@ -539,6 +539,18 @@ clears INSERT and ORIGIN among the mode flags).
 - Storage is a ring buffer of physical rows. Each row keeps a monotonic
   `ScrollID` that stays stable as rows are added and evicted; `Range()` reports
   the valid IDs.
+- Row span storage is a lazily allocated arena (`terminal.scrollArena`), not a
+  per-row `make`. It is split into `scrollArenaBlock` chunks of
+  `scrollArenaBlockRows` ring slots; each slot has a fixed `stride` span
+  capacity, so `addScrollRow` is a copy into its slot (no allocation) and
+  eviction just overwrites the slot on reuse. Blocks are appended as the ring
+  fills, so a fresh terminal reserves nothing. A block grows its stride when a
+  wider row arrives and re-copies the rows currently in that block; growth
+  rounds up only above 8 spans. The unused tail of a slot is cleared on every
+  store (and `Clear` clears live rows) so evicted text is not retained. Restore
+  rebuilds the ring and arena from the snapshot, so snapshots from either
+  layout work. Public row copies are unchanged: `Row`/`LogicalLine` still hand
+  out independent span slices.
 - `LogicalLine(id)` walks backward/forward over `wrapped` rows to rebuild the
   logical line and reflows it at the terminal's current width. The walk stops
   at the oldest stored row (it must not wrap around to the newest row) and

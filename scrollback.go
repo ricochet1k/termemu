@@ -54,6 +54,21 @@ type scrollRow struct {
 	wrapped bool
 }
 
+// scrollArenaBlockRows is the number of ring slots a scrollArenaBlock covers.
+// Blocks are allocated lazily as the ring fills, so a new terminal with a large
+// scrollback capacity does not reserve the whole arena up front.
+const scrollArenaBlockRows = 16
+
+// scrollArenaBlock is a preallocated span arena for a run of consecutive ring
+// slots. Each slot owns stride spans ([slot*stride, (slot+1)*stride)), so the
+// slot index alone addresses a row's backing storage and eviction needs no
+// bookkeeping. stride is grown per block when a wider row arrives, copying the
+// rows currently in the block into the new block storage.
+type scrollArenaBlock struct {
+	spans  []Span
+	stride int
+}
+
 // Scrollback provides read access to the terminal's scrollback buffer.
 // All methods handle their own locking and are safe to call from any goroutine,
 // except from within a Frontend callback: callbacks run with the terminal lock
@@ -237,18 +252,17 @@ func (s *Scrollback) restoreLocked(snap ScrollbackSnapshot) error {
 		rows = rows[len(rows)-maxRows:]
 	}
 
-	stored := make([]scrollRow, len(rows), maxRows)
-	for i, r := range rows {
-		stored[i] = scrollRow{
-			id:      r.ID,
-			spans:   copySpans(r.Spans),
-			width:   r.Width,
-			wrapped: r.Wrapped,
-		}
+	// Rebuild the ring and its arena from scratch so restored rows pay the
+	// same zero-allocation capture path as newly scrolled rows. The arena
+	// grows lazily to the restored rows' span widths.
+	t := s.t
+	t.scrollRows = make([]scrollRow, 0, maxRows)
+	t.scrollArena = nil
+	t.scrollBaseIdx = 0
+	for _, r := range rows {
+		t.addScrollRowWithID(r.ID, r.Spans, r.Width, r.Wrapped)
 	}
-	s.t.scrollRows = stored
-	s.t.scrollBaseIdx = 0
-	s.t.scrollNextID = snap.Next
+	t.scrollNextID = snap.Next
 	return nil
 }
 
@@ -629,6 +643,83 @@ func copySpans(spans []Span) []Span {
 	cp := make([]Span, len(spans))
 	copy(cp, spans)
 	return cp
+}
+
+// storeScrollRowSpans copies spans into the arena slot for ring index idx and
+// returns the stored slice (length len(spans), capacity up to the block's
+// stride). The tail of the slot is cleared so an evicted wider row does not
+// keep its strings alive through the arena. Caller must hold t.Lock.
+func (t *terminal) storeScrollRowSpans(idx int, spans []Span) []Span {
+	n := len(spans)
+	bi := idx / scrollArenaBlockRows
+	if n == 0 {
+		// Still clear any previous content in this slot.
+		if bi < len(t.scrollArena) {
+			blk := &t.scrollArena[bi]
+			off := (idx % scrollArenaBlockRows) * blk.stride
+			clear(blk.spans[off : off+blk.stride])
+		}
+		return nil
+	}
+	for len(t.scrollArena) <= bi {
+		t.scrollArena = append(t.scrollArena, scrollArenaBlock{})
+	}
+	blk := &t.scrollArena[bi]
+	if blk.stride < n {
+		t.growScrollArenaBlock(bi, n)
+		blk = &t.scrollArena[bi]
+	}
+	off := (idx % scrollArenaBlockRows) * blk.stride
+	buf := blk.spans[off : off+n : off+blk.stride]
+	copy(buf, spans)
+	clear(buf[n:cap(buf)])
+	return buf
+}
+
+// growScrollArenaBlock grows block bi's stride to at least need and copies the
+// rows that live in the block into the new storage. Rows that were already
+// stored in the block keep their content; rows stored elsewhere (a restore
+// fallback) are left untouched if they do not fit. Caller must hold t.Lock.
+func (t *terminal) growScrollArenaBlock(bi, need int) {
+	stride := need
+	if stride > 8 {
+		stride = (stride + 7) &^ 7 // round large needs up to limit regrowth
+	}
+	blk := &t.scrollArena[bi]
+	spans := make([]Span, scrollArenaBlockRows*stride)
+	start := bi * scrollArenaBlockRows
+	end := start + scrollArenaBlockRows
+	if end > len(t.scrollRows) {
+		end = len(t.scrollRows)
+	}
+	for idx := start; idx < end; idx++ {
+		r := &t.scrollRows[idx]
+		n := len(r.spans)
+		if n == 0 {
+			// Drop any zero-length view so it cannot retain the old block.
+			r.spans = nil
+			continue
+		}
+		if n > stride {
+			continue // defensive: keep an oversized row where it is
+		}
+		off := (idx % scrollArenaBlockRows) * stride
+		dst := spans[off : off+n : off+stride]
+		copy(dst, r.spans)
+		r.spans = dst
+	}
+	blk.spans = spans
+	blk.stride = stride
+}
+
+// clearScrollArenaLocked drops the span references held by every live row so
+// Clear releases their text; the arena blocks themselves are kept for reuse.
+// Caller must hold t.Lock.
+func (t *terminal) clearScrollArenaLocked() {
+	for i := range t.scrollRows {
+		clear(t.scrollRows[i].spans)
+		t.scrollRows[i] = scrollRow{}
+	}
 }
 
 func (s *Scrollback) findRowLocked(id ScrollID) (scrollRow, int, bool) {

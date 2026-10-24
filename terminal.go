@@ -334,6 +334,7 @@ type terminal struct {
 	hyperlink string
 
 	scrollRows    []scrollRow
+	scrollArena   []scrollArenaBlock
 	scrollNextID  ScrollID
 	scrollBaseIdx int
 	scrollMaxRows int
@@ -984,10 +985,13 @@ func (t *terminal) captureScrollRows(lines []spanLine, wrapped []bool) {
 // addScrollRow appends a physical row to the scrollback ring buffer.
 // Caller must hold t.Lock.
 func (t *terminal) addScrollRow(spans []Span, width int, wrapped bool) {
-	// Deep-copy spans since the screen will reuse them.
-	spansCopy := make([]Span, len(spans))
-	copy(spansCopy, spans)
+	t.addScrollRowWithID(t.scrollNextID, spans, width, wrapped)
+	t.scrollNextID++
+}
 
+// addScrollRowWithID stores a row under an explicit ScrollID. Restore uses it to
+// preserve snapshot IDs while rebuilding the arena. Caller must hold t.Lock.
+func (t *terminal) addScrollRowWithID(id ScrollID, spans []Span, width int, wrapped bool) {
 	idx := len(t.scrollRows)
 	if idx < t.scrollMaxRows {
 		t.scrollRows = append(t.scrollRows, scrollRow{})
@@ -997,19 +1001,20 @@ func (t *terminal) addScrollRow(spans []Span, width int, wrapped bool) {
 	}
 
 	t.scrollRows[idx] = scrollRow{
-		id:      t.scrollNextID,
-		spans:   spansCopy,
+		id:      id,
+		spans:   t.storeScrollRowSpans(idx, spans),
 		width:   width,
 		wrapped: wrapped,
 	}
-	t.scrollNextID++
 }
 
 // clearScrollbackLocked drops all stored scrollback rows while keeping
 // ScrollIDs monotonic: Range afterwards reports base == next == scrollNextID
 // and new rows continue from that counter. Caller must hold t.Lock.
-// The slice is truncated (not reallocated) so capacity is preserved.
+// The slice is truncated (not reallocated) and the arena blocks are kept, so
+// capacity and backing storage survive for later captures.
 func (t *terminal) clearScrollbackLocked() {
+	t.clearScrollArenaLocked()
 	t.scrollRows = t.scrollRows[:0]
 	t.scrollBaseIdx = 0
 }

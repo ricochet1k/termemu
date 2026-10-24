@@ -585,3 +585,106 @@ func TestScrollback_RowEviction(t *testing.T) {
 		}
 	}
 }
+
+// TestScrollback_ArenaStorage exercises the arena-backed row storage: a wider
+// row grows and remaps its block, eviction reuses slots and clears the stale
+// span tails, Clear keeps the arena for reuse, and Restore rebuilds it.
+func TestScrollback_ArenaStorage(t *testing.T) {
+	const capacity = 4
+	term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeRune)
+	WithScrollback(capacity)(term)
+	add := func(n int, text string) {
+		spans := make([]Span, n)
+		for i := range spans {
+			spans[i] = Span{Text: text, Width: 1}
+		}
+		term.withLock(func() { term.addScrollRow(spans, n, false) })
+	}
+
+	add(1, "a")
+	add(10, "b") // grows the block stride and remaps the earlier row
+	add(1, "c")
+	add(2, "d")
+	add(2, "e") // evicts "a"
+
+	sb := term.Scrollback()
+	want := []struct {
+		text string
+		n    int
+	}{
+		{"b", 10}, {"c", 1}, {"d", 2}, {"e", 2},
+	}
+	base, next := sb.Range()
+	if got := int(next - base); got != len(want) {
+		t.Fatalf("stored rows = %d, want %d", got, len(want))
+	}
+	for i, w := range want {
+		row, ok := sb.Row(base + ScrollID(i))
+		if !ok {
+			t.Fatalf("Row(%d) missing", base+ScrollID(i))
+		}
+		if len(row.Spans) != w.n {
+			t.Errorf("row %d span count = %d, want %d", i, len(row.Spans), w.n)
+		}
+		for _, sp := range row.Spans {
+			if sp.Text != w.text {
+				t.Errorf("row %d span text = %q, want %q", i, sp.Text, w.text)
+			}
+		}
+	}
+
+	// Every slot's unused tail must be zeroed, or evicted wider rows would
+	// keep their strings alive through the arena.
+	term.withLock(func() {
+		for bi := range term.scrollArena {
+			blk := term.scrollArena[bi]
+			for slot := 0; slot < scrollArenaBlockRows; slot++ {
+				idx := bi*scrollArenaBlockRows + slot
+				if idx >= len(term.scrollRows) {
+					break
+				}
+				n := len(term.scrollRows[idx].spans)
+				off := slot * blk.stride
+				for _, sp := range blk.spans[off+n : off+blk.stride] {
+					if sp.Text != "" {
+						t.Fatalf("block %d slot %d tail retains %q", bi, slot, sp.Text)
+					}
+				}
+			}
+		}
+	})
+
+	snap := sb.Snapshot()
+	arenaBlocks := 0
+	term.withLock(func() { arenaBlocks = len(term.scrollArena) })
+	sb.Clear()
+	if arenaBlocks == 0 {
+		t.Fatal("arena was not allocated")
+	}
+	term.withLock(func() {
+		if len(term.scrollArena) == 0 {
+			t.Error("Clear dropped the arena blocks")
+		}
+	})
+	add(3, "f")
+	if got := sb.Len(); got != 1 {
+		t.Fatalf("after Clear+capture Len = %d, want 1", got)
+	}
+	if row, ok := sb.Row(next); !ok || len(row.Spans) != 3 || row.Spans[0].Text != "f" {
+		t.Errorf("row captured after Clear = %+v, ok=%v", row, ok)
+	}
+
+	if err := sb.Restore(snap); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	gotBase, gotNext := sb.Range()
+	if gotBase != base || gotNext != next {
+		t.Errorf("restored range = [%d, %d), want [%d, %d)", gotBase, gotNext, base, next)
+	}
+	for i, w := range want {
+		row, ok := sb.Row(base + ScrollID(i))
+		if !ok || len(row.Spans) != w.n || row.Spans[0].Text != w.text {
+			t.Errorf("restored row %d = %+v, ok=%v", i, row, ok)
+		}
+	}
+}
