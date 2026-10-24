@@ -36,6 +36,10 @@ func (r *benchReader) Read(p []byte) (int, error) {
 }
 
 func runTerminalBench(b *testing.B, payloadBuilder func(multiplier int) []byte, autoWrap bool, newFn func(Frontend) screen) {
+	runTerminalBenchMode(b, payloadBuilder, autoWrap, TextReadModeRune, newFn)
+}
+
+func runTerminalBenchMode(b *testing.B, payloadBuilder func(multiplier int) []byte, autoWrap bool, mode TextReadMode, newFn func(Frontend) screen) {
 	b.ReportAllocs()
 
 	multiplier := 10 * b.N
@@ -47,7 +51,7 @@ func runTerminalBench(b *testing.B, payloadBuilder func(multiplier int) []byte, 
 	done := make(chan struct{})
 	reader := &benchReader{data: payload, start: start, done: done}
 	backend := NewNoPTYBackend(reader, io.Discard)
-	tln := newBenchTerminal(&EmptyFrontend{}, backend, TextReadModeRune, newFn)
+	tln := newBenchTerminal(&EmptyFrontend{}, backend, mode, newFn)
 	if tln == nil {
 		b.Fatal("newBenchTerminal returned nil")
 	}

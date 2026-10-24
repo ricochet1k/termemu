@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -351,4 +352,89 @@ func measureScreenRetained(b *testing.B, styled bool) {
 		benchScreenSink = s
 	}
 	benchScreenSink = nil
+}
+
+// BenchmarkTerminalWriteModes compares rune and grapheme read modes on the
+// same input. Grapheme mode is the default and does the full clustering work;
+// rune mode is cheaper but only correct for text without combining sequences.
+func BenchmarkTerminalWriteModes(b *testing.B) {
+	modes := []struct {
+		name string
+		mode TextReadMode
+	}{
+		{"rune", TextReadModeRune},
+		{"grapheme", TextReadModeGrapheme},
+	}
+	payloads := []struct {
+		name  string
+		build func(multiplier int) []byte
+		wrap  bool
+	}{
+		{"plain", func(multiplier int) []byte { return buildPlainPayload(benchHeight * multiplier) }, false},
+		{"styled", func(multiplier int) []byte { return buildStyledPayload(benchHeight*multiplier, true) }, false},
+		{"plain_wrap", func(multiplier int) []byte { return buildWrapPayload(benchHeight * 2 * multiplier) }, true},
+		{"emoji_wrap", func(multiplier int) []byte { return buildEmojiPayload(benchHeight * multiplier) }, true},
+	}
+	for _, p := range payloads {
+		for _, m := range modes {
+			p, m := p, m
+			b.Run(p.name+"/"+m.name, func(b *testing.B) {
+				for _, factory := range screenFactories() {
+					factory := factory
+					b.Run(factory.name, func(b *testing.B) {
+						runTerminalBenchMode(b, p.build, p.wrap, m.mode, factory.new)
+					})
+				}
+			})
+		}
+	}
+}
+
+// buildEmojiPayload builds wrapped output dominated by graphemes that need
+// clustering: combining marks, keycaps, ZWJ sequences, flags, and skin tones.
+func buildEmojiPayload(lines int) []byte {
+	unit := "e\u0301 1\ufe0f\u20e3 👨\u200d👩\u200d👧 🇺🇸👍🏽 "
+	line := strings.Repeat(unit, benchWidth/8+1)
+	buf := make([]byte, 0, len(line)*lines+16)
+	buf = appendCursor(buf, 1, 1)
+	for i := 0; i < lines; i++ {
+		buf = append(buf, line...)
+	}
+	return buf
+}
+
+// BenchmarkGraphemeReaderASCIIModes compares the tokenizer's ASCII throughput
+// in both read modes.
+func BenchmarkGraphemeReaderASCIIModes(b *testing.B) {
+	data := []byte(strings.Repeat("the quick brown fox jumps over the lazy dog 0123456789\n", 400))
+	for _, m := range []struct {
+		name string
+		mode TextReadMode
+	}{{"rune", TextReadModeRune}, {"grapheme", TextReadModeGrapheme}} {
+		m := m
+		b.Run(m.name, func(b *testing.B) {
+			b.SetBytes(int64(len(data)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				gr := NewGraphemeReaderWithMode(bytes.NewReader(data), m.mode)
+				for {
+					text, _, _, err := gr.ReadPrintableBytes(0)
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						b.Fatal(err)
+					}
+					if text == "" {
+						if _, err := gr.ReadByte(); err == io.EOF {
+							break
+						} else if err != nil {
+							b.Fatal(err)
+						}
+					}
+				}
+			}
+		})
+	}
 }

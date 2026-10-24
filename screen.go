@@ -981,8 +981,9 @@ func splitSpan(sp Span, cellOffset int, mode TextReadMode) (left Span, right Spa
 		return left, right, Span{}
 	}
 
-	if mode == TextReadModeRune && sp.Width == len(sp.Text) && isASCII(sp.Text) {
-		// Simple mode where each byte is one cell - can't have wide clusters
+	if sp.Width == len(sp.Text) && isASCII(sp.Text) {
+		// One byte per cell, so no cluster can straddle the split. This holds
+		// in grapheme mode too: all-ASCII text is one cluster per byte.
 		leftText := sp.Text[:cellOffset]
 		rightText := sp.Text[cellOffset:]
 		left := sp
@@ -1060,10 +1061,10 @@ func byteIndexForCell(text []byte, cellOffset int, mode TextReadMode) (int, int)
 	if cellOffset <= 0 || len(text) == 0 {
 		return 0, 0
 	}
-	// In rune mode ASCII text has one byte (and one cell) per rune, so the
+	// ASCII text has one byte (and one cell) per rune in both modes, so the
 	// cell boundary is the byte boundary. This is the common case when
 	// overwriting an ASCII run in place.
-	if mode == TextReadModeRune && cellOffset <= len(text) {
+	if cellOffset <= len(text) {
 		ascii := true
 		for _, b := range text {
 			if b >= utf8.RuneSelf {

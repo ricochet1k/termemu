@@ -398,10 +398,13 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   one-cell ASCII base followed by VS16/keycap/skin-tone is coalesced and
   widened like the streaming merge path
 - `ReadPrintableBytes` additionally consumes interior printable-ASCII bytes
-  in rune mode without calling the tokenizer when the next byte is also
+  in both modes without calling the tokenizer when the next byte is also
   printable ASCII (no selector can follow). The last byte of an ASCII run
   still goes through the tokenizer; keep it that way so VS16/keycap widening
-  and read-boundary behavior stay identical (`TestRuneModeASCIIFastPathChunking`)
+  and read-boundary behavior stay identical (`TestRuneModeASCIIFastPathChunking`).
+  Grapheme mode still requires `!lastWasRI && !forceMergeNext`
+- `splitSpan` and `byteIndexForCell` map cell offsets to byte offsets directly
+  when a span's text is all ASCII (`Width == len(Text)`), in both modes
 - Clusters ending in ZWJ set `ForceMergeNext`; regional indicators use
   `LastWasRI`; VS16/keycap/skin-tone modifiers widen a one-cell base to two
 - `GraphemeState` + `SnapshotState`/`NewGraphemeReaderFromState` capture and
