@@ -1126,8 +1126,17 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				case 1034:
 					debugPrintf(debugTodo, "TODO: Interpret Meta key = %v\n", value)
 
-				case 47, 1047: // Alternate screen without clear or cursor save/restore
+				case 47: // Alternate screen, preserve contents and cursor slot
 					t.setAltScreen(value)
+
+				case 1047: // Alternate screen; clearing happens on the way out
+					if value {
+						t.setAltScreen(true)
+					} else if t.onAltScreen {
+						size := t.altScreen.Size()
+						t.altScreen.eraseRegion(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRClear)
+						t.setAltScreen(false)
+					}
 
 				case 1048: // Save/restore cursor only, no screen switch
 					if value {

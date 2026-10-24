@@ -487,6 +487,9 @@ Terminal maintains two screens:
 - Switching screens carries the current cursor, pending wrap, and style over to
   the other screen (xterm: the switch itself moves nothing). Each screen keeps
   its own saved cursor for DECSC/DECRC.
+- `?47` preserves alt contents; `?1047` clears the alt screen on the way out;
+  `?1048` is DECSC/DECRC; `?1049` saves the main cursor, clears alt on entry,
+  and restores the main cursor on exit.
 - Switching screens triggers `CRScreenSwitch` change reason
 
 ### Frontend Interface

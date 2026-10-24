@@ -59,6 +59,9 @@ var tmuxDiffSequences = []struct {
 	{"wide_chars", "世界abc\x1b[4D界世"},
 	{"emoji_overwrite", "🐹a\n🐹b\x1b[Dz\n🐹c\x1b[D\x1b[Dy\n🐹c\x1b[D\x1b[D\x1b[Dx\n"},
 	{"combining_marks", "e\u0301 x\u0301 café"},
+	{"alt_1047_clears_on_exit", "AB\x1b[?1047hX\x1b[?1047l\x1b[?1047h"},
+	{"save_restore_1048", "AB\x1b[?1048h\x1b[?1048lX"},
+	{"decaln", "abc\x1b#8"},
 	{"alt_screen_roundtrip", "main\x1b[?1049halt\x1b[?1049lmain"},
 }
 
@@ -102,7 +105,7 @@ func TestDifferentialTmuxRandom(t *testing.T) {
 	sock := startTmuxDiffServer(t, tmuxPath)
 
 	const width, height = 80, 24
-	for seed := int64(1); seed <= 12; seed++ {
+	for seed := int64(1); seed <= 50; seed++ {
 		rng := rand.New(rand.NewSource(seed))
 		seq := randomTerminalSequence(rng, 8+rng.Intn(18))
 		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {

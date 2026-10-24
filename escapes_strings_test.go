@@ -83,37 +83,28 @@ func TestESC_AltScreen_1049_ClearsAlt(t *testing.T) {
 	}
 }
 
-func TestESC_AltScreen_1047_47_Preserve(t *testing.T) {
-	enters := []struct {
-		name string
-		seq  string
-	}{
-		{"1047h", "[?1047h"},
-		{"47h alias", "[?47h"},
-	}
-	for _, enter := range enters {
-		t.Run(enter.name, func(t *testing.T) {
-			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+func TestESC_AltScreen_47_Preserves_1047_Clears(t *testing.T) {
+	t.Run("47 preserves", func(t *testing.T) {
+		_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+		t1.mustHandleCommand(t, "[?47h")
+		feedESC(t, t1, "KEEPME")
+		t1.mustHandleCommand(t, "[?47l")
+		t1.mustHandleCommand(t, "[?47h")
+		if got := lineBlank(t, t1, 0); !strings.Contains(got, "KEEPME") {
+			t.Fatalf("?47 re-enter cleared alt content, line=%q", got)
+		}
+	})
 
-			// Enter alt, write a marker, leave.
-			t1.mustHandleCommand(t, enter.seq)
-			if !t1.onAltScreen {
-				t.Fatalf("expected alt screen after %s", enter.seq)
-			}
-			feedESC(t, t1, "KEEPME")
-			leave := strings.Replace(enter.seq, "h", "l", 1)
-			t1.mustHandleCommand(t, leave)
-			if t1.onAltScreen {
-				t.Fatalf("expected main screen after %s", leave)
-			}
-
-			// Re-enter without clear: marker must survive (unlike 1049).
-			t1.mustHandleCommand(t, enter.seq)
-			if got := lineBlank(t, t1, 0); !strings.Contains(got, "KEEPME") {
-				t.Fatalf("?1047/?47 re-enter cleared alt content, line=%q", got)
-			}
-		})
-	}
+	t.Run("1047 clears on exit", func(t *testing.T) {
+		_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+		t1.mustHandleCommand(t, "[?1047h")
+		feedESC(t, t1, "KEEPME")
+		t1.mustHandleCommand(t, "[?1047l")
+		t1.mustHandleCommand(t, "[?1047h")
+		if got := lineBlank(t, t1, 0); strings.Contains(got, "KEEPME") {
+			t.Fatalf("?1047 re-enter kept alt content, line=%q", got)
+		}
+	})
 }
 
 func TestESC_AltScreen_1047_NoCursorSaveRestore(t *testing.T) {
