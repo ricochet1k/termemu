@@ -13,26 +13,45 @@ const (
 	benchSegSize = 8
 )
 
+// benchIterMultiplier fixes the amount of work one benchmark iteration does:
+// payloadBuilder(benchIterMultiplier) bytes of terminal output. It is
+// deliberately independent of b.N, so ns/op, MB/s and allocs/op are all per
+// fixed-size payload rather than amortized over a payload sized from a stale
+// b.N.
+const benchIterMultiplier = 10
+
+// benchReader streams the same fixed payload once per benchmark iteration,
+// repeats times in total. Setup (terminal construction, resize, backend) is
+// paid once and is therefore negligible per iteration.
 type benchReader struct {
-	data  []byte
-	start <-chan struct{}
-	done  chan struct{}
-	once  sync.Once
+	payload []byte
+	repeats int
+	offset  int
+	start   <-chan struct{}
+	done    chan struct{}
+	once    sync.Once
 }
 
 func (r *benchReader) Read(p []byte) (int, error) {
 	<-r.start
-	if len(r.data) == 0 {
-		r.once.Do(func() { close(r.done) })
-		return 0, io.EOF
+	n := 0
+	for n < len(p) && r.repeats > 0 {
+		if r.offset == len(r.payload) {
+			r.offset = 0
+			r.repeats--
+			if r.repeats == 0 {
+				break
+			}
+		}
+		copied := copy(p[n:], r.payload[r.offset:])
+		n += copied
+		r.offset += copied
 	}
-	n := copy(p, r.data)
-	r.data = r.data[n:]
-	if len(r.data) == 0 {
-		r.once.Do(func() { close(r.done) })
-		return n, io.EOF
+	if n > 0 {
+		return n, nil
 	}
-	return n, nil
+	r.once.Do(func() { close(r.done) })
+	return 0, io.EOF
 }
 
 func runTerminalBench(b *testing.B, payloadBuilder func(multiplier int) []byte, autoWrap bool, newFn func(Frontend) screen) {
@@ -42,30 +61,31 @@ func runTerminalBench(b *testing.B, payloadBuilder func(multiplier int) []byte, 
 func runTerminalBenchMode(b *testing.B, payloadBuilder func(multiplier int) []byte, autoWrap bool, mode TextReadMode, newFn func(Frontend) screen) {
 	b.ReportAllocs()
 
-	multiplier := 10 * b.N
-	payload := payloadBuilder(multiplier)
-	b.SetBytes(int64(len(payload)) / int64(b.N))
+	// One iteration is exactly one copy of this fixed-size payload. Building
+	// it before the timer and streaming it b.N times keeps the per-iteration
+	// work (and therefore the reported numbers) independent of b.N.
+	payload := payloadBuilder(benchIterMultiplier)
+	b.SetBytes(int64(len(payload)))
 
 	b.StopTimer()
 	start := make(chan struct{})
 	done := make(chan struct{})
-	reader := &benchReader{data: payload, start: start, done: done}
+	reader := &benchReader{payload: payload, repeats: b.N, start: start, done: done}
 	backend := NewNoPTYBackend(reader, io.Discard)
-	tln := newBenchTerminal(&EmptyFrontend{}, backend, mode, newFn)
+	tln := newBenchTerminal(&EmptyFrontend{}, backend, mode, newFn, autoWrap)
 	if tln == nil {
 		b.Fatal("newBenchTerminal returned nil")
 	}
 	if err := tln.Resize(benchWidth, benchHeight); err != nil {
 		b.Fatalf("Resize failed: %v", err)
 	}
-	tln.screen().SetAutoWrap(autoWrap)
 	b.StartTimer()
 	close(start)
 	<-done
 	<-tln.readLoopDone
 }
 
-func newBenchTerminal(frontend Frontend, backend Backend, mode TextReadMode, newFn func(Frontend) screen) *terminal {
+func newBenchTerminal(frontend Frontend, backend Backend, mode TextReadMode, newFn func(Frontend) screen, autoWrap bool) *terminal {
 	if frontend == nil {
 		frontend = &EmptyFrontend{}
 	}
@@ -78,6 +98,10 @@ func newBenchTerminal(frontend Frontend, backend Backend, mode TextReadMode, new
 	term.mainScreen.setScrollCapture(term.scrollCapture)
 	term.altScreen.setScrollCapture(term.scrollCapture)
 	term.mainScreen.setScrollDelta(term.scrollLinesDelta)
+	// Configure the active screen before the read loop starts so the loop's
+	// first AutoWrap read is not racing an unsynchronized write. Resize runs
+	// under the terminal lock.
+	term.mainScreen.SetAutoWrap(autoWrap)
 	term.startReadLoop()
 	return term
 }
