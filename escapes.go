@@ -1604,6 +1604,17 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 	case 112:
 		debugPrintln(debugTodo, "TODO: Reset Cursor Color", string(param2))
 
+	case 9: // OSC 9: desktop notification with a body only
+		if sink, ok := t.frontend.(NotificationSink); ok {
+			sink.Notify(LockedView{t: t}, "", string(param2))
+		}
+
+	case 133: // Shell integration: semantic prompt marks
+		t.handleOSC133(param2)
+
+	case 777: // OSC 777: desktop notification "notify;title;body"
+		t.handleOSC777(param2)
+
 	case 7501:
 		// Program Status Protocol feature detection.
 		// https://www.superlogical.com/rex/docs/build/program-status
@@ -1624,6 +1635,63 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 	}
 
 	return true
+}
+
+// handleOSC133 decodes an OSC 133 semantic prompt mark and forwards it to a
+// ShellIntegration frontend. Payloads are "A", "B", "C", "D[;exit]", or
+// extension forms such as "P;k=v"; unknown marks are ignored.
+func (t *terminal) handleOSC133(payload []byte) {
+	sink, ok := t.frontend.(ShellIntegration)
+	if !ok || len(payload) == 0 {
+		return
+	}
+	s := string(payload)
+	kind := s[0]
+	rest := ""
+	if len(s) > 1 && s[1] == ';' {
+		rest = s[2:]
+	} else if len(s) > 1 {
+		// Not a mark we understand (for example a bare extension form).
+		return
+	}
+	mark := PromptMark{ExitCode: -1, Raw: rest}
+	switch kind {
+	case 'A':
+		mark.Kind = PromptMarkStart
+	case 'B':
+		mark.Kind = PromptMarkInput
+	case 'C':
+		mark.Kind = PromptMarkCommand
+	case 'D':
+		mark.Kind = PromptMarkDone
+		if code, err := strconv.Atoi(strings.SplitN(rest, ";", 2)[0]); err == nil {
+			mark.ExitCode = code
+		}
+	default:
+		return
+	}
+	sink.PromptMark(LockedView{t: t}, mark)
+}
+
+// handleOSC777 decodes an OSC 777 notification ("notify;title;body") and
+// forwards it to a NotificationSink frontend.
+func (t *terminal) handleOSC777(payload []byte) {
+	sink, ok := t.frontend.(NotificationSink)
+	if !ok {
+		return
+	}
+	parts := strings.SplitN(string(payload), ";", 3)
+	if len(parts) < 1 || parts[0] != "notify" {
+		return
+	}
+	title, body := "", ""
+	if len(parts) > 1 {
+		title = parts[1]
+	}
+	if len(parts) > 2 {
+		body = parts[2]
+	}
+	sink.Notify(LockedView{t: t}, title, body)
 }
 
 // handleOSC8 implements OSC 8 hyperlinks. The payload is "params;URI": a

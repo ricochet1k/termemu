@@ -406,7 +406,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Parses OSC sequences: 0/2 window title, 6/7 working directory
   (`VSCurrentDirectory`; OSC 7 no longer sets `VSCurrentFile`), 8 hyperlinks
   (tracked URI pushed to both screens via internal `setLink`), 52 clipboard
-  writes (base64-decoded, forwarded to `ClipboardSink`; queries dropped)
+  writes (base64-decoded, forwarded to `ClipboardSink`; queries dropped),
+  9/777 notifications (forwarded to the optional `NotificationSink`), and 133
+  shell-integration marks (`A`/`B`/`C`/`D` decoded into a `PromptMark` and
+  forwarded to the optional `ShellIntegration`; other 133 forms are ignored).
+  Both optional interfaces get the terminal lock and a `LockedView`.
 - `DECSET/DECRST 2026` sets/clears `VFSynchronizedOutput`
 - `DECRQM` (`CSI [?]Ps $ p`) reports both DEC private modes
   (`privateModeState`) and ANSI modes (`ansiModeState`: IRM, LNM).
