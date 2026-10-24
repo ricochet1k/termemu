@@ -199,29 +199,62 @@ func BenchmarkTTYRenderRegion(b *testing.B) {
 }
 
 func BenchmarkHandleCommand(b *testing.B) {
+	// The command bytes follow the leading ESC, which the read loop consumes
+	// before calling dispatchEscapeCommand. Feeding dispatch measures the path
+	// production output uses (including the CSI fast path when it applies).
 	cases := []struct {
 		name string
 		cmd  []byte
 	}{
-		{"SGR", []byte("\x1b[1;38;2;200;120;40;48;5;17m")},
-		{"Cursor", []byte("\x1b[12;40H")},
-		{"Erase", []byte("\x1b[2J")},
-		{"OSC8", []byte("\x1b]8;;https://example.com/x\x1b\\")},
-		{"OSC0", []byte("\x1b]0;benchmark title\x07")},
+		{"SGR", []byte("[1;38;2;200;120;40;48;5;17m")},
+		{"SGR256", []byte("[38;5;196;48;5;17m")},
+		{"Cursor", []byte("[12;40H")},
+		{"Move", []byte("[5A")},
+		{"Erase", []byte("[2J")},
+		{"EraseLine", []byte("[0K")},
+		{"OSC8", []byte("]8;;https://example.com/x\x1b\\")},
+		{"OSC0", []byte("]0;benchmark title\x07")},
 	}
 	t := newBenchTermOnly(b)
 	fillBenchScreen(t.mainScreen, benchWidth, benchHeight, true)
+	state := &readLoopState{}
 	for _, c := range cases {
 		c := c
 		b.Run(c.name, func(b *testing.B) {
 			b.SetBytes(int64(len(c.cmd)))
 			b.ReportAllocs()
 			b.ResetTimer()
-			var r bytes.Reader
 			for i := 0; i < b.N; i++ {
-				r.Reset(c.cmd)
-				_ = t.handleCommand(&r)
+				t.dispatchEscapeCommand(state, c.cmd)
 			}
+		})
+	}
+}
+
+// buildEscapeDensePayload builds output dominated by CSI parameter parsing:
+// a cursor move per line plus an SGR color change for every cell.
+func buildEscapeDensePayload(lines int) []byte {
+	buf := make([]byte, 0, lines*(benchWidth*12+24))
+	for y := 0; y < lines; y++ {
+		buf = appendCursor(buf, 1, y+1)
+		for x := 0; x < benchWidth; x++ {
+			buf = appendColor(buf, 30+(x&7), 40+(x&7))
+			buf = append(buf, 'x')
+		}
+	}
+	return buf
+}
+
+// BenchmarkTerminalWriteEscapeDense measures the streaming write path with an
+// escape command for every output character. It is the worst case for CSI
+// parsing overhead, which plain-text benchmarks hide.
+func BenchmarkTerminalWriteEscapeDense(b *testing.B) {
+	for _, factory := range screenFactories() {
+		factory := factory
+		b.Run(factory.name, func(b *testing.B) {
+			runTerminalBench(b, func(multiplier int) []byte {
+				return buildEscapeDensePayload(benchHeight * multiplier)
+			}, false, factory.new)
 		})
 	}
 }

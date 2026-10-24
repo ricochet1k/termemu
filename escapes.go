@@ -290,9 +290,19 @@ func (t *terminal) continueEscapeCommand(state *readLoopState) error {
 // dispatchEscapeCommand applies a complete ESC-initiated command under the
 // terminal lock.
 func (t *terminal) dispatchEscapeCommand(state *readLoopState, cmd []byte) {
-	state.cmdReader.Reset(cmd)
 	t.withLock(func() {
-		success := t.handleCommand(&state.cmdReader)
+		// Hot CSI commands are parsed from the completed command bytes into a
+		// fixed parameter array. Everything else, including private markers,
+		// intermediates and malformed forms, falls back to the general parser.
+		var success bool
+		fastOK := false
+		if len(cmd) > 1 && cmd[0] == '[' {
+			success, fastOK = t.tryFastCSI(cmd)
+		}
+		if !fastOK {
+			state.cmdReader.Reset(cmd)
+			success = t.handleCommand(&state.cmdReader)
+		}
 		if *debugCmd || *debugTodo {
 			if success {
 				debugPrintf(debugCmd, "%v cmd: %#v\n", t.screen().CursorPos(), string(cmd))
@@ -301,6 +311,95 @@ func (t *terminal) dispatchEscapeCommand(state *readLoopState, cmd []byte) {
 			}
 		}
 	})
+}
+
+// tryFastCSI parses and dispatches the hot, plain CSI commands in one pass over
+// the completed command bytes (starting just after ESC). ok reports whether the
+// command had one of those forms; when it is false the caller must use the
+// general parser. The parameter rules match handleCmdCSI exactly: an omitted
+// parameter list means "no parameters", empty items between separators are 0,
+// a trailing separator adds one more 0, and parameters beyond the fixed store
+// are dropped. Any prefix, intermediate, sub-parameter, malformed byte, or
+// unexpected final byte is rejected so semantics cannot drift.
+func (t *terminal) tryFastCSI(cmd []byte) (success, ok bool) {
+	if len(cmd) < 2 || cmd[0] != '[' {
+		return false, false
+	}
+	final := cmd[len(cmd)-1]
+	switch final {
+	case 'H', 'f', 'm', 'A', 'B', 'C', 'D', 'J', 'K':
+	default:
+		return false, false
+	}
+
+	var store [8]int
+	count := 0
+	param := 0
+	paramSet := false
+	sawSeparator := false
+	for _, b := range cmd[1 : len(cmd)-1] {
+		if b >= '0' && b <= '9' {
+			param = param*10 + int(b-'0')
+			paramSet = true
+			sawSeparator = false
+			continue
+		}
+		if b != ';' {
+			return false, false
+		}
+		value := 0
+		if paramSet || sawSeparator || count > 0 {
+			value = param
+		}
+		if count < len(store) {
+			store[count] = value
+			count++
+		}
+		param = 0
+		paramSet = false
+		sawSeparator = true
+	}
+	if paramSet || sawSeparator {
+		value := 0
+		if paramSet {
+			value = param
+		}
+		if count < len(store) {
+			store[count] = value
+			count++
+		}
+	}
+	params := store[:count]
+
+	// Dispatch from the parsed array. The J/K/SGR/H helpers are shared with the
+	// general parser, so both paths apply identical semantics; A-D are inlined
+	// because their commands are short enough that an extra call is measurable.
+	switch final {
+	case 'A', 'B', 'C', 'D':
+		n := 1
+		if len(params) > 0 {
+			n = params[0]
+		}
+		switch final {
+		case 'A':
+			t.screen().moveCursor(0, -n, false, false)
+		case 'B':
+			t.screen().moveCursor(0, n, false, false)
+		case 'C':
+			t.screen().moveCursor(n, 0, false, false)
+		case 'D':
+			t.screen().moveCursor(-n, 0, false, false)
+		}
+	case 'H', 'f':
+		t.csiCursorPosition(params)
+	case 'm':
+		t.csiSetGraphicRendition(params)
+	case 'J':
+		return t.csiEraseInDisplay(params), true
+	case 'K':
+		return t.csiEraseInLine(params), true
+	}
+	return true, true
 }
 
 type escapeReader interface {
@@ -726,6 +825,291 @@ func lineScrollRegion(t *terminal) (y1, y2 int) {
 	return y1, y2
 }
 
+// csiCursorPosition implements CUP/HVP (CSI Pl;Pc H and CSI Pl;Pc f). An
+// omitted component defaults to 1; an explicit 0 keeps its literal value and is
+// clamped by the screen when the cursor is set.
+func (t *terminal) csiCursorPosition(params []int) {
+	x := 1
+	y := 1
+	if len(params) >= 1 {
+		y = params[0]
+	}
+	if len(params) >= 2 {
+		x = params[1]
+	}
+	// In origin mode the row is relative to the top margin.
+	row := y - 1
+	if t.screen().OriginMode() {
+		row += t.screen().TopMargin()
+	}
+	t.screen().setCursorPos(x-1, row)
+}
+
+// csiCursorMove implements CUU/CUD/CUF/CUB (CSI Ps A/B/C/D). An omitted
+// parameter defaults to 1; an explicit 0 moves zero cells.
+func (t *terminal) csiCursorMove(final byte, params []int) {
+	n := 1
+	if len(params) > 0 {
+		n = params[0]
+	}
+	switch final {
+	case 'A':
+		t.screen().moveCursor(0, -n, false, false)
+	case 'B':
+		t.screen().moveCursor(0, n, false, false)
+	case 'C':
+		t.screen().moveCursor(n, 0, false, false)
+	case 'D':
+		t.screen().moveCursor(-n, 0, false, false)
+	}
+}
+
+// csiSetGraphicRenditionGroups implements SGR (CSI Ps;... m). params holds
+// the primary value of each parameter; groupStore/groupLens hold the
+// colon-separated sub-parameter groups aligned with params, so extended
+// colors can be written as 38:2::r:g:b as well as 38;2;r;g;b.
+func (t *terminal) csiSetGraphicRenditionGroups(params []int, groupStore *[8][8]int, groupLens *[8]int) {
+	style := t.screen().Style()
+
+	for i := 0; i < len(params); i++ {
+		g := groupStore[i][:groupLens[i]]
+		p := g[0]
+		switch {
+		case p == 0: // reset
+			style.Reset()
+
+		case p >= 1 && p <= 5:
+			style.SetMode(colorModes[p-1])
+
+		case p == 6: // rapid blink
+			style.SetMode(ModeRapidBlink)
+
+		case p == 7:
+			style.SetMode(ModeReverse)
+
+		case p == 8:
+			style.SetMode(ModeInvisible)
+
+		case p == 9: // strikethrough / crossed-out
+			style.SetMode(ModeStrike)
+
+		case p == 21: // double underline
+			style.SetMode(ModeDoubleUnderline)
+
+		case p == 22:
+			style.Reset(ModeBold, ModeDim)
+
+		case p == 23:
+			style.Reset(ModeItalic)
+
+		case p == 24:
+			style.Reset(ModeUnderline, ModeDoubleUnderline)
+
+		case p == 25:
+			style.Reset(ModeBlink, ModeRapidBlink)
+
+		case p == 27:
+			style.Reset(ModeReverse)
+
+		case p == 28:
+			style.Reset(ModeInvisible)
+
+		case p == 29: // not crossed-out
+			style.Reset(ModeStrike)
+
+		case p == 51: // framed
+			style.SetMode(ModeFramed)
+
+		case p == 52: // encircled
+			style.SetMode(ModeEncircled)
+
+		case p == 53: // overline
+			style.SetMode(ModeOverline)
+
+		case p == 54: // not framed, not encircled
+			style.Reset(ModeFramed, ModeEncircled)
+
+		case p == 55: // not overline
+			style.Reset(ModeOverline)
+
+		case p >= 30 && p <= 37:
+			_ = style.SetColor(ComponentFG, Color256(p-30))
+
+		case p == 39: // default color
+			_ = style.SetColor(ComponentFG, DefaultColor())
+
+		case p >= 40 && p <= 47:
+			_ = style.SetColor(ComponentBG, Color256(p-40))
+
+		case p == 49: // default color
+			_ = style.SetColor(ComponentBG, DefaultColor())
+
+		case p == 38 || p == 48 || p == 58: // extended set color
+			component := ComponentFG
+			switch p {
+			case 48:
+				component = ComponentBG
+			case 58:
+				component = ComponentUnderline
+			}
+			if len(g) >= 2 {
+				// Colon form: mode and components are sub-parameters.
+				switch g[1] {
+				case 5: // 38:5:n
+					if len(g) >= 3 {
+						_ = style.SetColor(component, Color256(g[2]&0xff))
+					}
+				case 2: // 38:2:r:g:b or 38:2:<colorspace>:r:g:b
+					if len(g) >= 5 {
+						// The colorspace id is optional; the color is
+						// always the last three components.
+						start := len(g) - 3
+						_ = style.SetColor(component, RGB(g[start], g[start+1], g[start+2]))
+					}
+				}
+			} else if i+2 < len(params) {
+				// Semicolon form consumes following parameters.
+				switch params[i+1] {
+				case 5: // 38;5;n
+					_ = style.SetColor(component, Color256(params[i+2]&0xff))
+					i += 2
+				case 2: // 38;2;r;g;b
+					if i+4 < len(params) {
+						_ = style.SetColor(component, RGB(params[i+2], params[i+3], params[i+4]))
+						i += 4
+					}
+				default:
+					debugPrintln(debugTodo, "TODO: unhandled extended color: ", params[i+1])
+				}
+			}
+
+		case p == 59: // default underline color
+			_ = style.SetColor(ComponentUnderline, DefaultColor())
+
+		case p >= 90 && p <= 97:
+			_ = style.SetColor(ComponentFG, BrightColor(int(p-90)))
+
+		case p >= 100 && p <= 107:
+			_ = style.SetColor(ComponentBG, BrightColor(int(p-100)))
+
+		default:
+			debugPrintln(debugTodo, "TODO: Unhandled set color: ", p)
+			continue
+		}
+	}
+
+	t.screen().setStyle(style)
+}
+
+// csiSetGraphicRendition implements SGR for commands whose parameters are all
+// plain (semicolon-separated), as produced by the fast CSI path. An omitted
+// parameter list is a single 0 (reset), matching the general parser.
+func (t *terminal) csiSetGraphicRendition(params []int) {
+	var groups [8][8]int
+	var lens [8]int
+	var onlyDefault [1]int
+	if len(params) == 0 {
+		params = onlyDefault[:]
+	}
+	for i := 0; i < len(params) && i < len(groups); i++ {
+		groups[i][0] = params[i]
+		lens[i] = 1
+	}
+	t.csiSetGraphicRenditionGroups(params, &groups, &lens)
+}
+
+// csiEraseInLine implements EL (CSI Ps K).
+func (t *terminal) csiEraseInLine(params []int) bool {
+	// eraseRegion clamps the region to the window, so we don't have to be too careful here
+	switch {
+	case len(params) == 0 || params[0] == 0: // Erase to end of line
+		t.screen().eraseRegion(Region{
+			X:  t.screen().CursorPos().X,
+			Y:  t.screen().CursorPos().Y,
+			X2: t.screen().Size().X,
+			Y2: t.screen().CursorPos().Y + 1,
+		}, CRClear)
+	case params[0] == 1: // Erase to start of line
+		t.screen().eraseRegion(Region{
+			X:  0,
+			Y:  t.screen().CursorPos().Y,
+			X2: t.screen().CursorPos().X,
+			Y2: t.screen().CursorPos().Y + 1,
+		}, CRClear)
+	case params[0] == 2: // Erase entire line
+		t.screen().eraseRegion(Region{
+			X:  0,
+			Y:  t.screen().CursorPos().Y,
+			X2: t.screen().Size().X,
+			Y2: t.screen().CursorPos().Y + 1,
+		}, CRClear)
+	default:
+		debugPrintln(debugTodo, "TODO: Unhandled K params: ", append([]int(nil), params...))
+		return false
+	}
+	return true
+}
+
+// csiEraseInDisplay implements ED (CSI Ps J).
+func (t *terminal) csiEraseInDisplay(params []int) bool {
+	// eraseRegion clamps the region to the window, so we don't have to be too careful here
+	switch {
+	case len(params) == 0 || params[0] == 0: // Erase to bottom of screen
+		cursorPos := t.screen().CursorPos()
+		// Erase from cursor to end of current line
+		t.screen().eraseRegion(Region{
+			X:  cursorPos.X,
+			Y:  cursorPos.Y,
+			X2: t.screen().Size().X,
+			Y2: cursorPos.Y + 1,
+		}, CRClear)
+		// Erase all lines below current line
+		if cursorPos.Y+1 < t.screen().Size().Y {
+			t.screen().eraseRegion(Region{
+				X:  0,
+				Y:  cursorPos.Y + 1,
+				X2: t.screen().Size().X,
+				Y2: t.screen().Size().Y,
+			}, CRClear)
+		}
+	case params[0] == 1: // Erase to top of screen
+		cursorPos := t.screen().CursorPos()
+		// Erase all lines above current line
+		if cursorPos.Y > 0 {
+			t.screen().eraseRegion(Region{
+				X:  0,
+				Y:  0,
+				X2: t.screen().Size().X,
+				Y2: cursorPos.Y,
+			}, CRClear)
+		}
+		// Erase from beginning of current line to cursor (inclusive)
+		t.screen().eraseRegion(Region{
+			X:  0,
+			Y:  cursorPos.Y,
+			X2: cursorPos.X + 1,
+			Y2: cursorPos.Y + 1,
+		}, CRClear)
+	case params[0] == 2: // Erase entire screen (cursor does not move)
+		t.screen().eraseRegion(Region{
+			X:  0,
+			Y:  0,
+			X2: t.screen().Size().X,
+			Y2: t.screen().Size().Y,
+		}, CRClear)
+	case params[0] == 3: // Erase scrollback (xterm ED extension).
+		// Clears only the scrollback buffer; the visible screen
+		// and cursor are left untouched. Lock is already held
+		// here, so use the locked helper (Scrollback.Clear
+		// would deadlock).
+		t.clearScrollbackLocked()
+	default:
+		// debugPrintln(debugTodo, "TODO: Unhandled J params: ", params)
+		return false
+	}
+	return true
+}
+
 func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 	b, err := r.ReadByte()
@@ -880,18 +1264,8 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 	if prefix == 0 {
 		switch b {
-		case 'A': // Move cursor up
-			defaultParam(1)
-			t.screen().moveCursor(0, -params[0], false, false)
-		case 'B': // Move cursor down (bounded by the screen; does not scroll)
-			defaultParam(1)
-			t.screen().moveCursor(0, params[0], false, false)
-		case 'C': // Move cursor forward
-			defaultParam(1)
-			t.screen().moveCursor(params[0], 0, false, false)
-		case 'D': // Move cursor backward
-			defaultParam(1)
-			t.screen().moveCursor(-params[0], 0, false, false)
+		case 'A', 'B', 'C', 'D': // Cursor up/down/forward/backward
+			t.csiCursorMove(b, params)
 
 		case 'E': // Cursor Next Line
 			defaultParam(1)
@@ -938,21 +1312,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			t.screen().setCursorPos(t.screen().CursorPos().X, row)
 
 		case 'f', 'H': // Cursor Home
-			x := 1
-			y := 1
-			if len(params) >= 1 {
-				y = params[0]
-			}
-			if len(params) >= 2 {
-				x = params[1]
-			}
-			// In origin mode the row is relative to the top margin.
-			row := y - 1
-			if t.screen().OriginMode() {
-				row += t.screen().TopMargin()
-			}
-			// debugPrintf("cursor home: %v, %v\n", x, y)
-			t.screen().setCursorPos(x-1, row)
+			t.csiCursorPosition(params)
 
 		case 'h', 'l': // h=Set, l=Reset Mode
 			var value bool
@@ -978,137 +1338,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 		case 'm': // Set color/mode
 			defaultParam(0)
-
-			style := t.screen().Style()
-
-			for i := 0; i < paramCount; i++ {
-				g := groupStore[i][:groupLens[i]]
-				p := g[0]
-				switch {
-				case p == 0: // reset
-					style.Reset()
-
-				case p >= 1 && p <= 5:
-					style.SetMode(colorModes[p-1])
-
-				case p == 6: // rapid blink
-					style.SetMode(ModeRapidBlink)
-
-				case p == 7:
-					style.SetMode(ModeReverse)
-
-				case p == 8:
-					style.SetMode(ModeInvisible)
-
-				case p == 9: // strikethrough / crossed-out
-					style.SetMode(ModeStrike)
-
-				case p == 21: // double underline
-					style.SetMode(ModeDoubleUnderline)
-
-				case p == 22:
-					style.Reset(ModeBold, ModeDim)
-
-				case p == 23:
-					style.Reset(ModeItalic)
-
-				case p == 24:
-					style.Reset(ModeUnderline, ModeDoubleUnderline)
-
-				case p == 25:
-					style.Reset(ModeBlink, ModeRapidBlink)
-
-				case p == 27:
-					style.Reset(ModeReverse)
-
-				case p == 28:
-					style.Reset(ModeInvisible)
-
-				case p == 29: // not crossed-out
-					style.Reset(ModeStrike)
-
-				case p == 51: // framed
-					style.SetMode(ModeFramed)
-
-				case p == 52: // encircled
-					style.SetMode(ModeEncircled)
-
-				case p == 53: // overline
-					style.SetMode(ModeOverline)
-
-				case p == 54: // not framed, not encircled
-					style.Reset(ModeFramed, ModeEncircled)
-
-				case p == 55: // not overline
-					style.Reset(ModeOverline)
-
-				case p >= 30 && p <= 37:
-					_ = style.SetColor(ComponentFG, Color256(p-30))
-
-				case p == 39: // default color
-					_ = style.SetColor(ComponentFG, DefaultColor())
-
-				case p >= 40 && p <= 47:
-					_ = style.SetColor(ComponentBG, Color256(p-40))
-
-				case p == 49: // default color
-					_ = style.SetColor(ComponentBG, DefaultColor())
-
-				case p == 38 || p == 48 || p == 58: // extended set color
-					component := ComponentFG
-					switch p {
-					case 48:
-						component = ComponentBG
-					case 58:
-						component = ComponentUnderline
-					}
-					if len(g) >= 2 {
-						// Colon form: mode and components are sub-parameters.
-						switch g[1] {
-						case 5: // 38:5:n
-							if len(g) >= 3 {
-								_ = style.SetColor(component, Color256(g[2]&0xff))
-							}
-						case 2: // 38:2:r:g:b or 38:2:<colorspace>:r:g:b
-							if len(g) >= 5 {
-								// The colorspace id is optional; the color is
-								// always the last three components.
-								start := len(g) - 3
-								_ = style.SetColor(component, RGB(g[start], g[start+1], g[start+2]))
-							}
-						}
-					} else if i+2 < paramCount {
-						// Semicolon form consumes following parameters.
-						switch params[i+1] {
-						case 5: // 38;5;n
-							_ = style.SetColor(component, Color256(params[i+2]&0xff))
-							i += 2
-						case 2: // 38;2;r;g;b
-							if i+4 < paramCount {
-								_ = style.SetColor(component, RGB(params[i+2], params[i+3], params[i+4]))
-								i += 4
-							}
-						default:
-							debugPrintln(debugTodo, "TODO: unhandled extended color: ", params[i+1])
-						}
-					}
-
-				case p == 59: // default underline color
-					_ = style.SetColor(ComponentUnderline, DefaultColor())
-
-				case p >= 90 && p <= 97:
-					_ = style.SetColor(ComponentFG, BrightColor(int(p-90)))
-
-				case p >= 100 && p <= 107:
-					_ = style.SetColor(ComponentBG, BrightColor(int(p-100)))
-
-				default:
-					debugPrintln(debugTodo, "TODO: Unhandled set color: ", p)
-					continue
-				}
-			}
-
-			t.screen().setStyle(style)
+			t.csiSetGraphicRenditionGroups(params, &groupStore, &groupLens)
 
 		case 's': // Save cursor pos
 			t.screen().saveCursorPos()
@@ -1133,94 +1363,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 
 		case 'K': // Erase
-			// eraseRegion clamps the region to the window, so we don't have to be too careful here
-			// debugPrintln("erase: ", params)
-
-			switch {
-			case len(params) == 0 || params[0] == 0: // Erase to end of line
-				t.screen().eraseRegion(Region{
-					X:  t.screen().CursorPos().X,
-					Y:  t.screen().CursorPos().Y,
-					X2: t.screen().Size().X,
-					Y2: t.screen().CursorPos().Y + 1,
-				}, CRClear)
-			case params[0] == 1: // Erase to start of line
-				t.screen().eraseRegion(Region{
-					X:  0,
-					Y:  t.screen().CursorPos().Y,
-					X2: t.screen().CursorPos().X,
-					Y2: t.screen().CursorPos().Y + 1,
-				}, CRClear)
-			case params[0] == 2: // Erase entire line
-				t.screen().eraseRegion(Region{
-					X:  0,
-					Y:  t.screen().CursorPos().Y,
-					X2: t.screen().Size().X,
-					Y2: t.screen().CursorPos().Y + 1,
-				}, CRClear)
-			default:
-				debugPrintln(debugTodo, "TODO: Unhandled K params: ", append([]int(nil), params...))
-				return false
-			}
+			return t.csiEraseInLine(params)
 
 		case 'J': // Erase Lines
-			// eraseRegion clamps the region to the window, so we don't have to be too careful here
-			// debugPrintln("erase lines: ", params)
-
-			switch {
-			case len(params) == 0 || params[0] == 0: // Erase to bottom of screen
-				cursorPos := t.screen().CursorPos()
-				// Erase from cursor to end of current line
-				t.screen().eraseRegion(Region{
-					X:  cursorPos.X,
-					Y:  cursorPos.Y,
-					X2: t.screen().Size().X,
-					Y2: cursorPos.Y + 1,
-				}, CRClear)
-				// Erase all lines below current line
-				if cursorPos.Y+1 < t.screen().Size().Y {
-					t.screen().eraseRegion(Region{
-						X:  0,
-						Y:  cursorPos.Y + 1,
-						X2: t.screen().Size().X,
-						Y2: t.screen().Size().Y,
-					}, CRClear)
-				}
-			case params[0] == 1: // Erase to top of screen
-				cursorPos := t.screen().CursorPos()
-				// Erase all lines above current line
-				if cursorPos.Y > 0 {
-					t.screen().eraseRegion(Region{
-						X:  0,
-						Y:  0,
-						X2: t.screen().Size().X,
-						Y2: cursorPos.Y,
-					}, CRClear)
-				}
-				// Erase from beginning of current line to cursor (inclusive)
-				t.screen().eraseRegion(Region{
-					X:  0,
-					Y:  cursorPos.Y,
-					X2: cursorPos.X + 1,
-					Y2: cursorPos.Y + 1,
-				}, CRClear)
-			case params[0] == 2: // Erase entire screen (cursor does not move)
-				t.screen().eraseRegion(Region{
-					X:  0,
-					Y:  0,
-					X2: t.screen().Size().X,
-					Y2: t.screen().Size().Y,
-				}, CRClear)
-			case params[0] == 3: // Erase scrollback (xterm ED extension).
-				// Clears only the scrollback buffer; the visible screen
-				// and cursor are left untouched. Lock is already held
-				// here, so use the locked helper (Scrollback.Clear
-				// would deadlock).
-				t.clearScrollbackLocked()
-			default:
-				// debugPrintln(debugTodo, "TODO: Unhandled J params: ", params)
-				return false
-			}
+			return t.csiEraseInDisplay(params)
 
 		case 'L': // Insert lines, scroll down
 			defaultParam(1)

@@ -382,6 +382,12 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   mid-sequence therefore never blocks `Snapshot`/`Restore` (or any other lock
   user) on backend I/O. On an ESC read error the bytes consumed so far are
   stored in `pendingCmd` for pause/handoff resume.
+- `dispatchEscapeCommand` first tries `tryFastCSI`, which parses the completed
+  command bytes in one pass into a fixed parameter store and dispatches the hot
+  plain forms (`H`/`f`, `m`, `A`-`D`, `J`, `K`). `J`/`K`/SGR/CUP share their
+  application helpers with the general parser. Anything else (private markers,
+  intermediates, sub-parameters, malformed bytes, other finals) falls back to
+  `handleCommand` unchanged, so the partial-command replay path is unaffected.
 - The printable-run `maxWidth` is computed before the blocking read. If the
   terminal is resized while idle, `writeString` re-checks the current screen
   width and `writeLongString` splits an oversized stale run at grapheme
