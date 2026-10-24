@@ -31,6 +31,23 @@ type GraphemeToken struct {
 	Merge bool
 }
 
+// printableRunMeta records facts the tokenizer establishes while it walks a
+// printable run, so the screen does not have to rescan the text afterwards.
+type printableRunMeta struct {
+	// validUTF8 reports that the emitted bytes are valid UTF-8. Invalid input
+	// bytes are tokenized as U+FFFD but emitted raw, so the screen still has
+	// to sanitize a run when this is false.
+	validUTF8 bool
+	// allSpaces reports that the run is exactly one or more ASCII spaces.
+	// DEC Special Graphics maps only 0x5F-0x7E, so this stays true after the
+	// charset mapping and can be trusted by the blank-span canonicalization.
+	allSpaces bool
+	// lastRune is the final graphic code point of the run as the tokenizer
+	// saw it; invalid bytes count as U+FFFD. REP records it before the
+	// charset mapping is applied.
+	lastRune rune
+}
+
 // GraphemeReader buffers bytes and emits grapheme tokens for printable runs.
 type GraphemeReader struct {
 	src            io.Reader
@@ -164,16 +181,26 @@ func (r *GraphemeReader) discardBuffered(n int) {
 // the total cell width returned; pass <=0 for unlimited. merge is true when the
 // returned text should be merged into the previous cell.
 func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, error) {
+	text, width, merge, _, err := r.readPrintableRun(maxWidth)
+	return text, width, merge, err
+}
+
+// readPrintableRun is ReadPrintableBytes plus the facts the tokenizer already
+// established about the emitted run. Callers that hand the run to the screen
+// can then skip re-validating the UTF-8, rescanning for spaces, and decoding
+// the final rune.
+func (r *GraphemeReader) readPrintableRun(maxWidth int) (string, int, bool, printableRunMeta, error) {
 	if r.Buffered() == 0 {
 		err := r.fill()
 		if err != nil && r.Buffered() == 0 {
-			return "", 0, false, err
+			return "", 0, false, printableRunMeta{}, err
 		}
 	}
 	if r.Buffered() == 0 || !isPrintableByte(r.data[r.start]) {
-		return "", 0, false, nil
+		return "", 0, false, printableRunMeta{}, nil
 	}
 
+	meta := printableRunMeta{validUTF8: true, allSpaces: true}
 	runStart := r.start
 	widthUsed := 0
 	mergeRun := false
@@ -184,10 +211,10 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 				err := r.fill()
 				runStart = r.start
 				if err != nil && r.Buffered() == 0 {
-					return "", 0, false, err
+					return "", 0, false, printableRunMeta{}, err
 				}
 				if r.Buffered() == 0 || !isPrintableByte(r.data[r.start]) {
-					return "", 0, false, nil
+					return "", 0, false, printableRunMeta{}, nil
 				}
 				continue
 			}
@@ -219,6 +246,14 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 			}
 			if k > 1 {
 				consume := k - 1
+				if meta.allSpaces {
+					for i := 0; i < consume; i++ {
+						if r.data[r.start+i] != ' ' {
+							meta.allSpaces = false
+							break
+						}
+					}
+				}
 				r.start += consume
 				if r.mode == TextReadModeGrapheme {
 					r.state = -1
@@ -243,9 +278,9 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 				runStart = r.start
 				if r.Buffered() == before {
 					if err != nil {
-						return "", 0, false, err
+						return "", 0, false, printableRunMeta{}, err
 					}
-					return "", 0, false, io.EOF
+					return "", 0, false, printableRunMeta{}, io.EOF
 				}
 				continue
 			}
@@ -280,6 +315,15 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 			break
 		}
 
+		// The tokenizer replaces invalid bytes with U+FFFD in the token, so a
+		// cluster whose length differs from the bytes it consumed means the
+		// raw run is not valid UTF-8.
+		if len(cluster) != consumed {
+			meta.validUTF8 = false
+		}
+		if meta.allSpaces && (merge || consumed != 1 || cluster[0] != ' ') {
+			meta.allSpaces = false
+		}
 		r.start += consumed
 		r.state = newState
 		r.forceMergeNext = nextForceMergeNext
@@ -291,10 +335,14 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 	}
 
 	if r.start == runStart {
-		return "", 0, false, nil
+		return "", 0, false, printableRunMeta{}, nil
 	}
 	out := string(r.data[runStart:r.start])
-	return out, widthUsed, mergeRun, nil
+	// An invalid final byte decodes as RuneError both here and after
+	// sanitization, so the raw output yields the same REP rune as the sanitized
+	// text the screen stores.
+	meta.lastRune, _ = utf8.DecodeLastRuneInString(out)
+	return out, widthUsed, mergeRun, meta, nil
 }
 
 // ReadPrintableTokens reads a contiguous run of printable bytes from the stream.

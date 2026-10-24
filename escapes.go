@@ -141,7 +141,7 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 			}
 		}
 	})
-	data, width, merge, err := gr.ReadPrintableBytes(maxWidth)
+	data, width, merge, meta, err := gr.readPrintableRun(maxWidth)
 	if err != nil {
 		if err != io.EOF {
 			debugPrintln(debugErrors, "ERR ReadPrintableBytes:", err)
@@ -150,7 +150,7 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 	}
 	if len(data) > 0 {
 		t.withLock(func() {
-			t.screen().writeString(data, width, merge, t.textReadMode)
+			t.screen().writeStringMeta(data, width, merge, t.textReadMode, meta)
 		})
 		if *debugTxt {
 			debugPrintf(debugTxt, "\033[32mtxt: %#v\033[0m %v\n", data, len(data))

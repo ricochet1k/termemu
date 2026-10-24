@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type panicReader struct {
@@ -311,4 +312,105 @@ func BenchmarkGraphemeReadASCII(b *testing.B) {
 
 func BenchmarkGraphemeReadEmoji(b *testing.B) {
 	benchmarkGraphemeRead(b, strings.Repeat("👨\u200d👩\u200d👧\u200d👦 e\u0301 1\ufe0f\u20e3 🇺🇸👍🏽 ", 200))
+}
+
+// TestReadPrintableRunInvalidMetadata feeds raw invalid bytes through the
+// reader. The metadata must report invalid UTF-8 (so the screen sanitizes) and
+// still supply the run's final rune; the rendered screen must keep matching the
+// sanitized text.
+func TestReadPrintableRunInvalidMetadata(t *testing.T) {
+	data := []byte{'a', 0xff, 'b', 0xc0, 0xfe, 'c'}
+	gr := NewGraphemeReaderWithMode(bytes.NewReader(data), TextReadModeGrapheme)
+	text, width, merge, meta, err := gr.readPrintableRun(0)
+	if err != nil {
+		t.Fatalf("readPrintableRun: %v", err)
+	}
+	if merge {
+		t.Fatalf("unexpected merge run")
+	}
+	if meta.validUTF8 {
+		t.Fatalf("metadata reports valid UTF-8 for %q", text)
+	}
+	if meta.allSpaces {
+		t.Fatalf("metadata reports an all-space run for %q", text)
+	}
+	if meta.lastRune != 'c' {
+		t.Fatalf("lastRune = %q, want 'c'", meta.lastRune)
+	}
+	want := sanitizeUTF8(text)
+	if want == text {
+		t.Fatalf("test data was already valid UTF-8: %q", text)
+	}
+	if got := width; got != utf8.RuneCountInString(want) {
+		t.Fatalf("width = %d, want %d for %q", got, utf8.RuneCountInString(want), want)
+	}
+
+	backend := NewNoPTYBackend(&byteAtATimeReader{data: data}, io.Discard)
+	term := NewWithMode(NewMockFrontend(), backend, TextReadModeGrapheme)
+	if err := term.Resize(40, 3); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	defer func() { _ = term.Close() }()
+	<-term.Done()
+	if got := strings.TrimRight(term.Line(0), " "); got != want {
+		t.Fatalf("line = %q, want %q", got, want)
+	}
+	if got := term.CursorPos().X; got != width {
+		t.Fatalf("cursor x = %d, want %d", got, width)
+	}
+}
+
+// TestPrintableRunMetadataMatchesText checks that the metadata the reader
+// reports for a run agrees with what a rescan of the emitted text would find.
+// It covers every one- and two-byte input plus malformed multi-byte sequences
+// and a deterministic random corpus.
+func TestPrintableRunMetadataMatchesText(t *testing.T) {
+	checkData := func(mode TextReadMode, data []byte) {
+		t.Helper()
+		gr := NewGraphemeReaderWithMode(bytes.NewReader(data), mode)
+		for {
+			text, _, _, meta, err := gr.readPrintableRun(0)
+			if err != nil {
+				break
+			}
+			if text == "" {
+				if _, err := gr.ReadByte(); err != nil {
+					break
+				}
+				continue
+			}
+			want := analyzePrintableRun(text)
+			if meta.validUTF8 != want.validUTF8 || meta.allSpaces != want.allSpaces || meta.lastRune != want.lastRune {
+				t.Fatalf("mode %d data %q: metadata = %+v, rescan = %+v", mode, data, meta, want)
+			}
+		}
+	}
+	corpus := [][]byte{
+		[]byte("\u00e9\xff"), []byte("\xe2\x82\xac\xff"),
+		[]byte("a\xf0\x9f"), []byte("\xf0\x9f\x98\x80\xff"),
+		[]byte("\xff\ufe0f"), []byte("a\xc0\x80b"),
+	}
+	seed := uint32(1)
+	for i := 0; i < 2000; i++ {
+		seed = seed*1664525 + 1013904223
+		data := make([]byte, len(corpus[0])+int(seed>>28))
+		for j := range data {
+			seed = seed*1664525 + 1013904223
+			data[j] = byte(seed >> 24)
+		}
+		corpus = append(corpus, data)
+	}
+	for _, mode := range []TextReadMode{TextReadModeRune, TextReadModeGrapheme} {
+		for b := 0; b < 256; b++ {
+			checkData(mode, []byte{byte(b)})
+		}
+		for a := 0; a < 256; a++ {
+			for b := 0; b < 256; b++ {
+				checkData(mode, []byte{byte(a), byte(b)})
+			}
+		}
+		for _, data := range corpus {
+			checkData(mode, data)
+		}
+	}
 }

@@ -29,6 +29,9 @@ type screen interface {
 	setSize(w, h int)
 	eraseRegion(r Region, cr ChangeReason)
 	writeString(text string, width int, merge bool, mode TextReadMode)
+	// writeStringMeta is writeString for a run whose tokenizer metadata is
+	// already known (see GraphemeReader.readPrintableRun).
+	writeStringMeta(text string, width int, merge bool, mode TextReadMode, meta printableRunMeta)
 	rawWriteRune(x int, y int, r rune, width int, cr ChangeReason)
 	deleteChars(x int, y int, n int, cr ChangeReason)
 	// insertChars shifts the cells at x and to the right rightwards by n,
@@ -469,14 +472,24 @@ func (s *spanScreen) eraseRegion(r Region, cr ChangeReason) {
 }
 
 func (s *spanScreen) writeString(text string, width int, merge bool, mode TextReadMode) {
+	s.writeStringMeta(text, width, merge, mode, analyzePrintableRun(text))
+}
+
+// writeStringMeta is writeString for a run whose tokenizer metadata is already
+// known. It avoids re-validating the UTF-8, rescanning the run for spaces, and
+// decoding its final rune.
+func (s *spanScreen) writeStringMeta(text string, width int, merge bool, mode TextReadMode, meta printableRunMeta) {
 	if len(text) == 0 {
 		return
 	}
-	text = sanitizeUTF8(text)
+	if !meta.validUTF8 {
+		text = sanitizeUTF8(text)
+	}
 	s.textMode = mode
 	// Remember the last graphic character for REP before the charset mapping:
-	// REP re-maps and re-styles it when it is replayed.
-	s.noteLastChar(text)
+	// REP re-maps and re-styles it when it is replayed. The reader reports the
+	// final rune even for invalid input (it tokenizes invalid bytes as U+FFFD).
+	s.lastChar = meta.lastRune
 	if merge {
 		s.mergeIntoPreviousCell(text)
 		return
@@ -517,15 +530,10 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 	sp := Span{Style: s.style, Text: text, Width: width, Link: s.link}
 	// Canonicalize runs of plain ASCII spaces as blank spans (empty Text),
 	// matching how blank fills are stored. Blank spans never carry links.
-	// Mixed text runs (e.g. "a  ") are left untouched.
-	allSpaces := true
-	for i := 0; i < len(text); i++ {
-		if text[i] != ' ' {
-			allSpaces = false
-			break
-		}
-	}
-	if allSpaces {
+	// Mixed text runs (e.g. "a  ") are left untouched. The tokenizer reports
+	// this, and DEC Special Graphics does not map ASCII space, so the flag is
+	// still correct after mapDECGraphics.
+	if meta.allSpaces {
 		sp.Text = ""
 		sp.Link = ""
 	}
@@ -742,13 +750,24 @@ func (s *spanScreen) clearLastChar() {
 	s.lastChar = 0
 }
 
-// noteLastChar records the final code point of a printable run for REP.
-func (s *spanScreen) noteLastChar(text string) {
-	if text == "" {
-		return
+// analyzePrintableRun derives the metadata GraphemeReader reports, for callers
+// that have a text run but not the reader's bookkeeping (REP replay, tests, and
+// internal helpers). Invalid UTF-8 is measured after sanitization so lastRune
+// matches what writeStringMeta stores.
+func analyzePrintableRun(text string) printableRunMeta {
+	meta := printableRunMeta{validUTF8: utf8.ValidString(text), allSpaces: true}
+	for i := 0; i < len(text); i++ {
+		if text[i] != ' ' {
+			meta.allSpaces = false
+			break
+		}
 	}
-	r, _ := utf8.DecodeLastRuneInString(text)
-	s.lastChar = r
+	last := text
+	if !meta.validUTF8 {
+		last = sanitizeUTF8(text)
+	}
+	meta.lastRune, _ = utf8.DecodeLastRuneInString(last)
+	return meta
 }
 
 func (s *spanScreen) setCursorPos(x, y int) {
