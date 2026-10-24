@@ -351,6 +351,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 **Escape Sequence Parsing** (escapes.go):
 - `ptyReadLoop(ReaderState)` reads from backend via `GraphemeReader`; it starts
   from captured state and first continues `pendingCmd` when present
+- `readEscapeCommand` scans CSI/OSC-style commands a chunk at a time through
+  the optional `bulkEscapeReader` (`GraphemeReader.peekBuffered`/
+  `discardBuffered`) instead of calling `ReadByte` per byte; other readers and
+  replayed partial bytes use the byte-at-a-time fallback. Keep the two paths'
+  terminator/malformed-byte semantics identical
 - `ptyReadOne(readLoopState)` buffers one complete ESC command with
   `readEscapeCommand` *before* taking the terminal lock, then dispatches
   `handleCommand` from an in-memory `bytes.Reader`. A child that stops

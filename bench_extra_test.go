@@ -403,6 +403,31 @@ func buildEmojiPayload(lines int) []byte {
 	return buf
 }
 
+// buildOSCPayload builds a stream of long OSC title sequences. String
+// commands are where bulk escape scanning matters most (many bytes per
+// command).
+func buildOSCPayload(count int) []byte {
+	title := strings.Repeat("benchmark-title-", 5)
+	buf := make([]byte, 0, count*(len(title)+8))
+	for i := 0; i < count; i++ {
+		buf = append(buf, '\x1b', ']', '0', ';')
+		buf = append(buf, title...)
+		buf = append(buf, 0x07)
+	}
+	return buf
+}
+
+func BenchmarkTerminalOSCStrings(b *testing.B) {
+	for _, factory := range screenFactories() {
+		factory := factory
+		b.Run(factory.name, func(b *testing.B) {
+			runTerminalBenchMode(b, func(multiplier int) []byte {
+				return buildOSCPayload(20 * multiplier)
+			}, false, TextReadModeRune, factory.new)
+		})
+	}
+}
+
 // BenchmarkGraphemeReaderASCIIModes compares the tokenizer's ASCII throughput
 // in both read modes.
 func BenchmarkGraphemeReaderASCIIModes(b *testing.B) {

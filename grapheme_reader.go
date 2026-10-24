@@ -141,6 +141,24 @@ func (r *GraphemeReader) Buffered() int {
 	return r.end - r.start
 }
 
+// peekBuffered returns unread buffered bytes without consuming them. The slice
+// is only valid until the reader advances or refills; the escape parser treats
+// it as read-only.
+func (r *GraphemeReader) peekBuffered() []byte {
+	return r.data[r.start:r.end]
+}
+
+// discardBuffered consumes n unread buffered bytes on behalf of the escape
+// parser. A whole escape command is consumed at once, so the tokenizer starts
+// fresh afterwards; this matches the state ReadByte leaves after the ESC that
+// introduced the command.
+func (r *GraphemeReader) discardBuffered(n int) {
+	r.start += n
+	r.state = -1
+	r.forceMergeNext = false
+	r.lastWasRI = false
+}
+
 // ReadPrintableBytes reads a contiguous run of printable bytes from the stream.
 // It stops before control bytes and leaves them for ReadByte. maxWidth limits
 // the total cell width returned; pass <=0 for unlimited. merge is true when the

@@ -344,20 +344,44 @@ func readEscapeCommand(dst []byte, r escapeReader, partial []byte) ([]byte, erro
 		return buf, err
 	}
 
+	// GraphemeReader exposes its buffered bytes so command scanning can look
+	// at a whole chunk at once instead of calling ReadByte per byte.
+	br, bulk := r.(bulkEscapeReader)
+
 	switch b {
 	case '[': // CSI: parameter/intermediate bytes then a final byte
 		for {
+			if replay < len(partial) {
+				b, err := read()
+				if err != nil {
+					return buf, err
+				}
+				if isCSIFinal(b) || isCSIMalformed(b) {
+					return commandResult(buf, drop), nil
+				}
+				continue
+			}
+			if bulk {
+				if p := br.peekBuffered(); len(p) > 0 {
+					n := 0
+					for n < len(p) {
+						c := p[n]
+						n++
+						if isCSIFinal(c) || isCSIMalformed(c) {
+							buf, drop = appendEscapeBytes(buf, p[:n], drop)
+							br.discardBuffered(n)
+							return commandResult(buf, drop), nil
+						}
+					}
+					buf, drop = appendEscapeBytes(buf, p[:n], drop)
+					br.discardBuffered(n)
+				}
+			}
 			b, err := read()
 			if err != nil {
 				return buf, err
 			}
-			if b >= 0x40 && b <= 0x7e {
-				return commandResult(buf, drop), nil
-			}
-			if b < 0x20 || b > 0x3f {
-				// Malformed (not a parameter, intermediate, or final
-				// byte): stop here and let the handler treat it as the
-				// final byte instead of swallowing following text.
+			if isCSIFinal(b) || isCSIMalformed(b) {
 				return commandResult(buf, drop), nil
 			}
 		}
@@ -365,14 +389,37 @@ func readEscapeCommand(dst []byte, r escapeReader, partial []byte) ([]byte, erro
 	case ']', 'P', '_', '^', 'X': // OSC, DCS, APC, PM, SOS
 		var scanner stringTermScanner
 		for {
+			if replay < len(partial) {
+				b, err := read()
+				if err != nil {
+					return buf, err
+				}
+				if b == 0x07 || scanner.isST(b) {
+					return commandResult(buf, drop), nil
+				}
+				continue
+			}
+			if bulk {
+				if p := br.peekBuffered(); len(p) > 0 {
+					n := 0
+					for n < len(p) {
+						c := p[n]
+						n++
+						if c == 0x07 || scanner.isST(c) {
+							buf, drop = appendEscapeBytes(buf, p[:n], drop)
+							br.discardBuffered(n)
+							return commandResult(buf, drop), nil
+						}
+					}
+					buf, drop = appendEscapeBytes(buf, p[:n], drop)
+					br.discardBuffered(n)
+				}
+			}
 			b, err := read()
 			if err != nil {
 				return buf, err
 			}
-			if b == 0x07 { // BEL
-				return commandResult(buf, drop), nil
-			}
-			if scanner.isST(b) {
+			if b == 0x07 || scanner.isST(b) {
 				return commandResult(buf, drop), nil
 			}
 		}
@@ -385,6 +432,33 @@ func readEscapeCommand(dst []byte, r escapeReader, partial []byte) ([]byte, erro
 	}
 
 	return commandResult(buf, drop), nil
+}
+
+// bulkEscapeReader is implemented by GraphemeReader so escape commands can be
+// scanned a chunk at a time. peekBuffered returns the unread bytes without
+// consuming them; discardBuffered consumes a prefix of that slice.
+type bulkEscapeReader interface {
+	peekBuffered() []byte
+	discardBuffered(n int)
+}
+
+func isCSIFinal(b byte) bool { return b >= 0x40 && b <= 0x7e }
+
+// isCSIMalformed reports bytes that cannot appear in a CSI parameter or
+// intermediate position. The handler treats them as the final byte instead of
+// swallowing following text.
+func isCSIMalformed(b byte) bool { return b < 0x20 || b > 0x3f }
+
+// appendEscapeBytes appends consumed command bytes, enforcing the command size
+// limit. It returns a nil buffer once the command is dropped.
+func appendEscapeBytes(buf, p []byte, drop bool) ([]byte, bool) {
+	if drop {
+		return nil, true
+	}
+	if len(buf)+len(p) > maxEscapeCommandBytes {
+		return nil, true
+	}
+	return append(buf, p...), false
 }
 
 // commandResult drops a command that exceeded maxEscapeCommandBytes.
