@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -268,6 +269,10 @@ type terminal struct {
 	readLoopDone    chan struct{}
 	readLoopErr     error
 	textReadMode    TextReadMode
+
+	// pausedFlag mirrors paused for the read loop's per-iteration check, so
+	// the common not-paused case does not take lifecycleMu.
+	pausedFlag atomic.Bool
 
 	// Pause/Resume handshake. All fields are guarded by lifecycleMu.
 	// paused is the request flag checked by the read loop; pauseReady

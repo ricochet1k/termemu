@@ -61,6 +61,7 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 		return Handoff{}, errors.New("termemu: terminal is already paused")
 	}
 	t.paused = true
+	t.pausedFlag.Store(true)
 	ready := make(chan ReaderState, 1)
 	resume := make(chan bool, 1)
 	t.pauseReady = ready
@@ -107,6 +108,7 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 func (t *terminal) abortPause() {
 	t.lifecycleMu.Lock()
 	t.paused = false
+	t.pausedFlag.Store(false)
 	resume := t.pauseResume
 	t.pauseReady = nil
 	t.pauseResume = nil
@@ -150,6 +152,7 @@ func (t *terminal) Resume() error {
 	}
 	resume := t.pauseResume
 	t.paused = false
+	t.pausedFlag.Store(false)
 	t.pauseReady = nil
 	t.pauseResume = nil
 	t.lifecycleMu.Unlock()
@@ -167,6 +170,9 @@ func (t *terminal) Resume() error {
 
 // shouldPause reports whether the read loop should park before its next read.
 func (t *terminal) shouldPause() bool {
+	if !t.pausedFlag.Load() {
+		return false
+	}
 	t.lifecycleMu.Lock()
 	defer t.lifecycleMu.Unlock()
 	return t.paused && t.pauseReady != nil && t.pauseResume != nil
@@ -175,6 +181,9 @@ func (t *terminal) shouldPause() bool {
 // isPaused reports whether a pause was requested (used to distinguish a
 // deadline wake from a genuine read error).
 func (t *terminal) isPaused() bool {
+	if !t.pausedFlag.Load() {
+		return false
+	}
 	t.lifecycleMu.Lock()
 	defer t.lifecycleMu.Unlock()
 	return t.paused

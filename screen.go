@@ -1112,6 +1112,35 @@ func findSpanAtX(line *spanLine, x int) (int, int) {
 	return len(line.spans), 0
 }
 
+// locateSpanRange locates the start and end of a replacement window in one
+// pass. startIdx == len(spans) means x is past the end of the line. endIdx
+// defaults to the last span with offset 0 when the end is past the line,
+// matching the boundary semantics replaceRange relies on.
+func locateSpanRange(spans []Span, x, end int) (startIdx, startOffset, endIdx, endOffset int) {
+	startIdx = len(spans)
+	endIdx = len(spans) - 1
+	pos := 0
+	for i := 0; i < len(spans); i++ {
+		endPos := pos + spans[i].Width
+		if startIdx == len(spans) {
+			if x < endPos {
+				startIdx = i
+				startOffset = x - pos
+			} else {
+				pos = endPos
+				continue
+			}
+		}
+		if end <= endPos {
+			endIdx = i
+			endOffset = end - pos
+			return
+		}
+		pos = endPos
+	}
+	return
+}
+
 func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) {
 	// Fast return for a no-op insert.
 	if n == 0 && insert.Width == 0 {
@@ -1151,31 +1180,40 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	// Expand the replacement window so it never covers only part of a wide
 	// grapheme cluster. The old wide character must be consumed exactly once;
 	// leaving half of it behind would corrupt both the span widths and the
-	// rendered line.
+	// rendered line. Locate both boundaries in one pass; only a mid-cluster
+	// boundary (rare) forces a second look.
 	startPadCells := 0
 	endPadCells := 0
+	startIdx, startOffset, endIdx, endOffset := locateSpanRange(spans, x, x+n)
+	relocate := false
 	if x < totalWidth {
-		idx, off := findSpanAtX(line, x)
-		if idx < len(spans) && off > 0 && off < spans[idx].Width {
-			left, _, wide := splitSpan(spans[idx], off, mode)
+		if startIdx < len(spans) && startOffset > 0 && startOffset < spans[startIdx].Width {
+			left, _, wide := splitSpan(spans[startIdx], startOffset, mode)
 			if wide.Width > 0 {
-				wideStart := off - left.Width
+				wideStart := startOffset - left.Width
 				x -= wideStart
 				n += wideStart
 				startPadCells = wideStart
+				relocate = true
 			}
 		}
 	}
+	if relocate {
+		startIdx, startOffset, endIdx, endOffset = locateSpanRange(spans, x, x+n)
+	}
 	if end := x + n; end > 0 && end < totalWidth {
-		idx, off := findSpanAtX(line, end)
-		if idx < len(spans) && off > 0 && off < spans[idx].Width {
-			left, _, wide := splitSpan(spans[idx], off, mode)
+		if endIdx < len(spans) && endOffset > 0 && endOffset < spans[endIdx].Width {
+			left, _, wide := splitSpan(spans[endIdx], endOffset, mode)
 			if wide.Width > 0 {
 				wideEnd := left.Width + wide.Width
-				endPadCells = wideEnd - off
+				endPadCells = wideEnd - endOffset
 				n += endPadCells
+				relocate = true
 			}
 		}
+	}
+	if relocate {
+		startIdx, startOffset, endIdx, endOffset = locateSpanRange(spans, x, x+n)
 	}
 
 	// A real write (insert.Width > 0) must keep the line's total width. Pad
@@ -1204,34 +1242,6 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	}
 	if padRight > 0 {
 		insertParts = append(insertParts, Span{Style: insert.Style, Width: padRight})
-	}
-
-	// Locate the spans that intersect the replacement window.
-	startFound := false
-	startIdx := len(spans)
-	startOffset := 0
-	pos := 0
-	i := 0
-	for ; i < len(spans); i++ {
-		endPos := pos + spans[i].Width
-		if !startFound && x < endPos {
-			startIdx = i
-			startOffset = x - pos
-			break
-		}
-		pos = endPos
-	}
-	endIdx := len(spans) - 1
-	endOffset := 0
-	for ; i < len(spans); i++ {
-		endPos := pos + spans[i].Width
-		if x+n <= endPos {
-			endIdx = i
-			endOffset = x + n - pos
-			pos = endPos
-			break
-		}
-		pos = endPos
 	}
 
 	if x == 0 && n >= totalWidth {
