@@ -382,6 +382,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   width and `writeLongString` splits an oversized stale run at grapheme
   boundaries, so the next output is laid out at the new width.
 - Distinguishes printable text runs from control codes
+- CSI parameters are separated by `;` and sub-parameters by `:`. Handlers use
+  the primary (first) value of each parameter; SGR also reads the
+  colon-separated groups, so `38:2::r:g:b`, `38:2:r:g:b`, `38:5:n`, the
+  semicolon forms, and `58`/`59` underline colors all parse. Unknown or short
+  colon forms are ignored rather than leaking their bytes as text
 - Parses CSI sequences (cursor movement, SGR colors, screen manipulation).
   Relative cursor moves include CNL/CPL (`E`/`F`), HPR/VPR (`a`/`e`), and
   CHT/CBT (`I`/`Z`, which use the screen's tab stop map). Explicit cursor
@@ -450,7 +455,10 @@ clears INSERT and ORIGIN among the mode flags).
 - `modeSGRGroups`/`modeSGRCodes` are indexed by mode bit position; keep them in
   sync when adding a mode (`TestModeSGRCodesCoverAllModes`)
 - Both delegate to `appendANSIEscapeFrom`/`appendANSIEscapeColor`, which
-  append to a caller-provided buffer (no per-call slice allocation)
+  append to a caller-provided buffer (no per-call slice allocation). The
+  underline color has no 30-37/90-97 shorthand, so
+  `appendANSIEscapeUnderlineColor` always emits `SGR 58;5;n` or
+  `SGR 58;2;r;g;b` (a bright color therefore round-trips as palette 8+n)
 - Line renderers (`spanScreen.renderLineANSI`, `ttyFrontend`'s
   `renderStyledLineANSI`) emit one leading `SGR 0` and then deltas between
   adjacent spans; do not revert to a full escape per span

@@ -83,6 +83,7 @@ var screenInputChunks = []string{
 	"\x1b[@", "\x1b[3@", "\x1b[4h", "\x1b[4l", "\x1bH", "\x1b[g", "\x1b[3g",
 	"\x1b[2I", "\x1b[2Z", "\x1b[3b", "\x1b[?6h", "\x1b[?6l", "\x1b[5;12r",
 	"\x1b[20h", "\x1b[20l", "\x1bE", "\x1b[2 q", "\x1b[ x", "\x1b[4$p", "\x1b[20$p",
+	"\x1b[38:2::1:2:3m", "\x1b[38:5:9m", "\x1b[58:2::4:5:6m", "\x1b[58;5;7m", "\x1b[59m",
 }
 
 func TestScreenRandomInputInvariants(t *testing.T) {

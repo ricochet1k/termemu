@@ -369,8 +369,9 @@ func appendANSIEscapeFrom(dst []byte, prev, s Style) []byte {
 	modes := s.modeBits()
 	fgChanged := (s.fg &^ modeBitsMask) != (prev.fg &^ modeBitsMask)
 	bgChanged := (s.bg &^ modeBitsMask) != (prev.bg &^ modeBitsMask)
+	ulChanged := (s.underlineColor &^ modeBitsMask) != (prev.underlineColor &^ modeBitsMask)
 
-	if modes == prevModes && !fgChanged && !bgChanged {
+	if modes == prevModes && !fgChanged && !bgChanged && !ulChanged {
 		return dst
 	}
 
@@ -378,11 +379,13 @@ func appendANSIEscapeFrom(dst []byte, prev, s Style) []byte {
 		if modes == 0 {
 			fg := Color(s.fg &^ modeBitsMask)
 			bg := Color(s.bg &^ modeBitsMask)
+			ul := Color(s.underlineColor &^ modeBitsMask)
 			switch {
-			case fg.IsDefault() && bg.IsDefault():
+			case fg.IsDefault() && bg.IsDefault() && ul.IsDefault():
 				// Back to a plain default style: one SGR 0 is shortest.
 				return append(dst, ESC, '[', '0', 'm')
-			case (fgChanged && !fg.IsDefault()) || (bgChanged && !bg.IsDefault()):
+			case (fgChanged && !fg.IsDefault()) || (bgChanged && !bg.IsDefault()) ||
+				(ulChanged && !ul.IsDefault()):
 				// A reset re-establishes the new colors and drops the modes
 				// in one sequence, cheaper than per-mode resets + colors.
 				return appendSGRResetAndColors(dst, s)
@@ -391,7 +394,7 @@ func appendANSIEscapeFrom(dst []byte, prev, s Style) []byte {
 		dst = appendModeDelta(dst, prevModes, modes)
 	}
 
-	return appendColorChanges(dst, s, fgChanged, bgChanged)
+	return appendColorChanges(dst, s, fgChanged, bgChanged, ulChanged)
 }
 
 // appendModeDelta appends the individual SGR set/reset codes that turn
@@ -433,12 +436,15 @@ func appendSGRResetAndColors(dst []byte, s Style) []byte {
 	if bg := Color(s.bg &^ modeBitsMask); !bg.IsDefault() {
 		dst = appendANSIEscapeColor(dst, bg, '4')
 	}
+	if ul := Color(s.underlineColor &^ modeBitsMask); !ul.IsDefault() {
+		dst = appendANSIEscapeUnderlineColor(dst, ul)
+	}
 	return dst
 }
 
 // appendColorChanges appends the minimal color change from the current state
 // (prev) to s. A component returning to default emits SGR 39/49.
-func appendColorChanges(dst []byte, s Style, fgChanged, bgChanged bool) []byte {
+func appendColorChanges(dst []byte, s Style, fgChanged, bgChanged, ulChanged bool) []byte {
 	if fgChanged {
 		if fg := Color(s.fg &^ modeBitsMask); fg.IsDefault() {
 			dst = append(dst, ESC, '[', '3', '9', 'm')
@@ -453,6 +459,38 @@ func appendColorChanges(dst []byte, s Style, fgChanged, bgChanged bool) []byte {
 			dst = appendANSIEscapeColor(dst, bg, '4')
 		}
 	}
+	if ulChanged {
+		if ul := Color(s.underlineColor &^ modeBitsMask); ul.IsDefault() {
+			dst = appendSGRCode(dst, 59)
+		} else {
+			dst = appendANSIEscapeUnderlineColor(dst, ul)
+		}
+	}
+	return dst
+}
+
+// appendANSIEscapeUnderlineColor appends SGR 58 with the underline color.
+// Palette colors always use the 58;5;n form: there is no 30-37/90-97 style
+// shorthand for underline colors.
+func appendANSIEscapeUnderlineColor(dst []byte, c Color) []byte {
+	if c.IsRGB() {
+		r, g, b := c.RGB()
+		dst = append(dst, ESC, '[', '5', '8', ';', '2', ';')
+		dst = strconv.AppendInt(dst, int64(r), 10)
+		dst = append(dst, ';')
+		dst = strconv.AppendInt(dst, int64(g), 10)
+		dst = append(dst, ';')
+		dst = strconv.AppendInt(dst, int64(b), 10)
+		dst = append(dst, 'm')
+		return dst
+	}
+	idx := int(c.raw() & mask256color)
+	if c.IsBright() {
+		idx = 8 + int(c.raw()&maskBrightIdx)
+	}
+	dst = append(dst, ESC, '[', '5', '8', ';', '5', ';')
+	dst = strconv.AppendInt(dst, int64(idx), 10)
+	dst = append(dst, 'm')
 	return dst
 }
 

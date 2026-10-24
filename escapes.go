@@ -742,29 +742,62 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		}
 	}
 
-	// This cannot escape to the heap! Use append([]int(nil), params...) instead of params to make a copy if needed, such as to debug calls
+	// Parameters are separated by ';' and sub-parameters by ':' (ECMA-48).
+	// Every handler gets the primary value of each parameter; SGR also gets
+	// the colon-separated groups so it can parse 38:2::r:g:b style colors.
+	// This cannot escape to the heap: fixed arrays, no slices of slices.
 	var paramStore [8]int
+	var groupStore [8][8]int
+	var groupLens [8]int
 	paramCount := 0
 	param := 0
 	paramSet := false
-	sawSeparator := false
-	for b == ';' || (b >= '0' && b <= '9') {
-		if b == ';' {
-			value := 0
-			if paramSet || sawSeparator || paramCount > 0 {
-				value = param
-			}
-			if paramCount < len(paramStore) {
-				paramStore[paramCount] = value
-				paramCount++
-			}
+	clampGroup := func(idx int) {
+		if groupLens[idx] > len(groupStore[idx]) {
+			groupLens[idx] = len(groupStore[idx])
+		}
+	}
+	// pushSub stores the value being accumulated as the next sub-parameter of
+	// the current parameter.
+	pushSub := func() {
+		if paramCount >= len(paramStore) {
+			return
+		}
+		value := 0
+		if paramSet {
+			value = param
+		}
+		if groupLens[paramCount] < len(groupStore[paramCount]) {
+			groupStore[paramCount][groupLens[paramCount]] = value
+			groupLens[paramCount]++
+		}
+		if groupLens[paramCount] == 1 {
+			paramStore[paramCount] = value
+		}
+	}
+	// pushParam finishes the current parameter (its last sub-parameter
+	// included) and starts a new one.
+	pushParam := func() {
+		pushSub()
+		if paramCount < len(paramStore) {
+			paramCount++
+		}
+		param = 0
+		paramSet = false
+	}
+	for b == ';' || b == ':' || (b >= '0' && b <= '9') {
+		switch b {
+		case ';':
+			pushParam()
+		case ':':
+			pushSub()
+			// An empty sub-parameter is a real value (for example the omitted
+			// colorspace in 38:2::r:g:b), so move past it.
 			param = 0
 			paramSet = false
-			sawSeparator = true
-		} else {
+		default:
 			param = param*10 + int(b-'0')
 			paramSet = true
-			sawSeparator = false
 		}
 
 		b, err = r.ReadByte()
@@ -775,15 +808,11 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			return false
 		}
 	}
-	if paramSet || sawSeparator {
-		value := 0
-		if paramSet {
-			value = param
-		}
-		if paramCount < len(paramStore) {
-			paramStore[paramCount] = value
-			paramCount++
-		}
+	if paramSet || paramCount > 0 || groupLens[paramCount] > 0 {
+		pushParam()
+	}
+	for i := 0; i < paramCount; i++ {
+		clampGroup(i)
 	}
 
 	params := paramStore[:paramCount]
@@ -793,6 +822,8 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			return
 		}
 		paramStore[0] = v
+		groupStore[0][0] = v
+		groupLens[0] = 1
 		paramCount = 1
 		params = paramStore[:paramCount]
 	}
@@ -944,8 +975,9 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 			style := t.screen().Style()
 
-			for i := 0; i < len(params); i++ {
-				p := params[i]
+			for i := 0; i < paramCount; i++ {
+				g := groupStore[i][:groupLens[i]]
+				p := g[0]
 				switch {
 				case p == 0: // reset
 					style.Reset()
@@ -1016,30 +1048,47 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				case p == 49: // default color
 					_ = style.SetColor(ComponentBG, DefaultColor())
 
-				case p == 38 || p == 48: // extended set color
-					if i+2 < len(params) {
-						switch params[i+1] {
-						case 5: // 256 color
-							component := ComponentFG
-							if p == 48 {
-								component = ComponentBG
+				case p == 38 || p == 48 || p == 58: // extended set color
+					component := ComponentFG
+					switch p {
+					case 48:
+						component = ComponentBG
+					case 58:
+						component = ComponentUnderline
+					}
+					if len(g) >= 2 {
+						// Colon form: mode and components are sub-parameters.
+						switch g[1] {
+						case 5: // 38:5:n
+							if len(g) >= 3 {
+								_ = style.SetColor(component, Color256(g[2]&0xff))
 							}
+						case 2: // 38:2:r:g:b or 38:2:<colorspace>:r:g:b
+							if len(g) >= 5 {
+								// The colorspace id is optional; the color is
+								// always the last three components.
+								start := len(g) - 3
+								_ = style.SetColor(component, RGB(g[start], g[start+1], g[start+2]))
+							}
+						}
+					} else if i+2 < paramCount {
+						// Semicolon form consumes following parameters.
+						switch params[i+1] {
+						case 5: // 38;5;n
 							_ = style.SetColor(component, Color256(params[i+2]&0xff))
 							i += 2
-						case 2: // RGB Color
-							if i+4 < len(params) {
-								component := ComponentFG
-								if p == 48 {
-									component = ComponentBG
-								}
+						case 2: // 38;2;r;g;b
+							if i+4 < paramCount {
 								_ = style.SetColor(component, RGB(params[i+2], params[i+3], params[i+4]))
 								i += 4
 							}
 						default:
 							debugPrintln(debugTodo, "TODO: unhandled extended color: ", params[i+1])
-							continue
 						}
 					}
+
+				case p == 59: // default underline color
+					_ = style.SetColor(ComponentUnderline, DefaultColor())
 
 				case p >= 90 && p <= 97:
 					_ = style.SetColor(ComponentFG, BrightColor(int(p-90)))
