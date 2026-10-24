@@ -179,24 +179,30 @@ func (r *GraphemeReader) ReadPrintableBytes(maxWidth int) (string, int, bool, er
 			break
 		}
 
-		// Rune mode: an ASCII byte followed by another printable ASCII byte
-		// cannot be widened by a following emoji-presentation selector, so it
-		// is a plain one-cell token. Handling it here avoids the per-rune
-		// tokenizer (and uniseg) for the common case. The final ASCII byte of
-		// a run still goes through the tokenizer to check what follows.
+		// Rune mode: consume a whole printable-ASCII run minus its final
+		// byte in one step. A byte followed by another printable ASCII byte
+		// cannot be widened by an emoji-presentation selector, so every byte
+		// before the run's end is a plain one-cell token. The final byte and
+		// the width budget boundary still go through the tokenizer.
 		if r.mode == TextReadModeRune && !mergeRun && !r.forceMergeNext {
-			b := r.data[r.start]
-			if b >= 0x20 && b < 0x7f && r.start+1 < r.end {
-				next := r.data[r.start+1]
-				if next >= 0x20 && next < 0x7f {
-					if maxWidth > 0 && widthUsed+1 > maxWidth && widthUsed > 0 {
-						break
-					}
-					r.start++
-					r.state = 0
-					widthUsed++
-					continue
+			limit := r.end - r.start
+			if maxWidth > 0 && maxWidth-widthUsed < limit {
+				limit = maxWidth - widthUsed
+			}
+			k := 0
+			for k < limit {
+				b := r.data[r.start+k]
+				if b < 0x20 || b >= 0x7f {
+					break
 				}
+				k++
+			}
+			if k > 1 {
+				consume := k - 1
+				r.start += consume
+				r.state = 0
+				widthUsed += consume
+				continue
 			}
 		}
 

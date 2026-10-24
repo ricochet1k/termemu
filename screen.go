@@ -1060,6 +1060,21 @@ func byteIndexForCell(text []byte, cellOffset int, mode TextReadMode) (int, int)
 	if cellOffset <= 0 || len(text) == 0 {
 		return 0, 0
 	}
+	// In rune mode ASCII text has one byte (and one cell) per rune, so the
+	// cell boundary is the byte boundary. This is the common case when
+	// overwriting an ASCII run in place.
+	if mode == TextReadModeRune && cellOffset <= len(text) {
+		ascii := true
+		for _, b := range text {
+			if b >= utf8.RuneSelf {
+				ascii = false
+				break
+			}
+		}
+		if ascii {
+			return cellOffset, cellOffset
+		}
+	}
 	idx := 0
 	width := 0
 	state := -1
