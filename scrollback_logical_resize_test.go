@@ -358,3 +358,56 @@ func TestResize_AltShrinkNoScrollback(t *testing.T) {
 		t.Errorf("alt-screen shrink added %d scrollback rows, want 0", got-before)
 	}
 }
+
+func TestScrollback_LogicalLine_OldestWrappedStops(t *testing.T) {
+	term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeGrapheme)
+	WithScrollback(8)(term)
+	if err := term.Resize(10, 3); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	term.Scrollback().Clear()
+
+	add := func(text string, wrapped bool) {
+		line := spanLineFromText(text, TextReadModeGrapheme, NewStyle())
+		term.withLock(func() { term.addScrollRow(line.spans, line.width, wrapped) })
+	}
+	add("old", true)
+	add("mid", false)
+	add("new", false)
+
+	base, _ := term.Scrollback().Range()
+	rows := term.Scrollback().LogicalLine(base)
+	if got := logicalText(rows); got != "old" {
+		t.Fatalf("LogicalLine(oldest) = %q, want %q (must not wrap to newest)", got, "old")
+	}
+}
+
+func TestScrollback_LogicalLine_WideClusterReflowKeepsRowsWhole(t *testing.T) {
+	term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeGrapheme)
+	WithScrollback(8)(term)
+	if err := term.Resize(3, 2); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	term.Scrollback().Clear()
+
+	line := spanLineFromText("世界", TextReadModeGrapheme, NewStyle())
+	term.withLock(func() { term.addScrollRow(line.spans, line.width, false) })
+
+	base, _ := term.Scrollback().Range()
+	rows := term.Scrollback().LogicalLine(base)
+	if got := logicalText(rows); got != "世界" {
+		t.Fatalf("reflown text = %q, want %q", got, "世界")
+	}
+	for i, row := range rows {
+		sum := 0
+		for _, sp := range row.Spans {
+			sum += sp.Width
+		}
+		if sum != row.Width {
+			t.Fatalf("row %d width = %d, span sum = %d", i, row.Width, sum)
+		}
+		if row.Width > 3 {
+			t.Fatalf("row %d width = %d exceeds target width", i, row.Width)
+		}
+	}
+}

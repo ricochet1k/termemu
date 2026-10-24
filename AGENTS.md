@@ -405,9 +405,13 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   `ScrollID` that stays stable as rows are added and evicted; `Range()` reports
   the valid IDs.
 - `LogicalLine(id)` walks backward/forward over `wrapped` rows to rebuild the
-  logical line and reflows it at the terminal's current width. Trailing blank
-  padding on the final physical row is dropped before reflow, so a 20-column
-  line of 50 cells returns rows of width 20/20/10. Each returned row's `ID` is
+  logical line and reflows it at the terminal's current width. The walk stops
+  at the oldest stored row (it must not wrap around to the newest row) and
+  never visits the ring twice. Reflow never splits a wide cluster across rows:
+  a row may be shorter than the terminal width when the next cluster does not
+  fit. Trailing blank padding on the final physical row is dropped before
+  reflow, so a 20-column line of 50 cells returns rows of width 20/20/10. Each
+  returned row's `ID` is
   the stored raw row containing its first cell: reflown rows that split one
   stored row share its ID, rows straddling a boundary report the row holding
   the first cell, and IDs are non-zero and non-decreasing but may repeat
@@ -533,6 +537,10 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
   reads must reach the same semantic screen state), `FuzzReplaceRangeInvariants`
   (span width/UTF-8 invariants under arbitrary text and offsets), and
   `FuzzLineEquivalentPacking` (repacking cells must not change `Line.Equivalent`).
+- `fuzz_more_test.go` adds `FuzzTerminalResizeRestore` (arbitrary content
+  through resize + different-size restore), `FuzzScrollbackLogicalLine`
+  (logical-line walk/reflow with random rows, wrap flags, and widths), and
+  `FuzzHandoffTargetSize` (Handoff restored at a different target size).
 - Corpus seeds under `testdata/fuzz/<Target>/` are regression tests; keep them
   when a fuzz failure is fixed.
 - Failing fuzz inputs are kept under `testdata/fuzz/FuzzTerminalInput/` and run

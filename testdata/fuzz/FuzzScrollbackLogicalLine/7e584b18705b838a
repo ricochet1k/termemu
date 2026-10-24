@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("世界\xcc")
+byte('\x02')
+byte('\x0f')
+byte('\x02')
+uint16(3)

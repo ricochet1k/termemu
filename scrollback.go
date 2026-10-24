@@ -279,6 +279,11 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 	// moving back while the current row is a continuation.
 	start := idx
 	for steps := 0; steps < n-1 && s.t.scrollRows[start].wrapped; steps++ {
+		if start == s.t.scrollBaseIdx {
+			// The oldest stored row starts the available line; its actual
+			// predecessor has been evicted.
+			break
+		}
 		prevIdx := (start - 1 + n) % n
 		if s.t.scrollRows[prevIdx].id == 0 {
 			break
@@ -297,7 +302,7 @@ func (s *Scrollback) logicalLineLocked(id ScrollID) []Row {
 		}
 		rawRows = append(rawRows, r)
 		nextIdx := (i + 1) % n
-		if nextIdx == start || steps >= n-1 {
+		if nextIdx == start || nextIdx == s.t.scrollBaseIdx || steps >= n-1 {
 			break // wrapped all the way around the ring
 		}
 		next := s.t.scrollRows[nextIdx]
@@ -416,89 +421,105 @@ func trimTrailingBlankSpans(spans []Span) ([]Span, int) {
 }
 
 // reflowRows splits a contiguous span list into physical rows at targetWidth.
-// The last row has Wrapped=false; all others have Wrapped=true.
+// Wide clusters are never split across rows: a row may be shorter than
+// targetWidth when the next cluster does not fit. The last row has
+// Wrapped=false; all others have Wrapped=true.
 func reflowRows(spans []Span, totalWidth, targetWidth int) []Row {
 	if targetWidth <= 0 || totalWidth <= 0 {
 		return nil
 	}
 
-	if targetWidth >= totalWidth {
-		// Fits in one row.
-		return []Row{{
-			Spans:   spans,
-			Width:   totalWidth,
-			Wrapped: false,
-		}}
-	}
-
 	var rows []Row
-	pos := 0
-	si := 0 // span index
-	so := 0 // cell offset within current span
-
-	// Advance past zero-width leading spans.
-	for si < len(spans) && spans[si].Width <= 0 {
-		si++
-	}
-
-	for pos < totalWidth {
-		remaining := targetWidth
-		if pos+remaining > totalWidth {
-			remaining = totalWidth - pos
+	si, so := 0, 0
+	remaining := totalWidth
+	for remaining > 0 {
+		want := targetWidth
+		if remaining < want {
+			want = remaining
 		}
-
 		var rowSpans []Span
-		need := remaining
-
-		for need > 0 && si < len(spans) {
+		used := 0
+		for used < want && si < len(spans) {
 			sp := spans[si]
+			if sp.Width <= 0 {
+				// Zero-width content belongs before the next cell.
+				rowSpans = append(rowSpans, sp)
+				si++
+				continue
+			}
 			avail := sp.Width - so
 			if avail <= 0 {
 				si++
 				so = 0
 				continue
 			}
-			take := avail
-			if take > need {
-				take = need
-			}
-
-			if so == 0 && take == sp.Width {
-				// Can take the whole span.
-				rowSpans = append(rowSpans, sp)
-			} else {
-				// Need a sub-span. splitSpan returns (left, right, _).
+			need := want - used
+			if avail <= need {
 				if so == 0 {
-					// Split at the start.
-					left, _, _ := splitSpan(sp, take, TextReadModeRune)
-					rowSpans = append(rowSpans, left)
+					rowSpans = append(rowSpans, sp)
 				} else {
-					// Skip 'so' cells, then split at 'take'.
-					_, afterSkip, _ := splitSpan(sp, so, TextReadModeRune)
-					if take < afterSkip.Width {
-						part, _, _ := splitSpan(afterSkip, take, TextReadModeRune)
+					_, part, wide := splitSpan(sp, so, TextReadModeRune)
+					if wide.Width > 0 {
+						// Should not happen: so is kept on a cluster boundary.
+						rowSpans = append(rowSpans, wide)
+					} else if part.Width > 0 {
 						rowSpans = append(rowSpans, part)
-					} else {
-						rowSpans = append(rowSpans, afterSkip)
 					}
 				}
+				used += avail
+				remaining -= avail
+				si++
+				so = 0
+				continue
 			}
 
-			need -= take
-			so += take
-			if so >= sp.Width {
-				so = 0
-				si++
+			// Only part of sp fits in this row.
+			var part Span
+			if so == 0 {
+				left, _, wide := splitSpan(sp, need, TextReadModeRune)
+				if wide.Width > 0 {
+					if used == 0 {
+						// The cluster is wider than a whole target row (e.g. a
+						// two-cell emoji on a one-column terminal). Keep it whole
+						// rather than splitting or dropping it.
+						rowSpans = append(rowSpans, sp)
+						used = sp.Width
+						remaining -= sp.Width
+						si++
+						so = 0
+					}
+					break
+				}
+				part = left
+			} else {
+				_, afterSkip, wide := splitSpan(sp, so, TextReadModeRune)
+				if wide.Width > 0 {
+					break
+				}
+				var widePart Span
+				part, _, widePart = splitSpan(afterSkip, need, TextReadModeRune)
+				if widePart.Width > 0 {
+					break
+				}
 			}
+			if part.Width <= 0 {
+				break
+			}
+			rowSpans = append(rowSpans, part)
+			used += part.Width
+			remaining -= part.Width
+			so += part.Width
 		}
 
-		wrapped := remaining >= targetWidth && pos+targetWidth < totalWidth
+		if used == 0 {
+			// No progress is possible (defensive: malformed span widths).
+			break
+		}
 		rows = append(rows, Row{
 			Spans:   rowSpans,
-			Width:   remaining,
-			Wrapped: wrapped,
+			Width:   used,
+			Wrapped: remaining > 0,
 		})
-		pos += remaining
 	}
 	if len(rows) > 0 {
 		rows[len(rows)-1].Wrapped = false
