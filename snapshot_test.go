@@ -17,6 +17,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	term.mustHandleCommand(t, "7") // DECSC
 	term.mustHandleCommand(t, "[3;10H")
 	term.mustHandleCommand(t, "[3;11r")
+	term.mustHandleCommand(t, "[3;10H")
 	term.mustHandleCommand(t, "[?7l")
 	term.mustHandleCommand(t, "[?25h")
 	term.mustHandleCommand(t, "[?2004h")

@@ -558,6 +558,19 @@ func (t *terminal) handleDECSTR() {
 	t.setViewFlag(VFShowCursor, true)
 }
 
+// lineScrollRegion returns the row range affected by IL/DL. Inside the
+// scroll margins the region ends at the bottom margin; outside it (above or
+// below the margins) xterm/tmux scroll from the cursor row to the bottom of
+// the screen.
+func lineScrollRegion(t *terminal) (y1, y2 int) {
+	y1 = t.screen().CursorPos().Y
+	y2 = t.screen().BottomMargin()
+	if y1 < t.screen().TopMargin() || y1 > y2 {
+		y2 = t.screen().Size().Y - 1
+	}
+	return y1, y2
+}
+
 func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 	b, err := r.ReadByte()
@@ -941,14 +954,13 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					X2: cursorPos.X + 1,
 					Y2: cursorPos.Y + 1,
 				}, CRClear)
-			case params[0] == 2: // Erase screen and home cursor
+			case params[0] == 2: // Erase entire screen (cursor does not move)
 				t.screen().eraseRegion(Region{
 					X:  0,
 					Y:  0,
 					X2: t.screen().Size().X,
 					Y2: t.screen().Size().Y,
 				}, CRClear)
-				t.screen().setCursorPos(0, 0)
 			case params[0] == 3: // Erase scrollback (xterm ED extension).
 				// Clears only the scrollback buffer; the visible screen
 				// and cursor are left untouched. Lock is already held
@@ -962,11 +974,13 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 		case 'L': // Insert lines, scroll down
 			defaultParam(1)
-			t.screen().scroll(t.screen().CursorPos().Y, t.screen().BottomMargin(), params[0])
+			y1, y2 := lineScrollRegion(t)
+			t.screen().scroll(y1, y2, params[0])
 
 		case 'M': // Delete lines, scroll up
 			defaultParam(1)
-			t.screen().scroll(t.screen().CursorPos().Y, t.screen().BottomMargin(), -params[0])
+			y1, y2 := lineScrollRegion(t)
+			t.screen().scroll(y1, y2, -params[0])
 
 		case 'S': // Scroll up
 			defaultParam(1)

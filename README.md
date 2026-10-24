@@ -497,8 +497,12 @@ capture, and compares the screen and cursor. It needs `tmux` installed:
 ```bash
 scripts/run_tmux_diff.sh
 # or
-TERMEMU_TMUX_DIFF=1 go test -run '^TestDifferentialTmux$' -v .
+TERMEMU_TMUX_DIFF=1 go test -run '^TestDifferentialTmux' -v .
 ```
+
+The curated corpus compares styled screens and cursor positions; a seeded
+random corpus compares visible text and cursor positions. The harness normalizes
+both paths through tmux, including tab expansion and blank-line attributes.
 
 ## License
 

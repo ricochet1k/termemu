@@ -324,6 +324,12 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   truncation is padded back), clamps the cursor/saved cursor and scroll margins
   into the new bounds. `scroll` clamps `|dy|` to the region height and ignores
   invalid margins (`top > bottom`).
+- DECSC/DECRC save/restore cursor, pending wrap, and the complete `Style`
+  (`ScreenState.SavedStyle`). `CSI r` (DECSTBM) homes the cursor; `CSI 2 J`
+  erases without moving it. IL/DL use the cursor-to-bottom-margin region when
+  the cursor is inside the margins and cursor-to-screen-bottom when it is above
+  or below them (xterm/tmux behavior). Vertical margin scrolling only applies
+  to actual vertical cursor movement, so CR cannot scroll a region.
 - Handles complex operations: scrolling, wide character overlaps, grapheme cluster splitting
 - Screen size, cursor position, scroll margins, auto-wrap behavior. Auto-wrap
   (DECAWM) defaults to on, as in xterm. Writes use deferred wrap: filling the
@@ -478,6 +484,9 @@ Terminal maintains two screens:
 - `mainScreen`: Normal screen buffer
 - `altScreen`: Alternate screen (used by vim, less, etc.)
 - `onAltScreen` flag controls which is active
+- Switching screens carries the current cursor, pending wrap, and style over to
+  the other screen (xterm: the switch itself moves nothing). Each screen keeps
+  its own saved cursor for DECSC/DECRC.
 - Switching screens triggers `CRScreenSwitch` change reason
 
 ### Frontend Interface
@@ -558,7 +567,10 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
 - `tmux_diff_test.go` is an opt-in differential test (`TERMEMU_TMUX_DIFF=1`,
   or `scripts/run_tmux_diff.sh`). It starts a private tmux server, compares
   the captured screen and cursor against termemu, and normalizes termemu's
-  output through the same tmux. Add validated sequences to
+  output through the same tmux. `TestDifferentialTmux` checks curated
+  sequences including styles; `TestDifferentialTmuxRandom` runs seeded random
+  sequences and compares visible text + cursor (styles on blank cells are
+  intentionally not compared there). Add validated sequences to
   `tmuxDiffSequences`; avoid version-sensitive features (OSC 8 capture,
   images) unless the harness is extended.
 - Failing fuzz inputs are kept under `testdata/fuzz/FuzzTerminalInput/` and run

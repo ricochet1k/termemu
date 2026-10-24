@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // tmuxDiffSequences are validated terminal sequences for differential testing
@@ -81,32 +83,94 @@ func TestDifferentialTmux(t *testing.T) {
 	for _, tc := range tmuxDiffSequences {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			wantScreen, wantCursor := tmuxRender(t, tmuxPath, sock, []byte(tc.seq), width, height)
-
-			term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeGrapheme)
-			if err := term.Resize(width, height); err != nil {
-				t.Fatalf("Resize: %v", err)
-			}
-			if err := term.testFeedTerminalInputFromBackend([]byte(tc.seq), TextReadModeGrapheme); err != nil && !errors.Is(err, io.EOF) {
-				t.Fatalf("feed: %v", err)
-			}
-			gotCursor := term.CursorPos()
-			var lines []string
-			term.View(func(v LockedView) {
-				for y := 0; y < height; y++ {
-					lines = append(lines, v.ANSILine(y))
-				}
-			})
-			gotScreen, _ := tmuxRender(t, tmuxPath, sock, []byte(strings.Join(lines, "\r\n")), width, height)
-
-			if gotScreen != wantScreen {
-				reportTmuxScreenDiff(t, wantScreen, gotScreen)
-			}
-			if gotCursor != wantCursor {
-				t.Errorf("cursor = %+v, tmux = %+v", gotCursor, wantCursor)
-			}
+			runDifferentialCase(t, tmuxPath, sock, tc.seq, width, height, true)
 		})
 	}
+}
+
+// TestDifferentialTmuxRandom generates deterministic random sequences from
+// the same feature set as the curated corpus. Run it with the same
+// TERMEMU_TMUX_DIFF=1 opt-in.
+func TestDifferentialTmuxRandom(t *testing.T) {
+	if os.Getenv("TERMEMU_TMUX_DIFF") == "" {
+		t.Skip("set TERMEMU_TMUX_DIFF=1 to run the tmux differential test")
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not installed")
+	}
+	sock := startTmuxDiffServer(t, tmuxPath)
+
+	const width, height = 80, 24
+	for seed := int64(1); seed <= 12; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		seq := randomTerminalSequence(rng, 8+rng.Intn(18))
+		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
+			runDifferentialCase(t, tmuxPath, sock, seq, width, height, false)
+		})
+	}
+}
+
+func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height int, strictStyle bool) {
+	t.Helper()
+	t.Logf("sequence: %q", seq)
+	wantScreen, wantCursor := tmuxRender(t, tmuxPath, sock, []byte(seq), width, height)
+
+	term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeGrapheme)
+	if err := term.Resize(width, height); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	if err := term.testFeedTerminalInputFromBackend([]byte(seq), TextReadModeGrapheme); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("feed: %v", err)
+	}
+	gotCursor := term.CursorPos()
+	var lines []string
+	term.View(func(v LockedView) {
+		for y := 0; y < height; y++ {
+			lines = append(lines, v.ANSILine(y))
+		}
+	})
+	gotScreen, _ := tmuxRender(t, tmuxPath, sock, []byte(strings.Join(lines, "\n")), width, height)
+	wantScreen = normalizeTmuxCapture(wantScreen)
+	gotScreen = normalizeTmuxCapture(gotScreen)
+
+	if strictStyle {
+		if gotScreen != wantScreen {
+			reportTmuxScreenDiff(t, wantScreen, gotScreen)
+		}
+	} else {
+		// Random sequences often leave attributes on blank cells, which
+		// capture-pane represents differently from termemu's ANSILine output.
+		// The curated corpus asserts styles; randomized cases compare the
+		// visible text and cursor.
+		wantText, gotText := plainCapture(wantScreen), plainCapture(gotScreen)
+		if gotText != wantText {
+			reportTmuxScreenDiff(t, wantText, gotText)
+		}
+	}
+	if gotCursor != wantCursor {
+		t.Errorf("cursor = %+v, tmux = %+v", gotCursor, wantCursor)
+	}
+}
+
+var tmuxRandomTokens = []string{
+	"abc", "Hello", "世界", "🐹", "e\u0301", "1\ufe0f\u20e3", "👍🏽",
+	"\r", "\n", "\t", "\b",
+	"\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1b[3;7H", "\x1b[G", "\x1b[3d",
+	"\x1b[K", "\x1b[1K", "\x1b[2K", "\x1b[J", "\x1b[1J", "\x1b[2J",
+	"\x1b[L", "\x1b[M", "\x1b[S", "\x1b[T", "\x1b[P", "\x1b[X",
+	"\x1b[31m", "\x1b[1m", "\x1b[4m", "\x1b[7m", "\x1b[38;5;123m", "\x1b[48;2;1;2;3m", "\x1b[0m",
+	"\x1b[?7l", "\x1b[?7h", "\x1b[?25l", "\x1b[?25h",
+	"\x1b[s", "\x1b[u", "\x1b7", "\x1b8",
+	"\x1b[2;4r", "\x1b[r", "\x1b[?1049h", "\x1b[?1049l",
+}
+
+func randomTerminalSequence(rng *rand.Rand, tokens int) string {
+	var b strings.Builder
+	for i := 0; i < tokens; i++ {
+		b.WriteString(tmuxRandomTokens[rng.Intn(len(tmuxRandomTokens))])
+	}
+	return b.String()
 }
 
 func startTmuxDiffServer(t *testing.T, tmuxPath string) string {
@@ -136,7 +200,7 @@ func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height 
 	}
 
 	session := fmt.Sprintf("diff-%d", tmuxDiffSessionCounter.Add(1))
-	script := fmt.Sprintf("stty -opost 2>/dev/null; cat %s; : > %s; exec sleep 3600",
+	script := fmt.Sprintf("cat %s; : > %s; exec sleep 3600",
 		shellQuote(dataPath), shellQuote(donePath))
 	tmuxCommand(t, tmuxPath, sock, "new-session", "-d", "-s", session,
 		"-x", strconv.Itoa(width), "-y", strconv.Itoa(height), "sh -c "+shellQuote(script))
@@ -193,19 +257,109 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// normalizeTmuxCapture expands the tab cells that capture-pane preserves for
+// literal tabs, then drops trailing blanks the same way capture-pane would.
+// ANSI SGR sequences are copied without advancing the column.
+func normalizeTmuxCapture(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		var b strings.Builder
+		col := 0
+		for j := 0; j < len(line); {
+			if line[j] == 0x1b {
+				start := j
+				j++
+				if j < len(line) && line[j] == '[' {
+					j++
+					for j < len(line) && (line[j] < 0x40 || line[j] > 0x7e) {
+						j++
+					}
+					if j < len(line) {
+						j++
+					}
+				} else if j < len(line) {
+					j++
+				}
+				b.WriteString(line[start:j])
+				continue
+			}
+			if line[j] == '\t' {
+				n := 8 - col%8
+				b.WriteString(strings.Repeat(" ", n))
+				col += n
+				j++
+				continue
+			}
+			r, size := utf8.DecodeRuneInString(line[j:])
+			b.WriteString(line[j : j+size])
+			col += cellWidth(r)
+			j += size
+		}
+		line = strings.TrimRight(b.String(), " ")
+		// capture-pane omits attributes on entirely blank lines; termemu's
+		// ANSILine can emit SGR for a blank line. Compare visible content and
+		// ignore style-only blank lines.
+		if strings.TrimSpace(stripANSI(line)) == "" {
+			line = ""
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// plainCapture drops SGR and trailing blanks per line, leaving the visible
+// text used by randomized comparisons.
+func plainCapture(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(stripANSI(line), " ")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != 0x1b {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		i++
+		if i < len(s) && s[i] == '[' {
+			i++
+			for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+		} else if i < len(s) {
+			i++
+		}
+	}
+	return b.String()
+}
+
 func reportTmuxScreenDiff(t *testing.T, want, got string) {
 	t.Helper()
 	wantLines := strings.Split(want, "\n")
 	gotLines := strings.Split(got, "\n")
+	diffs := 0
 	for i := 0; i < len(wantLines) && i < len(gotLines); i++ {
 		if wantLines[i] != gotLines[i] {
 			t.Errorf("screen line %d differs\n tmux:    %q\n termemu: %q", i, wantLines[i], gotLines[i])
-			return
+			diffs++
+			if diffs >= 8 {
+				return
+			}
 		}
 	}
 	if len(wantLines) != len(gotLines) {
 		t.Errorf("screen line count differs: tmux %d, termemu %d", len(wantLines), len(gotLines))
 		return
 	}
-	t.Errorf("screens differ but no line difference found")
+	if diffs == 0 {
+		t.Errorf("screens differ but no line difference found")
+	}
 }

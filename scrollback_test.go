@@ -538,7 +538,7 @@ func TestScrollback_CSI3J(t *testing.T) {
 		}
 	})
 
-	// CSI 2 J still erases the visible screen and homes the cursor.
+	// CSI 2 J still erases the visible screen (the cursor is unchanged).
 	if err := t1.testFeedTerminalInputFromBackend([]byte("\x1b[2J"), TextReadModeRune); err != nil {
 		t.Fatalf("feed CSI 2 J: %v", err)
 	}

@@ -121,18 +121,19 @@ func TestESC_AltScreen_1047_NoCursorSaveRestore(t *testing.T) {
 
 	t1.screen().setCursorPos(10, 5)
 	t1.mustHandleCommand(t, "[?1047h")
-	// Alt cursor moves independently; main cursor must be untouched on exit
-	// (no save/restore involved).
+	// The switch itself moves nothing: moving on the alt screen changes the
+	// shared cursor, and 1047 has no save/restore to undo it.
 	t1.screen().setCursorPos(3, 3)
 	t1.mustHandleCommand(t, "[?1047l")
-	if pos := cursorPos(t1); pos.X != 10 || pos.Y != 5 {
-		t.Fatalf("main cursor = (%d,%d), want undisturbed (10,5)", pos.X, pos.Y)
+	if pos := cursorPos(t1); pos.X != 3 || pos.Y != 3 {
+		t.Fatalf("main cursor = (%d,%d), want carried over (3,3)", pos.X, pos.Y)
 	}
 
-	// Re-enter: alt cursor preserved (no clear, no home).
+	// Re-enter: the current cursor carries over again.
+	t1.screen().setCursorPos(10, 5)
 	t1.mustHandleCommand(t, "[?1047h")
-	if pos := cursorPos(t1); pos.X != 3 || pos.Y != 3 {
-		t.Fatalf("alt cursor = (%d,%d), want preserved (3,3)", pos.X, pos.Y)
+	if pos := cursorPos(t1); pos.X != 10 || pos.Y != 5 {
+		t.Fatalf("alt cursor = (%d,%d), want current main cursor (10,5)", pos.X, pos.Y)
 	}
 }
 
@@ -243,6 +244,22 @@ func TestESC_DECSC_DECRC(t *testing.T) {
 	}
 	if got := lineBlank(t, t1, 0); strings.TrimSpace(got) != "" {
 		t.Fatalf("ESC 7/8 printed to screen: %q", got)
+	}
+}
+
+func TestESC_DECSC_DECRC_RestoresStyle(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	t1.mustHandleCommand(t, "[31;4m")
+	feedESC(t, t1, "\x1b7") // DECSC save cursor + attributes
+	t1.mustHandleCommand(t, "[0m")
+	feedESC(t, t1, "\x1b8") // DECRC restore
+	style := t1.screen().Style()
+	if fg, _ := style.GetColor(ComponentFG); fg != Color256(1) {
+		t.Fatalf("fg after DECRC = %v, want red", fg)
+	}
+	if !style.TestMode(ModeUnderline) {
+		t.Fatal("underline not restored by DECRC")
 	}
 }
 

@@ -9,4 +9,4 @@ if ! command -v tmux >/dev/null 2>&1; then
     exit 1
 fi
 
-TERMEMU_TMUX_DIFF=1 go test -run '^TestDifferentialTmux$' -v "$@" .
+TERMEMU_TMUX_DIFF=1 go test -run '^TestDifferentialTmux' -v "$@" .

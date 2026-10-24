@@ -38,6 +38,9 @@ type screen interface {
 	shiftCursorUp(n int)
 	saveCursorPos()
 	restoreCursorPos()
+	// copyTransientState copies the shared cursor/style state across a screen
+	// switch without emitting callbacks.
+	copyTransientState(from screen)
 	decaln()
 	printScreen()
 	setScrollCapture(func(lines []spanLine, wrapped []bool))
@@ -79,6 +82,7 @@ type spanScreen struct {
 	pendingWrap      bool // cursor sits on the last column; the next write wraps first
 	savedCursorPos   Pos
 	savedPendingWrap bool
+	savedStyle       Style
 
 	topMargin, bottomMargin int
 
@@ -105,10 +109,11 @@ func newScreen(f Frontend) screen {
 
 func newSpanScreen(f Frontend) *spanScreen {
 	s := &spanScreen{
-		frontend: f,
-		textMode: TextReadModeGrapheme,
-		style:    NewStyle(),
-		autoWrap: true, // DECAWM (CSI ? 7) defaults to on, as in xterm
+		frontend:   f,
+		textMode:   TextReadModeGrapheme,
+		style:      NewStyle(),
+		savedStyle: NewStyle(),
+		autoWrap:   true, // DECAWM (CSI ? 7) defaults to on, as in xterm
 	}
 	s.setSize(80, 14)
 	s.bottomMargin = s.size.Y - 1
@@ -659,7 +664,9 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 	}
 
 	s.cursorPos.Y += dy
-	if scroll {
+	if scroll && dy != 0 {
+		// Margins only affect vertical movement. A carriage return at a row
+		// outside the scroll region must not scroll it.
 		if s.cursorPos.Y < s.topMargin {
 			s.scroll(s.topMargin, s.bottomMargin, s.topMargin-s.cursorPos.Y)
 			s.cursorPos.Y = s.topMargin
@@ -692,12 +699,26 @@ func (s *spanScreen) decaln() {
 func (s *spanScreen) saveCursorPos() {
 	s.savedCursorPos = s.cursorPos
 	s.savedPendingWrap = s.pendingWrap
+	s.savedStyle = s.style
+}
+
+func (s *spanScreen) copyTransientState(from screen) {
+	if other, ok := from.(*spanScreen); ok {
+		s.cursorPos = other.cursorPos
+		s.pendingWrap = other.pendingWrap
+		s.style = other.style
+		return
+	}
+	s.cursorPos = from.CursorPos()
+	s.style = from.Style()
 }
 
 func (s *spanScreen) restoreCursorPos() {
 	s.cursorPos = s.savedCursorPos
 	s.pendingWrap = s.savedPendingWrap
+	s.style = s.savedStyle
 	s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
+	s.frontend.StyleChanged(s.view, s.style)
 }
 
 func (s *spanScreen) setScrollCapture(cb func(lines []spanLine, wrapped []bool)) {
@@ -731,6 +752,7 @@ func (s *spanScreen) snapshotState() ScreenState {
 		PendingWrap:      s.pendingWrap,
 		SavedCursor:      s.savedCursorPos,
 		SavedPendingWrap: s.savedPendingWrap,
+		SavedStyle:       s.savedStyle,
 		Style:            s.style,
 		TopMargin:        s.topMargin,
 		BottomMargin:     s.bottomMargin,
@@ -769,6 +791,7 @@ func (s *spanScreen) restoreState(st ScreenState) {
 	s.pendingWrap = st.PendingWrap
 	s.savedCursorPos = clampPos(st.SavedCursor, w, h)
 	s.savedPendingWrap = st.SavedPendingWrap
+	s.savedStyle = st.SavedStyle
 	s.style = st.Style
 	s.topMargin = clamp(st.TopMargin, 0, h-1)
 	s.bottomMargin = clamp(st.BottomMargin, s.topMargin, h-1)

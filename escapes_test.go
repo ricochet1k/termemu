@@ -1095,8 +1095,8 @@ func TestCSI_EraseDisplay(t *testing.T) {
 		{"0J erases to bottom", "[0J", 5, 5, false, 0, 0},
 		// 1J - erase to top
 		{"1J erases to top", "[1J", 5, 5, false, 0, 0},
-		// 2J - erase screen and home cursor
-		{"2J erases screen and homes cursor", "[2J", 5, 5, true, 0, 0},
+		// 2J - erase screen, cursor is unchanged
+		{"2J erases screen without moving cursor", "[2J", 5, 5, true, 5, 5},
 	}
 
 	for _, tt := range tests {
@@ -1219,6 +1219,7 @@ func TestCSI_ScrollMargins(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 
+			t1.screen().setCursorPos(5, 5)
 			t1.mustHandleCommand(t, tt.seq)
 
 			if got := t1.screen().TopMargin(); got != tt.wantTop {
@@ -1226,6 +1227,9 @@ func TestCSI_ScrollMargins(t *testing.T) {
 			}
 			if got := t1.screen().BottomMargin(); got != tt.wantBottom {
 				t.Errorf("BottomMargin() = %d, want %d", got, tt.wantBottom)
+			}
+			if pos := t1.CursorPos(); pos.X != 0 || pos.Y != 0 {
+				t.Errorf("cursor = %+v, want homed (0,0) after DECSTBM", pos)
 			}
 		})
 	}

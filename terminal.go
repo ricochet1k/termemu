@@ -105,6 +105,7 @@ type ScreenState struct {
 	PendingWrap      bool // next printable write wraps before writing
 	SavedCursor      Pos
 	SavedPendingWrap bool // pending-wrap state saved by DECSC
+	SavedStyle       Style
 	Style            Style
 	TopMargin        int
 	BottomMargin     int
@@ -935,8 +936,13 @@ func (t *terminal) setAltScreen(wantAlt bool) {
 	if t.onAltScreen == wantAlt {
 		return
 	}
+	from := t.screen()
 	t.onAltScreen = wantAlt
-	size := t.screen().Size()
+	to := t.screen()
+	// xterm's screen switch moves nothing: the cursor position and graphic
+	// rendition carry over to the other screen. Saved cursors stay per-screen.
+	to.copyTransientState(from)
+	size := to.Size()
 	t.frontend.RegionChanged(LockedView{t: t}, Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRScreenSwitch)
 }
 
@@ -949,9 +955,11 @@ func (t *terminal) enterAltScreen(clear bool) {
 		return
 	}
 	if clear {
+		// Clear the alt screen with the current cursor/style; the switch
+		// itself carries them over below.
+		t.altScreen.copyTransientState(t.screen())
 		size := t.altScreen.Size()
 		t.altScreen.eraseRegion(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRClear)
-		t.altScreen.setCursorPos(0, 0)
 	}
 	t.setAltScreen(true)
 }
