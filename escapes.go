@@ -688,15 +688,55 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		case 'A': // Move cursor up
 			defaultParam(1)
 			t.screen().moveCursor(0, -params[0], false, false)
-		case 'B': // Move cursor down
+		case 'B': // Move cursor down (bounded by the screen; does not scroll)
 			defaultParam(1)
-			t.screen().moveCursor(0, params[0], false, true)
+			t.screen().moveCursor(0, params[0], false, false)
 		case 'C': // Move cursor forward
 			defaultParam(1)
 			t.screen().moveCursor(params[0], 0, false, false)
 		case 'D': // Move cursor backward
 			defaultParam(1)
 			t.screen().moveCursor(-params[0], 0, false, false)
+
+		case 'E': // Cursor Next Line
+			defaultParam(1)
+			t.screen().moveCursor(0, params[0], false, false)
+			pos := t.screen().CursorPos()
+			t.screen().setCursorPos(0, pos.Y)
+		case 'F': // Cursor Previous Line
+			defaultParam(1)
+			t.screen().moveCursor(0, -params[0], false, false)
+			pos := t.screen().CursorPos()
+			t.screen().setCursorPos(0, pos.Y)
+		case 'a': // Cursor Forward (HPR)
+			defaultParam(1)
+			t.screen().moveCursor(params[0], 0, false, false)
+		case 'e': // Cursor Down (VPR)
+			defaultParam(1)
+			t.screen().moveCursor(0, params[0], false, false)
+		case 'I': // Cursor Forward Tabulation
+			defaultParam(1)
+			pos := t.screen().CursorPos()
+			x := pos.X
+			for i := 0; i < params[0]; i++ {
+				x = ((x >> 3) + 1) << 3
+			}
+			t.screen().setCursorPos(x, pos.Y)
+		case 'Z': // Cursor Backward Tabulation
+			defaultParam(1)
+			pos := t.screen().CursorPos()
+			x := pos.X
+			for i := 0; i < params[0]; i++ {
+				if x%8 == 0 {
+					x -= 8
+				} else {
+					x -= x % 8
+				}
+				if x < 0 {
+					x = 0
+				}
+			}
+			t.screen().setCursorPos(x, pos.Y)
 
 		case 'G': // Cursor Character Absolute
 			defaultParam(1)

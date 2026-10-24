@@ -359,7 +359,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   width and `writeLongString` splits an oversized stale run at grapheme
   boundaries, so the next output is laid out at the new width.
 - Distinguishes printable text runs from control codes
-- Parses CSI sequences (cursor movement, SGR colors, screen manipulation)
+- Parses CSI sequences (cursor movement, SGR colors, screen manipulation).
+  Relative cursor moves include CNL/CPL (`E`/`F`), HPR/VPR (`a`/`e`), and
+  CHT/CBT (`I`/`Z`, fixed 8-column tab stops). Explicit cursor moves clamp to
+  the screen and never scroll; only LF/VT/FF/IND and RI scroll at margins.
 - Parses OSC sequences: 0/2 window title, 6/7 working directory
   (`VSCurrentDirectory`; OSC 7 no longer sets `VSCurrentFile`), 8 hyperlinks
   (tracked URI pushed to both screens via internal `setLink`), 52 clipboard
@@ -577,10 +580,12 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
   the captured screen and cursor against termemu, and normalizes termemu's
   output through the same tmux. `TestDifferentialTmux` checks curated
   sequences including styles; `TestDifferentialTmuxRandom` runs seeded random
-  sequences and compares visible text + cursor (styles on blank cells are
-  intentionally not compared there). Add validated sequences to
-  `tmuxDiffSequences`; avoid version-sensitive features (OSC 8 capture,
-  images) unless the harness is extended.
+  sequences (50 seeds) and compares visible text, cursor, cursor visibility,
+  and alt-screen state (styles on blank cells are intentionally not compared
+  there). Add validated sequences to `tmuxDiffSequences`; avoid
+  version-sensitive features (OSC 8 capture, images) unless the harness is
+  extended. tmux lacks CHT (`CSI I`) and ignores HPR/VPR (`CSI a`/`e`), so
+  those are covered by unit tests rather than the differential corpus.
 - Failing fuzz inputs are kept under `testdata/fuzz/FuzzTerminalInput/` and run
   as seeds by a normal `go test`. Run a longer session with
   `go test -run '^$' -fuzz '^FuzzTerminalInput$' -fuzztime 30s .`.

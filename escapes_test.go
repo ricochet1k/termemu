@@ -1013,6 +1013,21 @@ func TestCSI_CursorCommands(t *testing.T) {
 		// Cursor Backward (D)
 		{"D no param defaults to 1", "[D", 5, 5, 4, 5},
 		{"D with param", "[3D", 5, 5, 2, 5},
+		// Cursor Next Line (E) / Previous Line (F)
+		{"E moves down and to column 1", "[E", 5, 5, 0, 6},
+		{"E with param", "[2E", 5, 5, 0, 7},
+		{"F moves up and to column 1", "[F", 5, 5, 0, 4},
+		{"F with param", "[2F", 5, 5, 0, 3},
+		// Cursor Forward (a) / Down (e)
+		{"a moves right", "[a", 5, 5, 6, 5},
+		{"a with param", "[4a", 5, 5, 9, 5},
+		{"e moves down", "[e", 5, 5, 5, 6},
+		{"e with param", "[2e", 5, 5, 5, 7},
+		// Cursor Forward/Backward Tabulation (I/Z)
+		{"I next tab stop", "[I", 5, 5, 8, 5},
+		{"I two tab stops", "[2I", 5, 5, 16, 5},
+		{"Z previous tab stop", "[Z", 5, 5, 0, 5},
+		{"Z two tab stops", "[2Z", 20, 5, 8, 5},
 		// Cursor Character Absolute (G)
 		{"G no param defaults to col 1", "[G", 10, 5, 0, 5},
 		{"G with param", "[8G", 5, 5, 7, 5},

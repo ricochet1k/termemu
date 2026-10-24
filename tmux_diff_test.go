@@ -59,6 +59,8 @@ var tmuxDiffSequences = []struct {
 	{"wide_chars", "世界abc\x1b[4D界世"},
 	{"emoji_overwrite", "🐹a\n🐹b\x1b[Dz\n🐹c\x1b[D\x1b[Dy\n🐹c\x1b[D\x1b[D\x1b[Dx\n"},
 	{"combining_marks", "e\u0301 x\u0301 café"},
+	{"cursor_next_previous_line", "abc\x1b[2Edef\x1b[Fghi"},
+	{"tab_forward_back", "a\t\t\tX\x1b[2Zb"},
 	{"alt_1047_clears_on_exit", "AB\x1b[?1047hX\x1b[?1047l\x1b[?1047h"},
 	{"save_restore_1048", "AB\x1b[?1048h\x1b[?1048lX"},
 	{"decaln", "abc\x1b#8"},
@@ -117,7 +119,7 @@ func TestDifferentialTmuxRandom(t *testing.T) {
 func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height int, strictStyle bool) {
 	t.Helper()
 	t.Logf("sequence: %q", seq)
-	wantScreen, wantCursor := tmuxRender(t, tmuxPath, sock, []byte(seq), width, height)
+	want := tmuxRender(t, tmuxPath, sock, []byte(seq), width, height)
 
 	term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeGrapheme)
 	if err := term.Resize(width, height); err != nil {
@@ -127,15 +129,17 @@ func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height
 		t.Fatalf("feed: %v", err)
 	}
 	gotCursor := term.CursorPos()
+	gotVisible := term.viewFlags[VFShowCursor]
+	gotAlt := term.onAltScreen
 	var lines []string
 	term.View(func(v LockedView) {
 		for y := 0; y < height; y++ {
 			lines = append(lines, v.ANSILine(y))
 		}
 	})
-	gotScreen, _ := tmuxRender(t, tmuxPath, sock, []byte(strings.Join(lines, "\n")), width, height)
-	wantScreen = normalizeTmuxCapture(wantScreen)
-	gotScreen = normalizeTmuxCapture(gotScreen)
+	gotRender := tmuxRender(t, tmuxPath, sock, []byte(strings.Join(lines, "\n")), width, height)
+	wantScreen := normalizeTmuxCapture(want.screen)
+	gotScreen := normalizeTmuxCapture(gotRender.screen)
 
 	if strictStyle {
 		if gotScreen != wantScreen {
@@ -151,8 +155,14 @@ func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height
 			reportTmuxScreenDiff(t, wantText, gotText)
 		}
 	}
-	if gotCursor != wantCursor {
-		t.Errorf("cursor = %+v, tmux = %+v", gotCursor, wantCursor)
+	if gotCursor != want.cursor {
+		t.Errorf("cursor = %+v, tmux = %+v", gotCursor, want.cursor)
+	}
+	if gotVisible != want.cursorVisible {
+		t.Errorf("cursor visible = %v, tmux = %v", gotVisible, want.cursorVisible)
+	}
+	if gotAlt != want.altActive {
+		t.Errorf("alt screen = %v, tmux = %v", gotAlt, want.altActive)
 	}
 }
 
@@ -161,6 +171,7 @@ var tmuxRandomTokens = []string{
 	"\r", "\n", "\t", "\b",
 	"\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1b[3;7H", "\x1b[G", "\x1b[3d",
 	"\x1b[K", "\x1b[1K", "\x1b[2K", "\x1b[J", "\x1b[1J", "\x1b[2J",
+	"\x1b[E", "\x1b[F", "\x1b[2E", "\x1b[2F", "\x1b[Z",
 	"\x1b[L", "\x1b[M", "\x1b[S", "\x1b[T", "\x1b[P", "\x1b[X",
 	"\x1b[31m", "\x1b[1m", "\x1b[4m", "\x1b[7m", "\x1b[38;5;123m", "\x1b[48;2;1;2;3m", "\x1b[0m",
 	"\x1b[?7l", "\x1b[?7h", "\x1b[?25l", "\x1b[?25h",
@@ -193,7 +204,14 @@ func startTmuxDiffServer(t *testing.T, tmuxPath string) string {
 
 // tmuxRender writes data to a fresh pane and returns the canonical captured
 // screen (with SGR) plus the final cursor position.
-func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height int) (string, Pos) {
+type tmuxRenderResult struct {
+	screen        string
+	cursor        Pos
+	cursorVisible bool
+	altActive     bool
+}
+
+func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height int) tmuxRenderResult {
 	t.Helper()
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "input")
@@ -237,12 +255,18 @@ func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height 
 		prev = cur
 	}
 
-	cursorOut := tmuxCommand(t, tmuxPath, sock, "display-message", "-p", "-t", session, "#{cursor_x} #{cursor_y}")
-	var x, y int
-	if _, err := fmt.Sscanf(strings.TrimSpace(cursorOut), "%d %d", &x, &y); err != nil {
-		t.Fatalf("parse cursor %q: %v", cursorOut, err)
+	stateOut := tmuxCommand(t, tmuxPath, sock, "display-message", "-p", "-t", session,
+		"#{cursor_x} #{cursor_y} #{cursor_flag} #{alternate_on}")
+	var x, y, visible, alt int
+	if _, err := fmt.Sscanf(strings.TrimSpace(stateOut), "%d %d %d %d", &x, &y, &visible, &alt); err != nil {
+		t.Fatalf("parse pane state %q: %v", stateOut, err)
 	}
-	return prev, Pos{X: x, Y: y}
+	return tmuxRenderResult{
+		screen:        prev,
+		cursor:        Pos{X: x, Y: y},
+		cursorVisible: visible != 0,
+		altActive:     alt != 0,
+	}
 }
 
 func tmuxCommand(t *testing.T, tmuxPath, sock string, args ...string) string {
