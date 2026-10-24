@@ -137,6 +137,7 @@ type Snapshot struct {
 	KeyboardMain keyboardMode
 	KeyboardAlt  keyboardMode
 	Link         string // active OSC 8 hyperlink, if any
+	NewlineMode  bool   // LNM (CSI 20 h/l)
 }
 
 // LockedView is a read-only handle to terminal state. It is valid only for
@@ -277,6 +278,10 @@ type terminal struct {
 	viewFlags   []bool
 	viewInts    []int
 	viewStrings []string
+
+	// newlineMode is LNM (CSI 20 h/l): line feed also performs a carriage
+	// return. Like xterm's LINEFEED flag it is terminal-wide, not per screen.
+	newlineMode bool
 
 	readLoopStarted bool
 	readLoopDone    chan struct{}
@@ -461,6 +466,7 @@ func (t *terminal) snapshotLocked() Snapshot {
 		KeyboardMain: cloneKeyboardMode(t.keyboardMain),
 		KeyboardAlt:  cloneKeyboardMode(t.keyboardAlt),
 		Link:         t.hyperlink,
+		NewlineMode:  t.newlineMode,
 	}
 }
 
@@ -510,6 +516,7 @@ func (t *terminal) Restore(s Snapshot) error {
 	}
 
 	t.setHyperlink(s.Link)
+	t.newlineMode = s.NewlineMode
 
 	view := LockedView{t: t}
 	size := t.screen().Size()
@@ -1015,6 +1022,8 @@ func (t *terminal) setHyperlink(uri string) {
 func (t *terminal) resetTerminal() {
 	t.setHyperlink("")
 	t.setAltScreen(false)
+	t.newlineMode = false
+	t.setViewInt(VICursorShape, CursorShapeDefault)
 	for _, s := range []screen{t.mainScreen, t.altScreen} {
 		size := s.Size()
 		s.setStyle(NewStyle())

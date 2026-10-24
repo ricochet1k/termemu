@@ -100,8 +100,8 @@ func TestDECRQM_ReportsPrivateModeState(t *testing.T) {
 	// Unknown private mode.
 	feedQueryExpectReply(t, t1, r, "\x1b[?9999$p", "\x1b[?9999;0$y")
 
-	// Plain modes are not supported yet.
-	feedQueryExpectReply(t, t1, r, "\x1b[4$p", "\x1b[4;0$y")
+	// Plain (ANSI) modes report too: IRM is reset by default.
+	feedQueryExpectReply(t, t1, r, "\x1b[4$p", "\x1b[4;2$y")
 }
 
 func TestDECRQM_ReportsCommonPrivateModes(t *testing.T) {

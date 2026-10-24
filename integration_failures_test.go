@@ -122,7 +122,7 @@ func TestEraseAbove(t *testing.T) {
 	width := screen.Size().X
 
 	// Write 3 lines, then erase above current cursor position
-	_ = term.testFeedTerminalInputFromBackend([]byte("Top\nMiddle\nBottom\x1b[1JEnd"), TextReadModeRune)
+	_ = term.testFeedTerminalInputFromBackend([]byte("Top\r\nMiddle\r\nBottom\x1b[1JEnd"), TextReadModeRune)
 
 	line1 := strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " ")
 	line2 := strings.TrimRight(screen.StyledLine(0, width, 1).PlainTextString(), " ")
@@ -150,7 +150,7 @@ func TestEraseBelow(t *testing.T) {
 	width := screen.Size().X
 
 	// Write 3 lines, then erase below current cursor position
-	_ = term.testFeedTerminalInputFromBackend([]byte("Top\nMiddle\nBottom\x1b[0JEnd"), TextReadModeRune)
+	_ = term.testFeedTerminalInputFromBackend([]byte("Top\r\nMiddle\r\nBottom\x1b[0JEnd"), TextReadModeRune)
 
 	line1 := strings.TrimRight(screen.StyledLine(0, width, 0).PlainTextString(), " ")
 	line2 := strings.TrimRight(screen.StyledLine(0, width, 1).PlainTextString(), " ")

@@ -61,7 +61,7 @@ func newRecordingTerminal(mode TextReadMode) (*terminal, *recordingFrontend) {
 func feedLines(t *testing.T, term *terminal, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		data := []byte(fmt.Sprintf("Line%03d\n", i))
+		data := []byte(fmt.Sprintf("Line%03d\r\n", i))
 		if err := term.testFeedTerminalInputFromBackend(data, TextReadModeRune); err != nil {
 			t.Fatalf("feed: %v", err)
 		}

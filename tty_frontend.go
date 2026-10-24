@@ -1,6 +1,7 @@
 package termemu
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -49,6 +50,15 @@ func NewTTYFrontend(out io.Writer) *TTYFrontend {
 	return &TTYFrontend{out: out, showCur: true, focused: true}
 }
 
+// appendCursorShape appends the DECSCUSR sequence that selects shape, so the
+// outer terminal renders the shape the application asked for.
+func appendCursorShape(dst []byte, shape int) []byte {
+	if shape < 0 || shape > 6 {
+		shape = CursorShapeDefault
+	}
+	return append(dst, fmt.Sprintf("\033[%d q", shape)...)
+}
+
 // SetTerminal updates the terminal used for rendering.
 func (t *TTYFrontend) SetTerminal(term Terminal) {
 	t.mu.Lock()
@@ -77,6 +87,8 @@ func (t *TTYFrontend) Attach(r Region) {
 
 	term.View(func(v LockedView) {
 		renderSnapshotRegion(&snap, v, r)
+		// Adopt the terminal's current cursor shape on attach.
+		_, _ = snap.out.Write(appendCursorShape(nil, v.GetViewInt(VICursorShape)))
 	})
 }
 
@@ -87,7 +99,7 @@ func (t *TTYFrontend) Detach() {
 	out := t.out
 	t.mu.Unlock()
 	if out != nil {
-		_, _ = out.Write([]byte(ansiCursorShow))
+		_, _ = out.Write(appendCursorShape([]byte(ansiCursorShow), CursorShapeDefault))
 	}
 }
 
@@ -151,7 +163,17 @@ func (t *TTYFrontend) ViewFlagChanged(v LockedView, flag ViewFlag, value bool) {
 	t.showCur = value
 	t.renderCursorLocked()
 }
-func (t *TTYFrontend) ViewIntChanged(v LockedView, flag ViewInt, value int)          {}
+func (t *TTYFrontend) ViewIntChanged(v LockedView, flag ViewInt, value int) {
+	if flag != VICursorShape {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.out == nil || !t.attached {
+		return
+	}
+	_, _ = t.out.Write(appendCursorShape(nil, value))
+}
 func (t *TTYFrontend) ViewStringChanged(v LockedView, flag ViewString, value string) {}
 
 func (t *TTYFrontend) renderRegionLocked(view LockedView, r Region) {

@@ -15,10 +15,10 @@ func TestEmojiOverwriteSequence(t *testing.T) {
 
 	// Test case from integration: "🐹c\x1b[D\x1b[Dy"
 	if err := term.testFeedTerminalInputFromBackend([]byte(
-		"🐹a\n"+
-			"🐹b\x1b[Dz\n"+
-			"🐹c\x1b[D\x1b[Dy\n"+
-			"🐹c\x1b[D\x1b[D\x1b[Dx\n",
+		"🐹a\r\n"+
+			"🐹b\x1b[Dz\r\n"+
+			"🐹c\x1b[D\x1b[Dy\r\n"+
+			"🐹c\x1b[D\x1b[D\x1b[Dx\r\n",
 	), TextReadModeRune); err != nil {
 		t.Fatal(err)
 	}

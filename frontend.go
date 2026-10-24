@@ -25,6 +25,8 @@ const (
 	VIMouseMode ViewInt = iota
 	VIMouseEncoding
 	VIModifyOtherKeys
+	// VICursorShape is DECSCUSR (CSI Ps SP q), stored as the raw Ps value.
+	VICursorShape
 	viewIntCount
 )
 
@@ -45,6 +47,18 @@ const (
 	MMPressRelease
 	MMPressReleaseMove
 	MMPressReleaseMoveAll
+)
+
+// Cursor shapes for VICursorShape (DECSCUSR). The value is the DECSCUSR Ps
+// parameter, so it can be forwarded to a terminal frontend unchanged.
+const (
+	CursorShapeDefault         int = 0 // terminal default (blinking block)
+	CursorShapeBlinkBlock      int = 1
+	CursorShapeSteadyBlock     int = 2
+	CursorShapeBlinkUnderline  int = 3
+	CursorShapeSteadyUnderline int = 4
+	CursorShapeBlinkBar        int = 5
+	CursorShapeSteadyBar       int = 6
 )
 
 // Mouse encodings for VI_MouseEncoding

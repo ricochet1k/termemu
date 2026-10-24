@@ -379,8 +379,12 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   Relative cursor moves include CNL/CPL (`E`/`F`), HPR/VPR (`a`/`e`), and
   CHT/CBT (`I`/`Z`, which use the screen's tab stop map). Explicit cursor
   moves clamp to the screen and never scroll; only LF/VT/FF/IND and RI scroll
-  at margins. ICH (`CSI @`) inserts blanks and shifts the row right; IRM
-  (`CSI 4 h/l`) makes printable writes insert instead of overwrite. HTS
+  at margins. LF, VT and FF move down without changing the column, as on a
+  VT100 (the tty driver normally delivers CRLF; raw-mode programs rely on the
+  column being kept). NEL (`ESC E`) is the line feed plus carriage return.
+  ICH (`CSI @`) inserts blanks and shifts the row right; IRM
+  (`CSI 4 h/l`) makes printable writes insert instead of overwrite, and LNM
+  (`CSI 20 h/l`) makes LF perform a carriage return too. HTS
   (`ESC H`) and TBC (`CSI g`) set/clear tab stops. DECOM (`CSI ? 6 h/l`)
   makes CUP/HVP/VPA rows relative to the top margin, confines explicit cursor
   movement to the scroll region, and moves home to the top margin. REP
@@ -392,6 +396,13 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   (tracked URI pushed to both screens via internal `setLink`), 52 clipboard
   writes (base64-decoded, forwarded to `ClipboardSink`; queries dropped)
 - `DECSET/DECRST 2026` sets/clears `VFSynchronizedOutput`
+- `DECRQM` (`CSI [?]Ps $ p`) reports both DEC private modes
+  (`privateModeState`) and ANSI modes (`ansiModeState`: IRM, LNM).
+  `DECREQTPARM` (`CSI Ps x`) answers with xterm's VT100 parameter reply.
+- `DECSCUSR` (`CSI Ps SP q`) stores the cursor shape in
+  `VICursorShape` (the raw `Ps`, `CursorShape*` constants); unknown shapes are
+  ignored. `TTYFrontend` forwards it to the outer terminal on change and on
+  `Attach`, and restores the default on `Detach`.
 - Parses keyboard protocol mode switches
 - IRM and DECOM behave as terminal-wide modes (xterm keeps both in
   `xw->flags`): `copyTransientState` carries them across a main/alt switch
@@ -412,6 +423,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
   fields, and tmux is not a usable reference for it (tmux keeps the
   designation/shift bytes in its grid and leaves the mapping to the outer
   terminal, so `capture-pane` shows the raw ASCII).
+
+**Modes** (terminal.go): `LNM` (`CSI 20 h/l`) is terminal-wide (xterm keeps it
+in `xw->flags`), so it lives on `terminal.newlineMode` and round-trips through
+`Snapshot.NewlineMode`. RIS clears it; DECSTR does not (xterm's soft reset only
+clears INSERT and ORIGIN among the mode flags).
 
 **Style System** (style.go):
 - `Style` struct uses bit-packing: 3 uint32 fields (fg, bg, underlineColor)

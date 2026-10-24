@@ -94,6 +94,26 @@ var tmuxDiffSequences = []struct {
 	{"origin_mode_decsc", "\x1b[5;20r\x1b[?6h\x1b[2;1H\x1b7\x1b[?6l\x1b8X"},
 }
 
+// tmuxDiffRawSequences are rendered with OPOST disabled in the pane, so bare
+// LF/VT/FF reach the terminal instead of the kernel's CRLF translation. They
+// cover line-feed semantics that the normal corpus cannot: a line feed moves
+// down without returning to column 0 (the "staircase" effect visible with
+// `stty -onlcr`).
+var tmuxDiffRawSequences = []struct {
+	name string
+	seq  string
+}{
+	{"raw_lf_keeps_column", "abc\ndef"},
+	{"raw_lf_multiple", "a\nb\nc\nd"},
+	{"raw_lf_scrolls_at_bottom", "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix"},
+	{"raw_vt_ff_keep_column", "ab\vcd\fef"},
+	{"raw_cr_same_row", "abc\rX"},
+	{"raw_crlf", "abc\r\ndef"},
+	{"raw_lf_then_cr", "abc\n\rdef"},
+	{"raw_lf_at_right_margin", "123456789012345678901234567890\ndef"},
+	{"raw_tab_then_lf", "ab\tcd\nef"},
+}
+
 var tmuxDiffSessionCounter atomic.Uint64
 
 // TestDifferentialTmux compares termemu's screen and cursor against a real
@@ -115,7 +135,13 @@ func TestDifferentialTmux(t *testing.T) {
 	for _, tc := range tmuxDiffSequences {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			runDifferentialCase(t, tmuxPath, sock, tc.seq, width, height, true)
+			runDifferentialCase(t, tmuxPath, sock, tc.seq, width, height, true, false)
+		})
+	}
+	for _, tc := range tmuxDiffRawSequences {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			runDifferentialCase(t, tmuxPath, sock, tc.seq, width, height, true, true)
 		})
 	}
 }
@@ -138,21 +164,29 @@ func TestDifferentialTmuxRandom(t *testing.T) {
 		rng := rand.New(rand.NewSource(seed))
 		seq := randomTerminalSequence(rng, 8+rng.Intn(18))
 		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
-			runDifferentialCase(t, tmuxPath, sock, seq, width, height, false)
+			runDifferentialCase(t, tmuxPath, sock, seq, width, height, false, false)
 		})
 	}
 }
 
-func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height int, strictStyle bool) {
+func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height int, strictStyle, raw bool) {
 	t.Helper()
 	t.Logf("sequence: %q", seq)
-	want := tmuxRender(t, tmuxPath, sock, []byte(seq), width, height)
+	want := tmuxRender(t, tmuxPath, sock, []byte(seq), width, height, raw)
+
+	// The pane runs `cat` on a tty with output post-processing enabled, so the
+	// kernel gives tmux CRLF for every LF. Feed termemu the same wire bytes;
+	// the raw corpus disables OPOST and keeps bare LF.
+	wire := seq
+	if !raw {
+		wire = strings.ReplaceAll(seq, "\n", "\r\n")
+	}
 
 	term := newTerminal(&EmptyFrontend{}, NewNoPTYBackend(nil, nil), TextReadModeGrapheme)
 	if err := term.Resize(width, height); err != nil {
 		t.Fatalf("Resize: %v", err)
 	}
-	if err := term.testFeedTerminalInputFromBackend([]byte(seq), TextReadModeGrapheme); err != nil && !errors.Is(err, io.EOF) {
+	if err := term.testFeedTerminalInputFromBackend([]byte(wire), TextReadModeGrapheme); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("feed: %v", err)
 	}
 	gotCursor := term.CursorPos()
@@ -164,7 +198,10 @@ func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height
 			lines = append(lines, v.ANSILine(y))
 		}
 	})
-	gotRender := tmuxRender(t, tmuxPath, sock, []byte(strings.Join(lines, "\n")), width, height)
+	// The rendered screen is fed back through tmux with the normal (CRLF)
+	// terminal settings: termemu's line renderer emits whole rows, not the
+	// raw byte stream.
+	gotRender := tmuxRender(t, tmuxPath, sock, []byte(strings.Join(lines, "\n")), width, height, false)
 	wantScreen := normalizeTmuxCapture(want.screen)
 	gotScreen := normalizeTmuxCapture(gotRender.screen)
 
@@ -238,7 +275,7 @@ type tmuxRenderResult struct {
 	altActive     bool
 }
 
-func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height int) tmuxRenderResult {
+func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height int, raw bool) tmuxRenderResult {
 	t.Helper()
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "input")
@@ -248,8 +285,13 @@ func tmuxRender(t *testing.T, tmuxPath, sock string, data []byte, width, height 
 	}
 
 	session := fmt.Sprintf("diff-%d", tmuxDiffSessionCounter.Add(1))
-	script := fmt.Sprintf("cat %s; : > %s; exec sleep 3600",
-		shellQuote(dataPath), shellQuote(donePath))
+	prefix := ""
+	if raw {
+		// Disable output post-processing so bare LF/VT/FF reach the pane.
+		prefix = "stty -opost; "
+	}
+	script := fmt.Sprintf("%scat %s; : > %s; exec sleep 3600",
+		prefix, shellQuote(dataPath), shellQuote(donePath))
 	tmuxCommand(t, tmuxPath, sock, "new-session", "-d", "-s", session,
 		"-x", strconv.Itoa(width), "-y", strconv.Itoa(height), "sh -c "+shellQuote(script))
 	defer func() {

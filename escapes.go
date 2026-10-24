@@ -191,10 +191,14 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 		})
 
 	case 10: // LF ^J Linefeed (newline)
+		// A line feed moves down without changing the column (VT100/xterm);
+		// the tty driver normally sends CRLF. LNM (CSI 20 h) makes LF do a
+		// carriage return as well.
 		t.withLock(func() {
-			cursorPos := t.screen().CursorPos()
-			t.screen().setCursorPos(0, cursorPos.Y)
-			t.screen().moveCursor(0, 1, true, true)
+			t.screen().moveCursor(0, 1, false, true)
+			if t.newlineMode {
+				t.screen().moveCursor(-t.screen().CursorPos().X, 0, true, true)
+			}
 		})
 
 	case 11: // VT ^K Vertical TAB
@@ -525,6 +529,11 @@ func (t *terminal) handleCommand(r escapeReader) bool {
 			t.screen().decaln()
 		}
 
+	case 'E': // NEL: Next Line (line feed plus carriage return)
+		cursorPos := t.screen().CursorPos()
+		t.screen().setCursorPos(0, cursorPos.Y)
+		t.screen().moveCursor(0, 1, false, true)
+
 	case 'H': // HTS: Set a horizontal tab stop at the cursor column
 		t.screen().setTabStop(t.screen().CursorPos().X)
 
@@ -611,6 +620,8 @@ func (t *terminal) handleDECRQM(prefix byte, params []int) {
 	if prefix == '?' {
 		prefixStr = "?"
 		pm = t.privateModeState(ps)
+	} else {
+		pm = t.ansiModeState(ps)
 	}
 	_ = t.writeReply([]byte(fmt.Sprintf("\033[%s%d;%d$y", prefixStr, ps, pm)))
 }
@@ -661,6 +672,24 @@ func (t *terminal) privateModeState(mode int) int {
 	return 2
 }
 
+// ansiModeState reports the state of an ANSI (non-private) mode for DECRQM:
+// 1 set, 2 reset, or 0 when the mode is not recognized.
+func (t *terminal) ansiModeState(mode int) int {
+	set := false
+	switch mode {
+	case 4: // IRM
+		set = t.screen().InsertMode()
+	case 20: // LNM
+		set = t.newlineMode
+	default:
+		return 0
+	}
+	if set {
+		return 1
+	}
+	return 2
+}
+
 // handleDECSTR implements DECSTR (CSI ! p): soft terminal reset. It restores
 // default style, full scroll margins, auto-wrap, character sets, insert/
 // origin mode, and cursor visibility without touching screen contents or tab
@@ -675,6 +704,7 @@ func (t *terminal) handleDECSTR() {
 		s.SetOriginMode(false)
 	}
 	t.setViewFlag(VFShowCursor, true)
+	t.setViewInt(VICursorShape, CursorShapeDefault)
 }
 
 // lineScrollRegion returns the row range affected by IL/DL. Inside the
@@ -795,6 +825,15 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		case len(intermediates) == 1 && intermediates[0] == '!' && b == 'p':
 			// DECSTR: soft terminal reset
 			t.handleDECSTR()
+		case len(intermediates) == 1 && intermediates[0] == ' ' && b == 'q':
+			// DECSCUSR: set cursor shape. Unknown shapes are ignored.
+			ps := 0
+			if len(params) > 0 {
+				ps = params[0]
+			}
+			if ps >= 0 && ps <= 6 {
+				t.setViewInt(VICursorShape, ps)
+			}
 		default:
 			debugPrintf(debugTodo, "TODO: Unhandled CSI intermediates: %#v %v, %#v\n", string(intermediates), append([]int(nil), params...), string(b))
 			return true
@@ -892,6 +931,9 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			switch params[0] {
 			case 4: // IRM: insert mode
 				t.screen().SetInsertMode(value)
+
+			case 20: // LNM: line feed also performs a carriage return
+				t.newlineMode = value
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled CSI mode param: ", params[0])
 				return false
@@ -1177,6 +1219,14 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				t.screen().clearAllTabStops()
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled TBC param: ", params[0])
+			}
+
+		case 'x': // DECREQTPARM: report terminal parameters
+			defaultParam(0)
+			if params[0] == 0 || params[0] == 1 {
+				// Same shape as xterm's VT100/VT102 reply: Ps+2; no parity;
+				// 8 bits; 38400 baud both ways; clock multiplier 1; flags 0.
+				_ = t.writeReply([]byte(fmt.Sprintf("\033[%d;1;1;128;128;1;0x", params[0]+2)))
 			}
 
 		case 'r': // Set Scroll margins

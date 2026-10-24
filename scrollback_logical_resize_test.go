@@ -44,7 +44,7 @@ func feedRows(t *testing.T, term *terminal, labels []string) {
 	for i, label := range labels {
 		data := label
 		if i < len(labels)-1 {
-			data += "\n"
+			data += "\r\n"
 		}
 		feedText(t, term, data)
 	}
@@ -71,7 +71,7 @@ func TestScrollback_LogicalLine_WrappedRows(t *testing.T) {
 
 	feedText(t, term, strings.Repeat("A", 50))
 	for range 10 {
-		feedText(t, term, "\n")
+		feedText(t, term, "\r\n")
 	}
 
 	base, next := sb.Range()
@@ -127,7 +127,7 @@ func TestScrollback_LogicalLine_SingleRow(t *testing.T) {
 
 	feedText(t, term, "solo")
 	for range 10 {
-		feedText(t, term, "\n")
+		feedText(t, term, "\r\n")
 	}
 
 	base, next := sb.Range()
@@ -161,7 +161,7 @@ func TestScrollback_LogicalLine_RingWrap(t *testing.T) {
 	sb.Clear()
 
 	feedRows(t, term, []string{"N0", "N1", "N2", "N3"})
-	feedText(t, term, "\n")
+	feedText(t, term, "\r\n")
 	feedText(t, term, strings.Repeat("A", 50))
 
 	// Push exactly the seven content rows into scrollback.
@@ -202,7 +202,7 @@ func TestScrollback_LogicalLine_ReflowIDs(t *testing.T) {
 
 	feedText(t, term, strings.Repeat("A", 50))
 	for range 10 {
-		feedText(t, term, "\n")
+		feedText(t, term, "\r\n")
 	}
 
 	base, next := sb.Range()
