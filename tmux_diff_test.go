@@ -69,6 +69,14 @@ var tmuxDiffSequences = []struct {
 	{"save_restore_1048", "AB\x1b[?1048h\x1b[?1048lX"},
 	{"decaln", "abc\x1b#8"},
 	{"alt_screen_roundtrip", "main\x1b[?1049halt\x1b[?1049lmain"},
+	{"tabs_default", "col0\tcol1\tcol2"},
+	{"tabs_hts", "abc\x1bH\r\tX\tY"},
+	{"tabs_clear_current", "\tX\x1b[g\rY\tZ"},
+	{"ich", "abcdef\x1b[1;3H\x1b[3@X"},
+	{"ich_default_param", "abcdef\x1b[1;2H\x1b[@X"},
+	{"ich_truncates", "0123456789\x1b[1;8H\x1b[5@X"},
+	{"irm", "abcdef\x1b[4h\x1b[1;1HXY\x1b[4lZ"},
+	{"irm_full_row", "abcde\x1b[4h\x1b[1;1HXYZW"},
 }
 
 var tmuxDiffSessionCounter atomic.Uint64

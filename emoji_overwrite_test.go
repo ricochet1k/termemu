@@ -40,6 +40,35 @@ func TestEmojiOverwriteSequence(t *testing.T) {
 	}
 }
 
+// TestEmojiWidenAtRightEdge covers the VS16/keycap widening path when the
+// base cell is the second-to-last column: the widened two-cell cluster fills
+// the final column, so the cursor must stay on it with a pending wrap instead
+// of advancing past the screen edge.
+func TestEmojiWidenAtRightEdge(t *testing.T) {
+	for _, mode := range []TextReadMode{TextReadModeRune, TextReadModeGrapheme} {
+		_, term, _ := MakeTerminalWithMock(mode)
+		if err := term.Resize(5, 3); err != nil {
+			t.Fatal(err)
+		}
+		// Base '1' in column 3, then VS16 + keycap widen it to two cells.
+		feedText(t, term, "abc1")
+		if err := term.testFeedTerminalInputFromBackend([]byte("\ufe0f\u20e3"), mode); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := term.CursorPos(), (Pos{X: 4, Y: 0}); got != want {
+			t.Fatalf("mode %d: cursor = %+v, want %+v", mode, got, want)
+		}
+		ss := term.mainScreen.(*spanScreen)
+		if !ss.pendingWrap {
+			t.Fatalf("mode %d: widening into the last column must set pending wrap", mode)
+		}
+		feedText(t, term, "Z")
+		if got, want := term.Line(1), "Z"; !strings.HasPrefix(got, want) {
+			t.Fatalf("mode %d: line 1 = %q, want prefix %q", mode, got, want)
+		}
+	}
+}
+
 func TestSimpleTextWrite(t *testing.T) {
 	// Test the most basic case - just writing text
 	_, term, _ := MakeTerminalWithMock(TextReadModeRune)

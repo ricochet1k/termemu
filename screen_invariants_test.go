@@ -29,6 +29,9 @@ func checkScreenInvariants(t *testing.T, s screen, context string) {
 	if len(ss.wrapped) != h {
 		t.Fatalf("%s: have %d wrapped flags, want %d", context, len(ss.wrapped), h)
 	}
+	if len(ss.tabs) != w {
+		t.Fatalf("%s: have %d tab stops, want %d", context, len(ss.tabs), w)
+	}
 	for y := range ss.lines {
 		line := &ss.lines[y]
 		sum := 0
@@ -74,6 +77,8 @@ var screenInputChunks = []string{
 	"\x1b_apc payload\x1b\\", "\x1bPdcs payload\x1b\\", "\x1b^pm payload\x1b\\", "\x1bXsos payload\x1b\\",
 	"\x1b#8", "\x1bc", "\x1b7", "\x1b8", "\x1b[?u", "\x1b[>4;2m", "\x1b[=1;1u", "\x1b[<u",
 	"\x1b[6n", "\x1b[c", "\x1b[>c", "\x1b[>q", "\x1b[?2026$p",
+	"\x1b[@", "\x1b[3@", "\x1b[4h", "\x1b[4l", "\x1bH", "\x1b[g", "\x1b[3g",
+	"\x1b[2I", "\x1b[2Z",
 }
 
 func TestScreenRandomInputInvariants(t *testing.T) {

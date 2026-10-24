@@ -31,6 +31,20 @@ type screen interface {
 	writeString(text string, width int, merge bool, mode TextReadMode)
 	rawWriteRune(x int, y int, r rune, width int, cr ChangeReason)
 	deleteChars(x int, y int, n int, cr ChangeReason)
+	// insertChars shifts the cells at x and to the right rightwards by n,
+	// inserting n blanks at x and dropping whatever falls off the right edge.
+	insertChars(x int, y int, n int, cr ChangeReason)
+	// InsertMode reports and sets IRM (CSI 4 h/l): printable writes insert
+	// instead of overwriting.
+	InsertMode() bool
+	SetInsertMode(value bool)
+	// Horizontal tab stops (HTS, TBC).
+	nextTabStop(x int, count int) int
+	prevTabStop(x int, count int) int
+	setTabStop(x int)
+	clearTabStop(x int)
+	clearAllTabStops()
+	resetTabStops()
 	setScrollMarginTopBottom(top, bottom int)
 	scroll(y1 int, y2 int, dy int)
 	setCursorPos(x, y int)
@@ -99,6 +113,14 @@ type spanScreen struct {
 	// DECSC.
 	charsets      charsetState
 	savedCharsets charsetState
+
+	// insertMode is IRM: printable writes shift the rest of the row right
+	// instead of overwriting. Per-screen, like xterm's INSERT flag.
+	insertMode bool
+
+	// tabs is the horizontal tab stop map, always len(size.X). Default stops
+	// are every defaultTabInterval columns.
+	tabs []bool
 
 	topMargin, bottomMargin int
 
@@ -351,6 +373,7 @@ func (s *spanScreen) setSize(w, h int) {
 
 	s.lines = newLines
 	s.wrapped = newWrapped
+	s.resizeTabs(w)
 
 	s.bottomMargin = h - (s.size.Y - s.bottomMargin)
 
@@ -456,6 +479,11 @@ func (s *spanScreen) writeString(text string, width int, merge bool, mode TextRe
 		} else {
 			s.cursorPos.X = s.size.X - width
 		}
+	}
+	if s.insertMode {
+		// IRM: push the rest of the row right so the run is inserted rather
+		// than overwritten.
+		s.insertChars(s.cursorPos.X, s.cursorPos.Y, width, CRText)
 	}
 	sp := Span{Style: s.style, Text: text, Width: width, Link: s.link}
 	// Canonicalize runs of plain ASCII spaces as blank spans (empty Text),
@@ -595,6 +623,46 @@ func (s *spanScreen) deleteChars(x int, y int, n int, cr ChangeReason) {
 	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
 }
 
+// insertChars implements ICH: the cells from x onwards shift right by n,
+// blank cells are inserted at x, and cells pushed past the right edge are
+// discarded. The cursor does not move.
+func (s *spanScreen) insertChars(x, y, n int, cr ChangeReason) {
+	if y < 0 || y >= s.size.Y || n <= 0 {
+		return
+	}
+	if x < 0 {
+		n += x
+		x = 0
+	}
+	if x >= s.size.X || n <= 0 {
+		return
+	}
+	if n > s.size.X-x {
+		n = s.size.X - x
+	}
+
+	line := &s.lines[y]
+	// Drop the cells that no longer fit, then insert the blanks. Inserted
+	// blanks carry the current style but never a hyperlink, matching
+	// deleteChars' padding.
+	truncateLine(line, s.size.X-n, s.textMode)
+	replaceRange(line, x, 0, Span{Style: s.style, Width: n}, s.textMode)
+	if curWidth := lineCellWidth(line); curWidth < s.size.X {
+		line.spans = append(line.spans, Span{Style: s.style, Width: s.size.X - curWidth})
+		line.width = s.size.X
+	}
+
+	s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: x, X2: s.size.X}, cr)
+}
+
+func (s *spanScreen) InsertMode() bool {
+	return s.insertMode
+}
+
+func (s *spanScreen) SetInsertMode(value bool) {
+	s.insertMode = value
+}
+
 func (s *spanScreen) setCursorPos(x, y int) {
 	s.pendingWrap = false
 	oldY := s.cursorPos.Y
@@ -619,6 +687,102 @@ func (s *spanScreen) setScrollMarginTopBottom(top, bottom int) {
 	}
 	s.topMargin = top
 	s.bottomMargin = bottom
+}
+
+// defaultTabInterval is the default distance between horizontal tab stops.
+const defaultTabInterval = 8
+
+// resizeTabs keeps the existing stops that still fit and adds default stops
+// for any new columns.
+func (s *spanScreen) resizeTabs(width int) {
+	tabs := make([]bool, width)
+	copy(tabs, s.tabs)
+	for x := len(s.tabs); x < width; x++ {
+		tabs[x] = x%defaultTabInterval == 0
+	}
+	s.tabs = tabs
+}
+
+// resetTabStops restores the default stops (every 8 columns).
+func (s *spanScreen) resetTabStops() {
+	s.tabs = nil
+	s.resizeTabs(s.size.X)
+}
+
+// isTabStop reports whether a stop is set at column x. Columns outside the
+// screen count as default stops so movement never runs off the edge.
+func (s *spanScreen) isTabStop(x int) bool {
+	if x < 0 || x >= len(s.tabs) {
+		return x%defaultTabInterval == 0
+	}
+	return s.tabs[x]
+}
+
+// nextTabStop moves x forward to the count-th tab stop after it. With no stop
+// left, the cursor lands on the last column (xterm behavior).
+func (s *spanScreen) nextTabStop(x int, count int) int {
+	if count < 1 {
+		count = 1
+	}
+	for i := 0; i < count; i++ {
+		next := -1
+		for t := x + 1; t < s.size.X; t++ {
+			if s.isTabStop(t) {
+				next = t
+				break
+			}
+		}
+		if next < 0 {
+			return s.size.X - 1
+		}
+		x = next
+	}
+	return x
+}
+
+// prevTabStop moves x back to the count-th tab stop before it, stopping at
+// column 0 when none remains.
+func (s *spanScreen) prevTabStop(x int, count int) int {
+	if count < 1 {
+		count = 1
+	}
+	for i := 0; i < count; i++ {
+		prev := 0
+		for t := x - 1; t >= 0; t-- {
+			if s.isTabStop(t) {
+				prev = t
+				break
+			}
+		}
+		if prev == x {
+			return 0
+		}
+		x = prev
+	}
+	return x
+}
+
+// setTabStop implements HTS at column x.
+func (s *spanScreen) setTabStop(x int) {
+	if x < 0 || x >= len(s.tabs) {
+		return
+	}
+	s.tabs[x] = true
+}
+
+// clearTabStop implements TBC 0: clear the stop at column x only.
+func (s *spanScreen) clearTabStop(x int) {
+	if x < 0 || x >= len(s.tabs) {
+		return
+	}
+	s.tabs[x] = false
+}
+
+// clearAllTabStops implements TBC 3.
+func (s *spanScreen) clearAllTabStops() {
+	for x := range s.tabs {
+		s.tabs[x] = false
+	}
 }
 
 func (s *spanScreen) scroll(y1 int, y2 int, dy int) {
@@ -852,6 +1016,8 @@ func (s *spanScreen) snapshotState() ScreenState {
 		SavedStyle:       s.savedStyle,
 		SavedCharsets:    s.savedCharsets,
 		Charsets:         s.charsets,
+		InsertMode:       s.insertMode,
+		Tabs:             append([]bool(nil), s.tabs...),
 		Style:            s.style,
 		TopMargin:        s.topMargin,
 		BottomMargin:     s.bottomMargin,
@@ -893,6 +1059,12 @@ func (s *spanScreen) restoreState(st ScreenState) {
 	s.savedStyle = st.SavedStyle
 	s.savedCharsets = st.SavedCharsets
 	s.charsets = st.Charsets
+	s.insertMode = st.InsertMode
+	s.tabs = make([]bool, w)
+	copy(s.tabs, st.Tabs)
+	for x := len(st.Tabs); x < w; x++ {
+		s.tabs[x] = x%defaultTabInterval == 0
+	}
 	s.style = st.Style
 	s.topMargin = clamp(st.TopMargin, 0, h-1)
 	s.bottomMargin = clamp(st.BottomMargin, s.topMargin, h-1)
@@ -1533,7 +1705,13 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 			widened := Span{Style: sp.Style, Text: base + text, Width: 2, Link: sp.Link}
 			replaceRange(line, cell, 2, widened, s.textMode)
 			if s.cursorPos.X == cell+1 {
-				s.cursorPos.X++
+				if cell+2 >= s.size.X {
+					// The widened cell now fills the last column; defer the
+					// wrap exactly like a write that filled the final cell.
+					s.pendingWrap = true
+				} else {
+					s.cursorPos.X++
+				}
 				s.frontend.CursorMoved(s.view, s.cursorPos.X, s.cursorPos.Y)
 			}
 			s.frontend.RegionChanged(s.view, Region{Y: y, Y2: y + 1, X: cell, X2: cell + 2}, CRText)

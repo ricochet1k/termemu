@@ -196,6 +196,8 @@ func TestSnapshotSerialization(t *testing.T) {
 			designations: [charsetSlotCount]charset{charsetDECGraphics, charsetASCII, charsetDECGraphics, charsetASCII},
 			glSlot:       2,
 		},
+		InsertMode:   true,
+		Tabs:         []bool{true, false, true, false, true},
 		TopMargin:    1,
 		BottomMargin: 2,
 		AutoWrap:     true,
@@ -215,6 +217,7 @@ func TestSnapshotSerialization(t *testing.T) {
 			designations: [charsetSlotCount]charset{charsetASCII, charsetASCII, charsetASCII, charsetDECGraphics},
 			glSlot:       3,
 		},
+		Tabs:         []bool{false, true, false, true, false},
 		TopMargin:    0,
 		BottomMargin: 2,
 		AutoWrap:     false,
@@ -279,6 +282,7 @@ func cloneScreenForTest(s ScreenState) ScreenState {
 		out.Lines[i] = Line{Spans: append([]Span(nil), line.Spans...), Width: line.Width}
 	}
 	out.Wrapped = append([]bool(nil), s.Wrapped...)
+	out.Tabs = append([]bool(nil), s.Tabs...)
 	return out
 }
 

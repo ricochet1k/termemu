@@ -46,8 +46,10 @@ round-trip through
 `encoding/json` and `encoding/gob`. `Style`, `keyboardMode`, and `charsetState`
 implement
 custom `MarshalJSON`/`UnmarshalJSON` and `GobEncode`/`GobDecode` over exported
-shadow structs, so `Snapshot.KeyboardMain/KeyboardAlt` serialize even though
-their type is unexported. `Style` encodes its three packed uint32 components
+shadow structs, so `Snapshot.KeyboardMain/KeyboardAlt` and
+`ScreenState.Charsets/SavedCharsets` serialize even though their types are
+unexported. `ScreenState.Tabs` is a plain `[]bool` (nil means the default
+stops every 8 columns). `Style` encodes its three packed uint32 components
 (`fg`, `bg`, `underlineColor`) losslessly; those numbers are the internal
 representation, not palette indexes. Keep the in-memory layout unchanged when
 touching these types, and extend `serialize_test.go` when adding new public
@@ -318,6 +320,10 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - `spanScreen` is the only implementation (the old cell-based `gridScreen` was
   deleted)
 - `spanScreen` represents the screen as a list of `spanLine`s, each containing `[]Span`
+- Tab stops are a per-screen `tabs []bool` (`len == size.X`, default every
+  `defaultTabInterval` columns). `setSize` keeps existing stops and defaults
+  new columns; RIS and DECSTR reset them. TAB/CHT stop on the last column when
+  no stop remains (VTE/kitty behavior), CBT stops on column 0.
 - Spans optimize storage: `Span{Width: 80}` (empty Text) for 80 spaces vs storing 80 cells
 - A parallel `wrapped []bool` marks rows that continue the previous row due to
   auto-wrap; it feeds scrollback logical lines and is cleared by explicit cursor
@@ -343,7 +349,8 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - `snapshotState()`/`restoreState()` implement the internal `screen` hooks used
   by `Terminal.Snapshot`/`Restore`: they deep-copy/rebuild `spanLine`s
   (including zero-width spans and links), the `wrapped` flags, cursor, pending
-  wrap, saved cursor, style, character sets, margins, and auto-wrap. `restoreState` emits no
+  wrap, saved cursor, style, character sets, insert mode, tab stops, margins,
+  and auto-wrap. `restoreState` emits no
   callbacks; the terminal owns the repaint notifications.
 - `setScrollCapture` installs a callback invoked (with the terminal lock held)
   before rows scroll off the top, passing the lost rows and their wrapped flags
@@ -369,8 +376,11 @@ termemu is a Go library for terminal emulation. It runs commands inside a PTY (o
 - Distinguishes printable text runs from control codes
 - Parses CSI sequences (cursor movement, SGR colors, screen manipulation).
   Relative cursor moves include CNL/CPL (`E`/`F`), HPR/VPR (`a`/`e`), and
-  CHT/CBT (`I`/`Z`, fixed 8-column tab stops). Explicit cursor moves clamp to
-  the screen and never scroll; only LF/VT/FF/IND and RI scroll at margins.
+  CHT/CBT (`I`/`Z`, which use the screen's tab stop map). Explicit cursor
+  moves clamp to the screen and never scroll; only LF/VT/FF/IND and RI scroll
+  at margins. ICH (`CSI @`) inserts blanks and shifts the row right; IRM
+  (`CSI 4 h/l`) makes printable writes insert instead of overwrite. HTS
+  (`ESC H`) and TBC (`CSI g`) set/clear tab stops.
 - Parses OSC sequences: 0/2 window title, 6/7 working directory
   (`VSCurrentDirectory`; OSC 7 no longer sets `VSCurrentFile`), 8 hyperlinks
   (tracked URI pushed to both screens via internal `setLink`), 52 clipboard

@@ -186,7 +186,7 @@ func (t *terminal) ptyReadOne(state *readLoopState) error {
 	case 9: // HT ^I Horizontal TAB
 		t.withLock(func() {
 			cursorPos := t.screen().CursorPos()
-			cursorPos.X = ((cursorPos.X >> 3) + 1) << 3
+			cursorPos.X = t.screen().nextTabStop(cursorPos.X, 1)
 			t.screen().setCursorPos(cursorPos.X, cursorPos.Y)
 		})
 
@@ -513,6 +513,9 @@ func (t *terminal) handleCommand(r escapeReader) bool {
 			t.screen().decaln()
 		}
 
+	case 'H': // HTS: Set a horizontal tab stop at the cursor column
+		t.screen().setTabStop(t.screen().CursorPos().X)
+
 	case 'D': // Index, scroll down if necessary
 		t.screen().moveCursor(0, 1, false, true)
 
@@ -645,14 +648,15 @@ func (t *terminal) privateModeState(mode int) int {
 }
 
 // handleDECSTR implements DECSTR (CSI ! p): soft terminal reset. It restores
-// default style, full scroll margins, auto-wrap, character sets, and cursor
-// visibility without touching screen contents.
+// default style, full scroll margins, auto-wrap, character sets, tab stops,
+// and cursor visibility without touching screen contents.
 func (t *terminal) handleDECSTR() {
 	for _, s := range []screen{t.mainScreen, t.altScreen} {
 		s.setStyle(NewStyle())
 		s.setScrollMarginTopBottom(0, s.Size().Y-1)
 		s.SetAutoWrap(true)
 		s.resetCharsets()
+		s.resetTabStops()
 	}
 	t.setViewFlag(VFShowCursor, true)
 }
@@ -816,26 +820,11 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		case 'I': // Cursor Forward Tabulation
 			defaultParam(1)
 			pos := t.screen().CursorPos()
-			x := pos.X
-			for i := 0; i < params[0]; i++ {
-				x = ((x >> 3) + 1) << 3
-			}
-			t.screen().setCursorPos(x, pos.Y)
+			t.screen().setCursorPos(t.screen().nextTabStop(pos.X, params[0]), pos.Y)
 		case 'Z': // Cursor Backward Tabulation
 			defaultParam(1)
 			pos := t.screen().CursorPos()
-			x := pos.X
-			for i := 0; i < params[0]; i++ {
-				if x%8 == 0 {
-					x -= 8
-				} else {
-					x -= x % 8
-				}
-				if x < 0 {
-					x = 0
-				}
-			}
-			t.screen().setCursorPos(x, pos.Y)
+			t.screen().setCursorPos(t.screen().prevTabStop(pos.X, params[0]), pos.Y)
 
 		case 'G': // Cursor Character Absolute
 			defaultParam(1)
@@ -876,8 +865,8 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			}
 
 			switch params[0] {
-			case 4:
-				debugPrintln(debugTodo, "TODO: Insert Mode = ", value) // TODO
+			case 4: // IRM: insert mode
+				t.screen().SetInsertMode(value)
 			default:
 				debugPrintln(debugTodo, "TODO: Unhandled CSI mode param: ", params[0])
 				return false
@@ -1133,6 +1122,10 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 			defaultParam(1)
 			t.screen().deleteChars(t.screen().CursorPos().X, t.screen().CursorPos().Y, params[0], CRClear)
 
+		case '@': // Insert n characters (ICH)
+			defaultParam(1)
+			t.screen().insertChars(t.screen().CursorPos().X, t.screen().CursorPos().Y, params[0], CRClear)
+
 		case 'X': // Erase from cursor pos to the right
 			defaultParam(1)
 			t.screen().eraseRegion(Region{
@@ -1141,6 +1134,17 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				X2: t.screen().CursorPos().X + params[0],
 				Y2: t.screen().CursorPos().Y + 1,
 			}, CRClear)
+
+		case 'g': // Clear tab stops (TBC)
+			defaultParam(0)
+			switch params[0] {
+			case 0: // clear the stop at the cursor column
+				t.screen().clearTabStop(t.screen().CursorPos().X)
+			case 3: // clear all stops
+				t.screen().clearAllTabStops()
+			default:
+				debugPrintln(debugTodo, "TODO: Unhandled TBC param: ", params[0])
+			}
 
 		case 'r': // Set Scroll margins
 			top := 1
