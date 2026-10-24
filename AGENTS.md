@@ -520,6 +520,12 @@ clears INSERT and ORIGIN among the mode flags).
   still goes through the tokenizer; keep it that way so VS16/keycap widening
   and read-boundary behavior stay identical (`TestRuneModeASCIIFastPathChunking`).
   Grapheme mode still requires `!lastWasRI && !forceMergeNext`
+- That ASCII run scan is SWAR over 8-byte words: two exact existence tests
+  flag a word containing a byte < 0x20 or > 0x7e, then a byte loop finds the
+  exact stop position. The byte-wise tail is what keeps a hit word, the width
+  limit, and a partial word exact; do not replace it with a byte-index SWAR
+  trick. A negative width remainder (one wide cluster exceeding a tiny budget)
+  skips the scan instead of slicing.
 - `readPrintableRunBuffered` is `readPrintableRun` with filling disabled: it
   consumes only buffered bytes and reports an incomplete trailing cluster as
   empty, so the read loop can apply a whole chunk under one lock and then

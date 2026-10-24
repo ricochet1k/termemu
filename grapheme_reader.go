@@ -1,6 +1,7 @@
 package termemu
 
 import (
+	"encoding/binary"
 	"io"
 	"unicode"
 	"unicode/utf8"
@@ -255,12 +256,36 @@ func (r *GraphemeReader) readPrintableRunFill(maxWidth int, fill bool) (string, 
 				limit = maxWidth - widthUsed
 			}
 			k := 0
-			for k < limit {
-				b := r.data[r.start+k]
-				if b < 0x20 || b >= 0x7f {
-					break
+			// A single wide cluster can exceed a tiny width budget, leaving a
+			// negative remainder; there is no ASCII run to scan then.
+			if limit > 0 {
+				// SWAR: check eight bytes at once. Both tests are exact
+				// existence tests for a byte outside 0x20..0x7e; a hit ends the
+				// wide loop and the byte loop below finds the exact stop
+				// position. A borrow or carry into a later byte can only happen
+				// after a real hit, so it cannot cause a false negative.
+				const ones = 0x0101010101010101 // one 1 per byte
+				const hi = 0x8080808080808080   // one high bit per byte
+				for k+8 <= limit {
+					w := binary.LittleEndian.Uint64(r.data[r.start+k:])
+					// Any byte < 0x20 borrows when 0x20 is subtracted.
+					if (w-0x20*ones)&^w&hi != 0 {
+						break
+					}
+					// Any byte > 0x7e sets the high bit when 1 is added;
+					// OR-ing the original word also catches 0xff (whose sum
+					// carries instead).
+					if ((w+ones)|w)&hi != 0 {
+						break
+					}
+					k += 8
 				}
-				k++
+				for k < limit {
+					if b := r.data[r.start+k]; b < 0x20 || b >= 0x7f {
+						break
+					}
+					k++
+				}
 			}
 			if k > 1 {
 				consume := k - 1
