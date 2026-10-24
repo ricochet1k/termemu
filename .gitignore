@@ -3,3 +3,5 @@
 *.test
 scripts/tmux_integration_test
 scripts/integration_test_results.txt
+
+GAPS.md

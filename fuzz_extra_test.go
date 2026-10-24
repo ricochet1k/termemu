@@ -49,6 +49,7 @@ func FuzzTerminalInputChunking(f *testing.F) {
 		[]byte("a\x00b\tc\r\nd"),
 		[]byte{'a', 0xff, 'b', 0xc0, 0x80, 'c'},
 		[]byte("\xe0\xe0\xe0\x7f00"),
+		[]byte("\xf9\u1936"),
 		[]byte("\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\"),
 	}
 	for _, seed := range seeds {

@@ -39,6 +39,7 @@ func TestGraphemeClustersSplitAcrossReads(t *testing.T) {
 		{"👍🏽", 2},
 		{"1\ufe0f\u20e3", 2},
 		{"e\u0301", 1},
+		{"000\u077b\u1936", 5},
 	}
 	for _, tc := range cases {
 		t.Run(tc.text, func(t *testing.T) {
@@ -56,6 +57,22 @@ func TestGraphemeClustersSplitAcrossReads(t *testing.T) {
 				t.Fatalf("%q advanced %d cells, want %d (spans: %+v)", tc.text, width, tc.width, term.StyledLine(0, 8, 0).Spans)
 			}
 		})
+	}
+}
+
+func TestInvalidUTF8FollowedBySpacingMarkChunkInvariant(t *testing.T) {
+	data := []byte("\xf9\u1936")
+	backend := NewNoPTYBackend(&byteAtATimeReader{data: data}, io.Discard)
+	term := NewWithMode(NewMockFrontend(), backend, TextReadModeGrapheme)
+	_ = term.Resize(40, 3)
+	defer func() { _ = term.Close() }()
+	<-term.Done()
+
+	if got := strings.TrimRight(term.Line(0), " "); got != "\ufffd\u1936" {
+		t.Fatalf("line = %q, want replacement + U+1936", got)
+	}
+	if width := term.CursorPos().X; width != 2 {
+		t.Fatalf("width = %d, want 2", width)
 	}
 }
 

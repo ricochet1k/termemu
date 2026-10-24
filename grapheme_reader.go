@@ -448,6 +448,25 @@ func stepGraphemeCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	if !utf8.FullRune(buf) {
 		return nil, 0, 0, state, false
 	}
+	if r, size := utf8.DecodeRune(buf); r == utf8.RuneError && size == 1 {
+		// Treat an invalid byte like rune mode does: one replacement cell,
+		// with the tokenizer reset so the next rune starts from a clean
+		// state. Feeding the raw invalid byte to uniseg makes clustering
+		// depend on read boundaries (e.g. "\xf9" + U+1936).
+		width := 1
+		consumed := 1
+		cluster := []byte("\ufffd")
+		if nextRuneIsEmojiPresentation(buf[1:]) {
+			// Consume the widening mark with the replacement cell so the
+			// result is the same whether the invalid byte and the mark
+			// arrive in one read or separately.
+			_, size := utf8.DecodeRune(buf[1:])
+			cluster = append(cluster, buf[1:1+size]...)
+			consumed += size
+			width = 2
+		}
+		return cluster, consumed, width, -1, true
+	}
 	cluster, rest, boundaries, newState := uniseg.Step(buf, state)
 	if cluster == nil {
 		return nil, 0, 0, state, false
@@ -670,7 +689,11 @@ func startsWithGraphemeContinuation(cluster []byte) bool {
 		return true
 	case r >= 0xe0020 && r <= 0xe007f: // emoji tag sequences
 		return true
-	case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Mc, r):
+	case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r):
+		// Non-spacing/enclosing marks attach to the preceding cell. Spacing
+		// combining marks (Mc) can occupy their own cell width, so they are
+		// not force-merged; uniseg still clusters them when they arrive in
+		// the same read, and Line.Equivalent compares both forms by cells.
 		return true
 	}
 	return false
