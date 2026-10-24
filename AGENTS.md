@@ -543,6 +543,12 @@ Choose via `NewWithMode(frontend, backend, TextReadModeRune/Grapheme)`
   `FuzzHandoffTargetSize` (Handoff restored at a different target size).
 - Corpus seeds under `testdata/fuzz/<Target>/` are regression tests; keep them
   when a fuzz failure is fixed.
+- `tmux_diff_test.go` is an opt-in differential test (`TERMEMU_TMUX_DIFF=1`,
+  or `scripts/run_tmux_diff.sh`). It starts a private tmux server, compares
+  the captured screen and cursor against termemu, and normalizes termemu's
+  output through the same tmux. Add validated sequences to
+  `tmuxDiffSequences`; avoid version-sensitive features (OSC 8 capture,
+  images) unless the harness is extended.
 - Failing fuzz inputs are kept under `testdata/fuzz/FuzzTerminalInput/` and run
   as seeds by a normal `go test`. Run a longer session with
   `go test -run '^$' -fuzz '^FuzzTerminalInput$' -fuzztime 30s .`.

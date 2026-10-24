@@ -487,6 +487,19 @@ are the packed internal representation (not palette indexes), not `{}`.
 go test ./...
 ```
 
+### Differential testing against tmux
+
+The opt-in `TestDifferentialTmux` starts a private tmux server (it does not
+need to run inside tmux), renders a sequence in tmux, renders the same sequence
+through termemu, feeds termemu's screen back through tmux for canonical
+capture, and compares the screen and cursor. It needs `tmux` installed:
+
+```bash
+scripts/run_tmux_diff.sh
+# or
+TERMEMU_TMUX_DIFF=1 go test -run '^TestDifferentialTmux$' -v .
+```
+
 ## License
 
 MIT. See `LICENSE`.
