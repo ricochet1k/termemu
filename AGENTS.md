@@ -817,6 +817,13 @@ OSC 8) pushes the URI to both screens; `writeString`/`rawWriteRune` stamp it
 onto content spans while erase/scroll/resize blanks stay link-free. `resetTerminal`
 (RIS) ends any active link.
 
+`replaceRange` locates the replacement window with `locateSpanRange` (forward,
+inlinable) or `locateSpanRangeBackward` when x is past the line's midpoint.
+The backward scan reproduces the forward boundary semantics exactly (including
+zero-width spans); `TestLocateSpanRangeBackwardMatchesForward` enforces that.
+Keep the forward scan inlinable: erase paints a full-width span per row and a
+non-inlined lookup call there is a measurable regression.
+
 Use benchmarks in `screen_bench_test.go` to catch regressions.
 
 ## Dependencies

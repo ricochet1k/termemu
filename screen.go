@@ -1478,10 +1478,12 @@ func findSpanAtX(line *spanLine, x int) (int, int) {
 	return len(line.spans), 0
 }
 
-// locateSpanRange locates the start and end of a replacement window in one
-// pass. startIdx == len(spans) means x is past the end of the line. endIdx
-// defaults to the last span with offset 0 when the end is past the line,
-// matching the boundary semantics replaceRange relies on.
+// locateSpanRange locates the start and end of a replacement window in the
+// forward direction. startIdx == len(spans) means x is past the end of the
+// line. endIdx defaults to the last span with offset 0 when the end is past
+// the line, matching the boundary semantics replaceRange relies on. It is kept
+// small enough to inline; replaceRange picks the backward scan when that
+// is cheaper.
 func locateSpanRange(spans []Span, x, end int) (startIdx, startOffset, endIdx, endOffset int) {
 	startIdx = len(spans)
 	endIdx = len(spans) - 1
@@ -1503,6 +1505,60 @@ func locateSpanRange(spans []Span, x, end int) (startIdx, startOffset, endIdx, e
 			return
 		}
 		pos = endPos
+	}
+	return
+}
+
+// locateSpanRangeBackward is locateSpanRange scanned from the end of the line.
+// startIdx is the rightmost span containing cell x (a boundary selects the
+// span after it) and endIdx is the rightmost span containing cell end-1. That
+// reproduces the forward scan's picks exactly, including zero-width spans,
+// which cover no cell and are skipped by both tests.
+func locateSpanRangeBackward(spans []Span, total, x, end int) (startIdx, startOffset, endIdx, endOffset int) {
+	startIdx = len(spans)
+	endIdx = 0
+	foundStart := false
+	// An empty window before the line starts: the forward scan picks span 0,
+	// offset 0 for the end regardless of that span's width.
+	foundEnd := end <= 0
+	endCell := end - 1
+	endPos := total
+	for i := len(spans) - 1; i >= 0; i-- {
+		startPos := endPos - spans[i].Width
+		if !foundStart && startPos <= x && x < endPos {
+			startIdx = i
+			startOffset = x - startPos
+			foundStart = true
+		}
+		if !foundEnd && startPos <= endCell && endCell < endPos {
+			endIdx = i
+			endOffset = end - startPos
+			foundEnd = true
+		}
+		if foundStart && foundEnd {
+			if endIdx < startIdx {
+				endIdx = startIdx
+				endOffset = 0
+			}
+			return
+		}
+		endPos = startPos
+	}
+	if !foundStart {
+		// x is at or past the line end: the forward scan never enters its end
+		// check and keeps these defaults.
+		startIdx = len(spans)
+		startOffset = 0
+		endIdx = len(spans) - 1
+		endOffset = 0
+		return
+	}
+	// The end cell can lie in an earlier span than the start when the window
+	// starts on a span boundary; the forward scan only considers spans from
+	// startIdx on, so clamp to the same choice.
+	if endIdx < startIdx {
+		endIdx = startIdx
+		endOffset = 0
 	}
 	return
 }
@@ -1551,7 +1607,12 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 	// boundary (rare) forces a second look.
 	startPadCells := 0
 	endPadCells := 0
-	startIdx, startOffset, endIdx, endOffset := locateSpanRange(spans, x, x+n)
+	var startIdx, startOffset, endIdx, endOffset int
+	if x > 0 && x >= totalWidth/2 {
+		startIdx, startOffset, endIdx, endOffset = locateSpanRangeBackward(spans, totalWidth, x, x+n)
+	} else {
+		startIdx, startOffset, endIdx, endOffset = locateSpanRange(spans, x, x+n)
+	}
 	// Idempotent repaints (progress bars, watch, status lines, full-frame
 	// redraws of unchanged rows) put the same canonical span back where it
 	// already is. Leaving it untouched and skipping the callback avoids span
@@ -1575,7 +1636,11 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		}
 	}
 	if relocate {
-		startIdx, startOffset, endIdx, endOffset = locateSpanRange(spans, x, x+n)
+		if x > 0 && x >= totalWidth/2 {
+			startIdx, startOffset, endIdx, endOffset = locateSpanRangeBackward(spans, totalWidth, x, x+n)
+		} else {
+			startIdx, startOffset, endIdx, endOffset = locateSpanRange(spans, x, x+n)
+		}
 	}
 	if end := x + n; end > 0 && end < totalWidth {
 		if endIdx < len(spans) && endOffset > 0 && endOffset < spans[endIdx].Width {
@@ -1589,7 +1654,11 @@ func replaceRange(line *spanLine, x int, n int, insert Span, mode TextReadMode) 
 		}
 	}
 	if relocate {
-		startIdx, startOffset, endIdx, endOffset = locateSpanRange(spans, x, x+n)
+		if x > 0 && x >= totalWidth/2 {
+			startIdx, startOffset, endIdx, endOffset = locateSpanRangeBackward(spans, totalWidth, x, x+n)
+		} else {
+			startIdx, startOffset, endIdx, endOffset = locateSpanRange(spans, x, x+n)
+		}
 	}
 
 	// A real write (insert.Width > 0) must keep the line's total width. Pad

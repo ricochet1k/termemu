@@ -247,3 +247,31 @@ func TestScreenWritesPreserveLineWidth(t *testing.T) {
 		check(step)
 	}
 }
+
+// TestLocateSpanRangeBackwardMatchesForward checks the backward scan against
+// the forward one for every window in random fragmented lines. Zero-width
+// spans (combining marks) are included because the boundary semantics are
+// subtle there.
+func TestLocateSpanRangeBackwardMatchesForward(t *testing.T) {
+	rng := rand.New(rand.NewSource(0x5ca1e))
+	for trial := 0; trial < 500; trial++ {
+		n := 1 + rng.Intn(24)
+		spans := make([]Span, n)
+		total := 0
+		for i := range spans {
+			w := rng.Intn(4) // 0 covers zero-width combining spans
+			spans[i] = Span{Width: w}
+			total += w
+		}
+		for x := 0; x <= total; x++ {
+			for end := x; end <= total; end++ {
+				fs, fso, fe, feo := locateSpanRange(spans, x, end)
+				bs, bso, be, beo := locateSpanRangeBackward(spans, total, x, end)
+				if fs != bs || fso != bso || fe != be || feo != beo {
+					t.Fatalf("trial %d spans=%#v x=%d end=%d: forward=(%d,%d,%d,%d) backward=(%d,%d,%d,%d)",
+						trial, spans, x, end, fs, fso, fe, feo, bs, bso, be, beo)
+				}
+			}
+		}
+	}
+}
