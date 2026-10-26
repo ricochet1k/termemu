@@ -14,6 +14,13 @@ import (
 // Version is the emulator version reported by XTVERSION (CSI > q).
 const Version = "0.1"
 
+// Default cell dimensions in pixels. They match the pixel geometry reported to
+// the child by PTYBackend.SetSize and are used for XTWINOPS size replies.
+const (
+	cellPixelWidth  = 8
+	cellPixelHeight = 16
+)
+
 // maxEscapeCommandBytes bounds the user-space buffer for a single ESC-initiated
 // command (CSI/OSC/DCS/APC/etc.). Longer sequences are consumed and discarded
 // rather than growing memory without bound.
@@ -112,12 +119,15 @@ type readLoopState struct {
 
 func newReadLoopState(src io.Reader, st ReaderState) *readLoopState {
 	gs := GraphemeState{
-		Pending:        st.Pending,
-		State:          st.State,
-		Initial:        st.Initial,
-		ForceMergeNext: st.ForceMergeNext,
-		LastWasRI:      st.LastWasRI,
-		Mode:           st.Mode,
+		Pending:          st.Pending,
+		State:            st.State,
+		Initial:          st.Initial,
+		ForceMergeNext:   st.ForceMergeNext,
+		LastWasRI:        st.LastWasRI,
+		RunHasBase:       st.RunHasBase,
+		LastWasHanging:   st.LastWasHanging,
+		LastWasSynthetic: st.LastWasSynthetic,
+		Mode:             st.Mode,
 	}
 	return &readLoopState{
 		gr:         NewGraphemeReaderFromState(src, gs),
@@ -129,13 +139,16 @@ func newReadLoopState(src io.Reader, st ReaderState) *readLoopState {
 func (s *readLoopState) snapshot() ReaderState {
 	gs := s.gr.SnapshotState()
 	return ReaderState{
-		Pending:        gs.Pending,
-		PendingCommand: append([]byte(nil), s.pendingCmd...),
-		State:          gs.State,
-		Initial:        gs.Initial,
-		ForceMergeNext: gs.ForceMergeNext,
-		LastWasRI:      gs.LastWasRI,
-		Mode:           gs.Mode,
+		Pending:          gs.Pending,
+		PendingCommand:   append([]byte(nil), s.pendingCmd...),
+		State:            gs.State,
+		Initial:          gs.Initial,
+		ForceMergeNext:   gs.ForceMergeNext,
+		LastWasRI:        gs.LastWasRI,
+		RunHasBase:       gs.RunHasBase,
+		LastWasHanging:   gs.LastWasHanging,
+		LastWasSynthetic: gs.LastWasSynthetic,
+		Mode:             gs.Mode,
 	}
 }
 
@@ -1431,6 +1444,19 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		case 't': // Window manipulation
 			if len(params) > 0 {
 				switch params[0] {
+				case 14: // Report text area size in pixels
+					size := t.screen().Size()
+					_ = t.writeReply([]byte(fmt.Sprintf("\033[4;%d;%dt",
+						size.Y*cellPixelHeight, size.X*cellPixelWidth)))
+					return true
+				case 16: // Report character cell size in pixels
+					_ = t.writeReply([]byte(fmt.Sprintf("\033[6;%d;%dt",
+						cellPixelHeight, cellPixelWidth)))
+					return true
+				case 18: // Report text area size in characters
+					size := t.screen().Size()
+					_ = t.writeReply([]byte(fmt.Sprintf("\033[8;%d;%dt", size.Y, size.X)))
+					return true
 				case 22, 23:
 					// save/restore window title/icon; no-op for now
 					if *debugCmd {
@@ -2058,12 +2084,78 @@ func (t *terminal) consumeString(r escapeReader) bool {
 }
 
 func (t *terminal) handleDCS(r escapeReader) bool {
-	payload, ok := readStringPayload(r, *debugCmd)
+	// The whole DCS command is already buffered (bounded by
+	// maxEscapeCommandBytes), so keeping the payload is safe and lets DECRQSS
+	// inspect its request string.
+	payload, ok := readStringPayload(r, true)
 	if !ok {
 		return false
 	}
 	if *debugCmd {
 		debugPrintf(debugCmd, "DCS payload: %q\n", string(payload))
 	}
+	if strings.HasPrefix(string(payload), "$q") {
+		t.handleDECRQSS(string(payload[2:]))
+	}
 	return true
+}
+
+// sgrStatusPayload renders a style as the single SGR parameter list used in a
+// DECRQSS reply (for example "0;1;3m"). Style.ANSIEscape emits a reset followed
+// by one sequence per changed mode/color; DECRPSS needs one combined sequence.
+func sgrStatusPayload(style Style) string {
+	esc := style.ANSIEscape()
+	var parts []string
+	for len(esc) > 0 {
+		if len(esc) < 3 || esc[0] != ESC || esc[1] != '[' {
+			break
+		}
+		end := 2
+		for end < len(esc) && esc[end] != 'm' {
+			end++
+		}
+		if end >= len(esc) {
+			break
+		}
+		param := string(esc[2:end])
+		if param == "" {
+			param = "0"
+		}
+		parts = append(parts, param)
+		esc = esc[end+1:]
+	}
+	if len(parts) == 0 {
+		return "0m"
+	}
+	return strings.Join(parts, ";") + "m"
+}
+
+// handleDECRQSS answers DCS $ q Pt ST (Request Status String). Supported
+// requests reply DCS 1 $ r <setting> ST; unknown requests reply DCS 0 $ r ST.
+func (t *terminal) handleDECRQSS(request string) {
+	reply := ""
+	switch request {
+	case "m": // SGR
+		reply = sgrStatusPayload(t.screen().Style())
+	case "r": // DECSTBM
+		reply = fmt.Sprintf("%d;%dr", t.screen().TopMargin()+1, t.screen().BottomMargin()+1)
+	case "s": // DECSLRM: horizontal margins are not implemented, report full width
+		size := t.screen().Size()
+		reply = fmt.Sprintf("1;%ds", size.X)
+	case " q": // DECSCUSR
+		reply = fmt.Sprintf("%d q", t.viewInts[VICursorShape])
+	case "t": // DECSLPP
+		reply = fmt.Sprintf("%dt", t.screen().Size().Y)
+	case "$|": // DECSCPP
+		reply = fmt.Sprintf("%d$|", t.screen().Size().X)
+	case "*|": // DECSNLS
+		reply = "1*|"
+	case "*x": // DECSACE
+		reply = "0*x"
+	}
+	if reply == "" {
+		_ = t.writeReply([]byte("\033P0$r\033\\"))
+		return
+	}
+	_ = t.writeReply([]byte("\033P1$r" + reply + "\033\\"))
 }

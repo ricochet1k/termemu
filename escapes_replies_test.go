@@ -76,6 +76,30 @@ func TestEscapeQueryReplies(t *testing.T) {
 	}
 }
 
+func TestWindowAndCellSizeReplies(t *testing.T) {
+	r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+	feedQueryExpectReply(t, t1, r, "\x1b[16t", "\x1b[6;16;8t")
+	feedQueryExpectReply(t, t1, r, "\x1b[18t", "\x1b[8;14;80t")
+	feedQueryExpectReply(t, t1, r, "\x1b[14t", "\x1b[4;224;640t")
+}
+
+func TestDECRQSSReplies(t *testing.T) {
+	r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	feedQueryExpectReply(t, t1, r, "\x1bP$qm\x1b\\", "\x1bP1$r0m\x1b\\")
+	feedESC(t, t1, "\x1b[3;1m")
+	feedQueryExpectReply(t, t1, r, "\x1bP$qm\x1b\\", "\x1bP1$r0;1;3m\x1b\\")
+	feedQueryExpectReply(t, t1, r, "\x1bP$qr\x1b\\", "\x1bP1$r1;14r\x1b\\")
+	t1.mustHandleCommand(t, "[2;3r")
+	feedQueryExpectReply(t, t1, r, "\x1bP$qr\x1b\\", "\x1bP1$r2;3r\x1b\\")
+	feedQueryExpectReply(t, t1, r, "\x1bP$q q\x1b\\", "\x1bP1$r0 q\x1b\\")
+	t1.mustHandleCommand(t, "[3 q")
+	feedQueryExpectReply(t, t1, r, "\x1bP$q q\x1b\\", "\x1bP1$r3 q\x1b\\")
+	feedQueryExpectReply(t, t1, r, "\x1bP$q$|\x1b\\", "\x1bP1$r80$|\x1b\\")
+	feedQueryExpectReply(t, t1, r, "\x1bP$q*x\x1b\\", "\x1bP1$r0*x\x1b\\")
+	feedQueryExpectReply(t, t1, r, "\x1bP$qz\x1b\\", "\x1bP0$r\x1b\\")
+}
+
 func TestEscapeQueryRepliesWithKeyboardFlags(t *testing.T) {
 	r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
 	t1.mustHandleCommand(t, "[=5u")

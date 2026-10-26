@@ -242,7 +242,9 @@ func runDifferentialCase(t *testing.T, tmuxPath, sock, seq string, width, height
 
 var tmuxRandomTokens = []string{
 	"abc", "Hello", "世界", "🐹", "e\u0301", "1\ufe0f\u20e3", "👍🏽",
-	"\r", "\n", "\t", "\b",
+	// Tabs are omitted: a partially overwritten tab cell is serialized
+	// ambiguously by capture-pane, so it cannot be normalized reliably.
+	"\r", "\n", "\b",
 	"\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1b[3;7H", "\x1b[G", "\x1b[3d",
 	"\x1b[K", "\x1b[1K", "\x1b[2K", "\x1b[J", "\x1b[1J", "\x1b[2J",
 	"\x1b[E", "\x1b[F", "\x1b[2E", "\x1b[2F", "\x1b[Z",
@@ -272,7 +274,9 @@ func startTmuxDiffServer(t *testing.T, tmuxPath string) string {
 	// history; xterm (and termemu) discard them, so turn the option off to
 	// compare scrollback after CSI 2 J.
 	tmuxCommand(t, tmuxPath, sock, "set-option", "-g", "scroll-on-clear", "off")
-	tmuxCommand(t, tmuxPath, sock, "set-option", "-g", "window-size", "manual")
+	// Do not set window-size manual: tmux 3.6a can crash in
+	// clients_calculate_size when a detached session is created while no
+	// client is attached. Every session is sized explicitly with -x/-y.
 	t.Cleanup(func() {
 		cmd := exec.Command(tmuxPath, "-L", sock, "kill-server")
 		_ = cmd.Run()
@@ -309,9 +313,9 @@ func tmuxRenderPane(t *testing.T, tmuxPath, sock string, data []byte, width, hei
 	prefix := ""
 	if raw {
 		// Disable output post-processing so bare LF/VT/FF reach the pane.
-		prefix = "stty -opost; "
+		prefix = "stty -opost && "
 	}
-	script := fmt.Sprintf("%scat %s; : > %s; exec sleep 3600",
+	script := fmt.Sprintf("%scat %s && : > %s && exec sleep 3600",
 		prefix, shellQuote(dataPath), shellQuote(donePath))
 	tmuxCommand(t, tmuxPath, sock, "new-session", "-d", "-s", session,
 		"-x", strconv.Itoa(width), "-y", strconv.Itoa(height), "sh -c "+shellQuote(script))

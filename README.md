@@ -397,10 +397,10 @@ backend. Use `AdoptMaster` when only the master is available (no
 
 Pause interrupts a blocked read by setting a deadline through the optional
 `SetReadDeadline` method (`PTYBackend`, `NoPTYBackend` when its reader supports
-deadlines such as `*os.File`, and `TeeBackend`). A backend that does not
-support deadlines returns `errors.ErrUnsupported`; `Pause` then waits for the
-next byte or `ctx` cancellation. Always pass a context if pause must be
-bounded.
+deadlines such as `*os.File`, and `TeeBackend`). A backend may instead provide
+`Wake` to interrupt the read. If neither is available (or the deadline setter
+returns `errors.ErrUnsupported` and there is no `Wake`), `Pause` returns
+`ErrPauseUnsupported` immediately rather than blocking until the next byte.
 
 ```go
 h, err := term.Pause(ctx) // leaves the loop paused

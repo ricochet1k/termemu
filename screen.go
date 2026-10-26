@@ -1020,6 +1020,7 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 		s.cursorPos.X = clamp(s.cursorPos.X, 0, s.size.X-1)
 	}
 
+	startY := s.cursorPos.Y
 	s.cursorPos.Y += dy
 	if scroll && dy != 0 {
 		// Margins only affect vertical movement. A carriage return at a row
@@ -1032,14 +1033,29 @@ func (s *spanScreen) moveCursor(dx, dy int, wrap bool, scroll bool) {
 			s.scroll(s.topMargin, s.bottomMargin, s.bottomMargin-s.cursorPos.Y)
 			s.cursorPos.Y = s.bottomMargin
 		}
-	} else {
-		lo, hi := 0, s.size.Y-1
-		if s.originMode {
-			// Origin mode confines the cursor to the scroll region, even
-			// for explicit cursor movements.
-			lo, hi = s.topMargin, s.bottomMargin
+	} else if s.originMode {
+		// Origin mode confines the cursor to the scroll region, even for
+		// explicit cursor movements.
+		s.cursorPos.Y = clamp(s.cursorPos.Y, s.topMargin, s.bottomMargin)
+	} else if dy > 0 {
+		// Vertical movement stops at the scroll margins once the cursor is
+		// inside (or entering) the region. A cursor already below the region
+		// moves to the screen edge instead of jumping back up to the margin.
+		cap := s.bottomMargin
+		if startY > s.bottomMargin {
+			cap = s.size.Y - 1
 		}
-		s.cursorPos.Y = clamp(s.cursorPos.Y, lo, hi)
+		s.cursorPos.Y = clamp(s.cursorPos.Y, 0, cap)
+	} else if dy < 0 {
+		// Mirror image: stopping at the top margin from below, but never
+		// jumping down into the region when the cursor starts above it.
+		floor := s.topMargin
+		if startY < s.topMargin {
+			floor = 0
+		}
+		s.cursorPos.Y = clamp(s.cursorPos.Y, floor, s.size.Y-1)
+	} else {
+		s.cursorPos.Y = clamp(s.cursorPos.Y, 0, s.size.Y-1)
 	}
 	if s.cursorPos.Y >= s.size.Y {
 		panic(fmt.Sprintf("moveCursor outside, %v %v  %v, %v, %v, %v", s.cursorPos, s.size, dx, dy, wrap, scroll))
@@ -1850,7 +1866,8 @@ func isolateCell(sp Span, offset int, mode TextReadMode) (left, target, right Sp
 	if offset > 0 {
 		l, r, wide := splitSpan(sp, offset, mode)
 		if wide.Width > 0 {
-			return Span{}, sp, Span{}
+			wide, r = attachZeroWidthRight(wide, r)
+			return l, wide, r
 		}
 		left = l
 		sp = r
@@ -1860,9 +1877,21 @@ func isolateCell(sp Span, offset int, mode TextReadMode) (left, target, right Sp
 	}
 	t, r, wide := splitSpan(sp, 1, mode)
 	if wide.Width > 0 {
-		return left, sp, Span{}
+		wide, r = attachZeroWidthRight(wide, r)
+		return left, wide, r
 	}
 	return left, t, r
+}
+
+// attachZeroWidthRight moves zero-width text immediately after a wide cluster
+// (for example a ZWJ) back into the target. It belongs to the same cell and
+// must not be stranded when the cluster is isolated for a mark merge.
+func attachZeroWidthRight(target, right Span) (Span, Span) {
+	if right.Width == 0 && right.Text != "" {
+		target.Text += right.Text
+		right = Span{}
+	}
+	return target, right
 }
 
 func (s *spanScreen) mergeIntoPreviousCell(text string) {
@@ -1895,8 +1924,10 @@ func (s *spanScreen) mergeIntoPreviousCell(text string) {
 	// cluster starting offset cells earlier.
 	left, target, right := isolateCell(line.spans[idx], offset, s.textMode)
 	targetStart := cell
-	if offset > 0 && target.Width > 1 {
-		targetStart = cell - offset
+	if target.Width > 1 {
+		// offset is relative to the original span; cells in left come before
+		// the target cluster.
+		targetStart = cell - (offset - left.Width)
 	}
 	if left.Width > 0 || right.Width > 0 {
 		origIdx := idx

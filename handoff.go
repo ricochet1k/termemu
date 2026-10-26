@@ -12,6 +12,11 @@ import (
 // dimensions).
 var ErrHandoffInvalid = errors.New("termemu: invalid handoff")
 
+// ErrPauseUnsupported is returned by Pause when the backend cannot interrupt a
+// blocked read (it implements neither SetReadDeadline nor Wake). Waiting for
+// the next byte would make Pause unbounded, so it fails instead.
+var ErrPauseUnsupported = errors.New("termemu: Pause requires a backend that can interrupt a blocked read")
+
 // ReaderState is the read-loop state that lives in user space: bytes already
 // read from the backend but not applied, plus any partial escape command.
 type ReaderState struct {
@@ -20,10 +25,13 @@ type ReaderState struct {
 	State          int    // GraphemeReader UTF-8/grapheme state
 	// Initial marks a reader that has not processed any bytes yet; State is
 	// then ignored and the reader starts from the tokenizer's initial state.
-	Initial        bool
-	ForceMergeNext bool
-	LastWasRI      bool
-	Mode           TextReadMode
+	Initial          bool
+	ForceMergeNext   bool
+	LastWasRI        bool
+	RunHasBase       bool
+	LastWasHanging   bool
+	LastWasSynthetic bool
+	Mode             TextReadMode
 }
 
 // Handoff is everything needed to resume a terminal in a new process.
@@ -38,9 +46,9 @@ type Handoff struct {
 
 // Pause stops the read loop and captures everything needed to resume the
 // terminal, either in this process (Resume) or another one (NewFromHandoff).
-// It leaves the terminal paused. If the backend supports SetReadDeadline the
-// blocked read is interrupted immediately; otherwise Pause may wait for the
-// next byte (or ctx cancellation).
+// It leaves the terminal paused. The backend must be able to interrupt a
+// blocked read, either through SetReadDeadline or Wake; otherwise Pause
+// returns ErrPauseUnsupported instead of waiting for the next byte.
 //
 // For a cross-process handoff, call Pause, transfer the backend file
 // descriptors (PTYBackend.Master/Slave) plus the Handoff value, and then close
@@ -60,15 +68,21 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 		t.lifecycleMu.Unlock()
 		return Handoff{}, errors.New("termemu: terminal is already paused")
 	}
+	started := t.readLoopStarted
+	backend := t.backend
+	_, hasDeadline := backend.(interface{ SetReadDeadline(time.Time) error })
+	_, hasWake := backend.(interface{ Wake() })
+	if started && !hasDeadline && !hasWake {
+		t.lifecycleMu.Unlock()
+		return Handoff{}, ErrPauseUnsupported
+	}
 	t.paused = true
 	t.pausedFlag.Store(true)
 	ready := make(chan ReaderState, 1)
 	resume := make(chan bool, 1)
 	t.pauseReady = ready
 	t.pauseResume = resume
-	started := t.readLoopStarted
 	t.lifecycleMu.Unlock()
-	backend := t.backend
 	mode := t.textReadMode
 
 	if !started {
@@ -76,7 +90,16 @@ func (t *terminal) Pause(ctx context.Context) (Handoff, error) {
 	}
 
 	if setter, ok := backend.(interface{ SetReadDeadline(time.Time) error }); ok {
-		_ = setter.SetReadDeadline(time.Now())
+		if err := setter.SetReadDeadline(time.Now()); err != nil {
+			if !errors.Is(err, errors.ErrUnsupported) {
+				t.abortPause()
+				return Handoff{}, fmt.Errorf("termemu: Pause: set read deadline: %w", err)
+			}
+			if !hasWake {
+				t.abortPause()
+				return Handoff{}, ErrPauseUnsupported
+			}
+		}
 	}
 	// Also wake a loop sleeping in the reuse backoff (child exited); a read
 	// deadline alone does not interrupt that timer.
@@ -232,6 +255,20 @@ func (t *terminal) clearReadDeadlineIfIdle() {
 	t.clearReadDeadline()
 }
 
+// resizeSnapshotScreen retargets a screen snapshot to a new size, applying
+// the same vertical-margin adjustment as spanScreen.setSize: the bottom margin
+// keeps its distance from the bottom edge, so a full-screen region stays
+// full-screen after growing. The capture dimensions are updated as well.
+func resizeSnapshotScreen(st *ScreenState, w, h int) {
+	if st.Width != w || st.Height != h {
+		oldH := st.Height
+		st.BottomMargin = h - (oldH - st.BottomMargin)
+		st.TopMargin = clamp(st.TopMargin, 0, h-1)
+		st.BottomMargin = clamp(st.BottomMargin, st.TopMargin, h-1)
+	}
+	st.Width, st.Height = w, h
+}
+
 // NewFromHandoff creates a terminal from a Handoff and starts its read loop
 // with the captured reader state. The terminal is created paused (no reads
 // happen) until the snapshot and scrollback have been restored. Handoff.Size
@@ -272,8 +309,8 @@ func NewFromHandoff(f Frontend, backend Backend, h Handoff, opts ...TerminalOpti
 		return nil, err
 	}
 	snap := h.Snapshot
-	snap.Main.Width, snap.Main.Height = h.Size.X, h.Size.Y
-	snap.Alt.Width, snap.Alt.Height = h.Size.X, h.Size.Y
+	resizeSnapshotScreen(&snap.Main, h.Size.X, h.Size.Y)
+	resizeSnapshotScreen(&snap.Alt, h.Size.X, h.Size.Y)
 	if err := t.Restore(snap); err != nil {
 		_ = backend.Close()
 		return nil, err

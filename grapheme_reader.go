@@ -64,6 +64,16 @@ type GraphemeReader struct {
 	// cluster's width chunk-dependent, so the first cluster of the new read
 	// is measured standalone.
 	standaloneWidth bool
+	// runHasBase records whether the current printable run has emitted a
+	// cluster with a base character. lastWasHanging records that the most
+	// recent token was a continuation-only cluster (for example a leading
+	// combining mark) merged without a base. Both make split clusters behave
+	// like the same bytes read in one piece: a spacing mark following a hanging
+	// mark must merge instead of claiming a cell, while one following a real
+	// base keeps its own width.
+	runHasBase       bool
+	lastWasHanging   bool
+	lastWasSynthetic bool
 }
 
 const graphemeReadBufferSize = 4096
@@ -77,10 +87,13 @@ type GraphemeState struct {
 	// Initial is true when State has not been set yet; the reader then
 	// starts from the tokenizer's initial state (-1) instead of state 0,
 	// which would incorrectly continue a previous grapheme.
-	Initial        bool
-	ForceMergeNext bool
-	LastWasRI      bool
-	Mode           TextReadMode
+	Initial          bool
+	ForceMergeNext   bool
+	LastWasRI        bool
+	RunHasBase       bool
+	LastWasHanging   bool
+	LastWasSynthetic bool
+	Mode             TextReadMode
 }
 
 func NewGraphemeReader(src io.Reader) *GraphemeReader {
@@ -99,12 +112,15 @@ func NewGraphemeReaderFromState(src io.Reader, st GraphemeState) *GraphemeReader
 		state = -1
 	}
 	r := &GraphemeReader{
-		src:             src,
-		state:           state,
-		forceMergeNext:  st.ForceMergeNext,
-		lastWasRI:       st.LastWasRI,
-		mode:            st.Mode,
-		standaloneWidth: true,
+		src:              src,
+		state:            state,
+		forceMergeNext:   st.ForceMergeNext,
+		lastWasRI:        st.LastWasRI,
+		runHasBase:       st.RunHasBase,
+		lastWasHanging:   st.LastWasHanging,
+		lastWasSynthetic: st.LastWasSynthetic,
+		mode:             st.Mode,
+		standaloneWidth:  true,
 	}
 	if len(st.Pending) > 0 {
 		r.data = append([]byte(nil), st.Pending...)
@@ -118,12 +134,15 @@ func NewGraphemeReaderFromState(src io.Reader, st GraphemeState) *GraphemeReader
 func (r *GraphemeReader) SnapshotState() GraphemeState {
 	pending := append([]byte(nil), r.data[r.start:r.end]...)
 	return GraphemeState{
-		Pending:        pending,
-		State:          r.state,
-		Initial:        r.state == -1,
-		ForceMergeNext: r.forceMergeNext,
-		LastWasRI:      r.lastWasRI,
-		Mode:           r.mode,
+		Pending:          pending,
+		State:            r.state,
+		Initial:          r.state == -1,
+		ForceMergeNext:   r.forceMergeNext,
+		LastWasRI:        r.lastWasRI,
+		RunHasBase:       r.runHasBase,
+		LastWasHanging:   r.lastWasHanging,
+		LastWasSynthetic: r.lastWasSynthetic,
+		Mode:             r.mode,
 	}
 }
 
@@ -151,6 +170,9 @@ func (r *GraphemeReader) ReadByte() (byte, error) {
 		r.state = -1
 		r.forceMergeNext = false
 		r.lastWasRI = false
+		r.runHasBase = false
+		r.lastWasHanging = false
+		r.lastWasSynthetic = false
 	}
 	return b, nil
 }
@@ -175,6 +197,9 @@ func (r *GraphemeReader) discardBuffered(n int) {
 	r.state = -1
 	r.forceMergeNext = false
 	r.lastWasRI = false
+	r.runHasBase = false
+	r.lastWasHanging = false
+	r.lastWasSynthetic = false
 }
 
 // ReadPrintableBytes reads a contiguous run of printable bytes from the stream.
@@ -334,9 +359,12 @@ func (r *GraphemeReader) readPrintableRunFill(maxWidth int, fill bool) (string, 
 		}
 		if isC1ControlCluster(cluster) {
 			// C1 controls (U+0080-U+009F) have no display representation.
-			// If text is already buffered, stop here so the emitted run does
-			// not contain the skipped bytes; the next call consumes them.
-			if widthUsed > 0 {
+			// If a token is already buffered, stop here so the emitted run
+			// does not contain the skipped bytes; the next call consumes
+			// them. A merge-only token (widthUsed == 0) still counts: dropping
+			// it would make chunked input lose a combining mark that the
+			// whole-buffer path emitted.
+			if widthUsed > 0 || r.start != runStart {
 				break
 			}
 			// Consume the rune without emitting it; this also keeps the
@@ -350,6 +378,14 @@ func (r *GraphemeReader) readPrintableRunFill(maxWidth int, fill bool) (string, 
 			continue
 		}
 		if mergeRun && !merge {
+			break
+		}
+		if merge && widthUsed > 0 && standaloneGraphemeWidth(cluster) > 0 {
+			// A forced merge (for example the base after a ZWJ) brings its
+			// own advance into a cell that already has content. End the run
+			// here so the merged text is attached by the screen to the
+			// existing cell instead of being packed into a wider span whose
+			// rune widths no longer match its cell width.
 			break
 		}
 
@@ -593,7 +629,66 @@ func stepGraphemeCluster(buf []byte, state int) ([]byte, int, int, int, bool) {
 	width := boundaries >> uniseg.ShiftWidth
 	width = emojiPresentationWidth(cluster, width)
 	consumed := len(buf) - len(rest)
+	// uniseg may attach an invalid or C1 byte to the end of a valid cluster
+	// (for example U+0603 followed by a stray 0x99). The printable-run scanner
+	// would treat that byte as a control when it arrives alone, so stop the
+	// cluster before it and leave it for the next iteration.
+	if off, _ := firstNonPrintableClusterRune(cluster); off > 0 {
+		prefix := cluster[:off]
+		w := standaloneGraphemeWidth(prefix)
+		return prefix, off, emojiPresentationWidth(prefix, w), -1, true
+	}
+	// Spacing combining marks and prepended format characters can change a
+	// cluster's width or attach to the following base. Emit them as separate
+	// tokens so a cluster split at a read boundary and the same bytes read
+	// together have identical cell layout. ZWJ must stay in the cluster: it
+	// glues the next rune to the same cell.
+	if off, size := firstSplittableClusterRune(cluster); size > 0 {
+		if off > 0 {
+			prefix := cluster[:off]
+			w := standaloneGraphemeWidth(prefix)
+			return prefix, off, emojiPresentationWidth(prefix, w), -1, true
+		}
+		prefix := cluster[:size]
+		w := standaloneGraphemeWidth(prefix)
+		return prefix, size, emojiPresentationWidth(prefix, w), -1, true
+	}
 	return cluster, consumed, width, newState, true
+}
+
+// firstNonPrintableClusterRune returns the byte offset and size of the first
+// invalid or control rune inside cluster. It returns 0,0 when every rune is
+// printable. Multi-byte runes are decoded whole, so continuation bytes in
+// their encoding are not mistaken for standalone C1 controls.
+func firstNonPrintableClusterRune(cluster []byte) (off, size int) {
+	for off < len(cluster) {
+		r, n := utf8.DecodeRune(cluster[off:])
+		if r == utf8.RuneError && n == 1 {
+			return off, n
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return off, n
+		}
+		off += n
+	}
+	return 0, 0
+}
+
+// firstSplittableClusterRune returns the byte offset and size of the first
+// spacing combining mark (General_Category Mc) or non-ZWJ format character
+// (Cf) in cluster. size is zero when there is none.
+func firstSplittableClusterRune(cluster []byte) (off, size int) {
+	for off < len(cluster) {
+		r, n := utf8.DecodeRune(cluster[off:])
+		if r == utf8.RuneError && n == 1 {
+			return 0, 0
+		}
+		if unicode.Is(unicode.Mc, r) || (unicode.Is(unicode.Cf, r) && r != '\u200d') {
+			return off, n
+		}
+		off += n
+	}
+	return 0, 0
 }
 
 func standaloneGraphemeWidth(cluster []byte) int {
@@ -640,7 +735,13 @@ func nextRuneIsEmojiPresentation(buf []byte) bool {
 
 func (r *GraphemeReader) nextTokenInfo(buf []byte) (cluster []byte, consumed int, width int, merge bool, newState int, nextForceMergeNext bool, nextLastWasRI bool, ok bool) {
 	if r.mode == TextReadModeGrapheme {
-		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok = nextGraphemeTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI, r.standaloneWidth)
+		var nextRunHasBase, nextLastWasHanging, nextLastWasSynthetic bool
+		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, nextRunHasBase, nextLastWasHanging, nextLastWasSynthetic, ok = nextGraphemeTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI, r.standaloneWidth, r.runHasBase, r.lastWasHanging, r.lastWasSynthetic)
+		if ok {
+			r.runHasBase = nextRunHasBase
+			r.lastWasHanging = nextLastWasHanging
+			r.lastWasSynthetic = nextLastWasSynthetic
+		}
 	} else {
 		cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, ok = nextRuneTokenInfo(buf, r.state, r.forceMergeNext, r.lastWasRI)
 	}
@@ -709,18 +810,33 @@ func extendEmojiPresentation(buf, cluster []byte, consumed, width, newState int)
 	return buf[:consumed+size], consumed + size, 2, -1
 }
 
-func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool, standaloneWidth bool) ([]byte, int, int, bool, int, bool, bool, bool) {
+func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI bool, standaloneWidth bool, runHasBase bool, lastWasHanging bool, lastWasSynthetic bool) ([]byte, int, int, bool, int, bool, bool, bool, bool, bool, bool) {
 	// Printable ASCII is always its own one-cell cluster. Skipping uniseg
 	// here is the common case for terminal output and keeps grapheme mode
 	// close to rune mode's throughput. Continuation state (after a ZWJ or a
 	// regional indicator) must still go through the full tokenizer.
 	if !forceMergeNext && !lastWasRI && len(buf) > 0 && buf[0] >= 0x20 && buf[0] < 0x7f {
+		// If a complete non-ASCII rune follows, let uniseg decide whether it
+		// belongs to this cluster. In particular a combining mark after an
+		// ASCII base must stay in the same cluster when both bytes are
+		// buffered, exactly as it does when the mark arrives in a later read.
+		// Emoji presentation marks stay on the fast path because
+		// extendEmojiPresentation handles them directly.
+		if len(buf) > 1 && buf[1] >= 0x80 && utf8.FullRune(buf[1:]) && !nextRuneIsEmojiPresentation(buf[1:]) {
+			goto tokenize
+		}
 		cluster, consumed, width, newState := extendEmojiPresentation(buf, buf[:1], 1, 1, -1)
-		return cluster, consumed, width, false, newState, false, false, true
+		return cluster, consumed, width, false, newState, false, false, true, false, false, true
+	}
+tokenize:
+
+	invalidStart := false
+	if r, size := utf8.DecodeRune(buf); r == utf8.RuneError && size == 1 {
+		invalidStart = true
 	}
 	cluster, consumed, width, newState, ok := stepGraphemeCluster(buf, state)
 	if !ok {
-		return nil, 0, 0, false, state, forceMergeNext, lastWasRI, false
+		return nil, 0, 0, false, state, forceMergeNext, lastWasRI, runHasBase, lastWasHanging, lastWasSynthetic, false
 	}
 	cluster, consumed, width, newState = extendEmojiPresentation(buf, cluster, consumed, width, newState)
 	if standaloneWidth || lastWasRI {
@@ -773,10 +889,49 @@ func nextGraphemeTokenInfo(buf []byte, state int, forceMergeNext bool, lastWasRI
 	if width == 0 || startsWithGraphemeContinuation(cluster) {
 		merge = true
 	}
+	if lastWasHanging && isSpacingMarkOnly(cluster) {
+		// A spacing mark split from a run that had no base (for example a
+		// leading combining mark) extends that hanging fragment. When the
+		// whole cluster arrives at once it is merged with the mark, so the
+		// split form must not claim a cell of its own.
+		merge = true
+	}
 	if merge {
 		width = 0
 	}
-	return cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, true
+
+	nextRunHasBase := runHasBase
+	nextLastWasHanging := lastWasHanging
+	nextLastWasSynthetic := false
+	switch {
+	case invalidStart:
+		// The invalid byte was emitted as a synthetic U+FFFD cell. uniseg
+		// starts a fresh grapheme after it, so a following continuation
+		// merges into the replacement; remember that so a later spacing mark
+		// split from the same cluster also merges.
+		nextRunHasBase = true
+		nextLastWasHanging = false
+		nextLastWasSynthetic = true
+	case !merge:
+		// A token with its own cell establishes a base for the run.
+		nextRunHasBase = true
+		nextLastWasHanging = false
+	case lastWasSynthetic:
+		// A continuation merged into a synthetic replacement cell. It is
+		// effectively a hanging fragment for the marks that follow.
+		nextRunHasBase = false
+		nextLastWasHanging = true
+	case runHasBase:
+		// The mark attached to a real base cell.
+		nextLastWasHanging = false
+	case lastWasHanging || startsWithGraphemeContinuation(cluster) || isSpacingMarkOnly(cluster):
+		// Still a fragment with no base; later spacing marks must keep
+		// attaching to it.
+		nextLastWasHanging = true
+	default:
+		nextLastWasHanging = false
+	}
+	return cluster, consumed, width, merge, newState, nextForceMergeNext, nextLastWasRI, nextRunHasBase, nextLastWasHanging, nextLastWasSynthetic, true
 }
 
 func endsWithZWJ(cluster []byte) bool {
@@ -832,6 +987,23 @@ func isCombiningOnly(b []byte) bool {
 			return false
 		}
 		if !unicode.Is(unicode.Mn, r) && !unicode.Is(unicode.Me, r) {
+			return false
+		}
+		b = b[size:]
+	}
+	return true
+}
+
+func isSpacingMarkOnly(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
+		if r == utf8.RuneError && size == 1 {
+			return false
+		}
+		if !unicode.Is(unicode.Mc, r) {
 			return false
 		}
 		b = b[size:]

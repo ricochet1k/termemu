@@ -5,6 +5,7 @@ package termemu
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -323,6 +324,56 @@ func TestNewFromHandoffResizesSnapshot(t *testing.T) {
 	}
 }
 
+func TestNewFromHandoffResizesScrollMargins(t *testing.T) {
+	t.Run("full screen grows", func(t *testing.T) {
+		old := newTerminal(NewMockFrontend(), NewNoPTYBackend(nil, nil), TextReadModeRune)
+		if err := old.Resize(10, 3); err != nil {
+			t.Fatalf("Resize: %v", err)
+		}
+		feedText(t, old, "one\r\ntwo\r\nthree")
+		h, err := old.Pause(context.Background())
+		if err != nil {
+			t.Fatalf("Pause: %v", err)
+		}
+		h.Size = Pos{X: 10, Y: 6}
+
+		newTerm, err := NewFromHandoff(nil, NewNoPTYBackend(bytes.NewReader(nil), io.Discard), h)
+		if err != nil {
+			t.Fatalf("NewFromHandoff: %v", err)
+		}
+		defer func() { _ = newTerm.Close() }()
+
+		snap := newTerm.Snapshot()
+		if snap.Main.TopMargin != 0 || snap.Main.BottomMargin != 5 {
+			t.Fatalf("margins = %d..%d, want 0..5", snap.Main.TopMargin, snap.Main.BottomMargin)
+		}
+	})
+
+	t.Run("custom region keeps its distance from the bottom", func(t *testing.T) {
+		old := newTerminal(NewMockFrontend(), NewNoPTYBackend(nil, nil), TextReadModeRune)
+		if err := old.Resize(10, 3); err != nil {
+			t.Fatalf("Resize: %v", err)
+		}
+		old.mustHandleCommand(t, "[2;3r")
+		h, err := old.Pause(context.Background())
+		if err != nil {
+			t.Fatalf("Pause: %v", err)
+		}
+		h.Size = Pos{X: 10, Y: 6}
+
+		newTerm, err := NewFromHandoff(nil, NewNoPTYBackend(bytes.NewReader(nil), io.Discard), h)
+		if err != nil {
+			t.Fatalf("NewFromHandoff: %v", err)
+		}
+		defer func() { _ = newTerm.Close() }()
+
+		snap := newTerm.Snapshot()
+		if snap.Main.TopMargin != 1 || snap.Main.BottomMargin != 5 {
+			t.Fatalf("margins = %d..%d, want 1..5", snap.Main.TopMargin, snap.Main.BottomMargin)
+		}
+	})
+}
+
 func TestNewFromHandoffRejectsInvalidSizes(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -354,6 +405,50 @@ func TestNewFromHandoffRejectsInvalidSizes(t *testing.T) {
 	defer func() { _ = newTerm.Close() }()
 	if w, h := newTerm.Size(); w != 80 || h != 24 {
 		t.Fatalf("terminal size = %dx%d, want 80x24", w, h)
+	}
+}
+
+// blockingReadCloser blocks in Read until Close. It deliberately has no
+// SetReadDeadline, which makes it unsuitable for an interruptible Pause.
+type blockingReadCloser struct {
+	ch   chan struct{}
+	once sync.Once
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{ch: make(chan struct{})}
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	<-r.ch
+	return 0, io.EOF
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.once.Do(func() { close(r.ch) })
+	return nil
+}
+
+func TestPauseUnsupportedBackendFailsFast(t *testing.T) {
+	r := newBlockingReadCloser()
+	term := New(NewMockFrontend(), NewNoPTYBackend(r, io.Discard)).(*terminal)
+	defer func() { _ = term.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := term.Pause(ctx)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPauseUnsupported) {
+			t.Fatalf("Pause error = %v, want ErrPauseUnsupported", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Pause blocked on a backend without read deadlines")
 	}
 }
 

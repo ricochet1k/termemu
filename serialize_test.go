@@ -301,12 +301,15 @@ func cloneScreenForTest(s ScreenState) ScreenState {
 
 func TestHandoffSerialization(t *testing.T) {
 	reader := ReaderState{
-		Pending:        []byte{0xe2, 0x82},
-		PendingCommand: []byte("[3"),
-		State:          7,
-		ForceMergeNext: true,
-		LastWasRI:      true,
-		Mode:           TextReadModeGrapheme,
+		RunHasBase:       true,
+		LastWasHanging:   true,
+		LastWasSynthetic: true,
+		Pending:          []byte{0xe2, 0x82},
+		PendingCommand:   []byte("[3"),
+		State:            7,
+		ForceMergeNext:   true,
+		LastWasRI:        true,
+		Mode:             TextReadModeGrapheme,
 	}
 	if got := jsonRoundTrip(t, reader); !reflect.DeepEqual(got, reader) {
 		t.Fatalf("ReaderState JSON mismatch: got %#v want %#v", got, reader)

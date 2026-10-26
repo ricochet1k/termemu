@@ -81,9 +81,11 @@ Pause sets a read deadline through the optional `SetReadDeadline` method so a
 blocked read wakes immediately; the loop recognizes `os.ErrDeadlineExceeded`
 while paused and parks instead of exiting. `PTYBackend`, `NoPTYBackend` (when
 its reader supports deadlines), and `TeeBackend` implement it. A backend that
-returns `errors.ErrUnsupported` cannot interrupt a blocked read, so `Pause`
-waits for the next byte or ctx cancellation. `Close` wakes a paused loop with
-an abort signal before closing the backend so `Done()` still closes cleanly.
+can interrupt a blocked read through `Wake` is also accepted. If neither is
+available (or `SetReadDeadline` returns `errors.ErrUnsupported` with no
+`Wake`), `Pause` returns `ErrPauseUnsupported` immediately instead of waiting
+for the next byte. `Close` wakes a paused loop with an abort signal before
+closing the backend so `Done()` still closes cleanly.
 
 ## Build, lint, and test commands
 Use these exact commands unless the user asks otherwise.

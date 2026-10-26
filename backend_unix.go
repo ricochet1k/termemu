@@ -54,7 +54,7 @@ func makePollableFile(f *os.File) (*os.File, error) {
 func setPTYSize(f *os.File, w, h int) error {
 	ws := struct {
 		Rows, Cols, Xpixel, Ypixel uint16
-	}{uint16(h), uint16(w), uint16(w * 8), uint16(h * 16)}
+	}{uint16(h), uint16(w), uint16(w * cellPixelWidth), uint16(h * cellPixelHeight)}
 
 	rc, err := f.SyscallConn()
 	if err != nil {

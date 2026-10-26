@@ -231,3 +231,25 @@ func TestTTYFrontend_AdoptsCursorShapeOnAttach(t *testing.T) {
 		t.Fatalf("Attach output %q does not adopt the underline cursor", got)
 	}
 }
+
+func TestCursorMovementStopsAtScrollMargins(t *testing.T) {
+	tests := []struct {
+		seq  string
+		want Pos
+	}{
+		{"\x1b[2;4r\x1b[1;7H\x1b[4B", Pos{X: 6, Y: 3}},
+		{"\x1b[2;4r\x1b[6;7H\x1b[4A", Pos{X: 6, Y: 1}},
+		{"\x1b[2;4r\x1b[3;7H\x1b[2B", Pos{X: 6, Y: 3}},
+		{"\x1b[2;4r\x1b[3;7H\x1b[2E", Pos{X: 0, Y: 3}},
+		{"\x1b[2;4r\x1b[3;7H\x1b[2F", Pos{X: 0, Y: 1}},
+		{"\x1b[2;4r\x1b[1;7H\x1b[A", Pos{X: 6, Y: 0}},
+		{"\x1b[2;4r\x1b[6;7H\x1b[B", Pos{X: 6, Y: 6}},
+	}
+	for _, tt := range tests {
+		_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+		feedESC(t, t1, tt.seq)
+		if got := t1.CursorPos(); got != tt.want {
+			t.Errorf("%q cursor = %+v, want %+v", tt.seq, got, tt.want)
+		}
+	}
+}
