@@ -43,6 +43,11 @@ cd examples/gioui    && go run . -- sh
 cd examples/ebiten   && go run . -- sh
 ```
 
+These modules declare `go 1.26` and `toolchain go1.26.10` (the current
+dependency versions require it, and the toolchain line picks up the standard
+library fixes after 1.26.0), so building them may download that toolchain. The
+root module stays on Go 1.23 and is unaffected.
+
 Each module has `replace` directives pointing at the repository root and at
 `examples/internal/raster`, so no `GOFLAGS` or workspace file is needed. After
 changing imports, run `go mod tidy` inside that example directory; root

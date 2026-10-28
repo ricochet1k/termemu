@@ -30,8 +30,11 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
   fallback). Each example module has `replace` directives for
   `github.com/ricochet1k/termemu` and `examples/internal/raster`, so plain
   `go build` / `go run` inside the example directory works with no setup; run
-  `go mod tidy` there after changing its imports. `go build ./...`,
-  `go test ./...` and `go vet ./...` at the root skip these modules, but CI's
+  `go mod tidy` there after changing its imports. They declare `go 1.26` plus
+  `toolchain go1.26.10` (the current dependency versions require it) while the
+  root module stays on Go 1.23, so building an example may download that
+  toolchain. `go build ./...`, `go test ./...` and `go vet ./...` at the root
+  skip these modules, but CI's
   `gofmt -l .` still covers them, so keep them formatted. Any harness that
   needs cgo or external libraries must follow the same pattern: its own
   module, never a root `go.mod` dependency, so `go build ./...`,
