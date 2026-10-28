@@ -328,6 +328,10 @@ type terminal struct {
 	keyboardMain keyboardMode
 	keyboardAlt  keyboardMode
 
+	// savedPrivateModes holds the XTSAVE slot for each DEC private mode.
+	// It is terminal-wide (not per-screen) and persists until overwritten.
+	savedPrivateModes map[int]bool
+
 	// hyperlink is the current OSC 8 hyperlink URI. Empty means no link.
 	// It is pushed to both screens via setLink so content written while a
 	// link is active carries it in Span.Link.
