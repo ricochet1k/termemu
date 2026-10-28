@@ -472,7 +472,7 @@ func (t *terminal) tryFastCSI(cmd []byte) (success, ok bool) {
 	switch final {
 	case 'A', 'B', 'C', 'D':
 		n := 1
-		if len(params) > 0 {
+		if len(params) > 0 && params[0] > 0 {
 			n = params[0]
 		}
 		switch final {
@@ -799,7 +799,8 @@ func (t *terminal) handleCommand(r escapeReader) bool {
 }
 
 // handleDECRQM implements DECRQM (CSI ? Ps $ p / CSI Ps $ p), reporting the
-// current mode state: 1 = set, 2 = reset, 0 = not recognized.
+// current mode state: 0 = not recognized, 1 = set, 2 = reset,
+// 3 = permanently set, 4 = permanently reset.
 func (t *terminal) handleDECRQM(prefix byte, params []int) {
 	if prefix != 0 && prefix != '?' {
 		debugPrintf(debugTodo, "TODO: Unhandled DECRQM prefix: %#v\n", string(prefix))
@@ -821,10 +822,13 @@ func (t *terminal) handleDECRQM(prefix byte, params []int) {
 }
 
 // privateModeState reports the state of a DEC private mode: 1 set, 2 reset,
-// or 0 when the mode is not recognized/supported.
+// 3 permanently set, 4 permanently reset, or 0 when the mode is not
+// recognized/supported.
 func (t *terminal) privateModeState(mode int) int {
 	set := false
 	switch mode {
+	case 117: // DECECM
+		return 4
 	case 1: // DECCKM
 		set = t.viewFlags[VFAppCursorKeys]
 	case 6: // DECOM
@@ -873,7 +877,8 @@ func (t *terminal) privateModeState(mode int) int {
 }
 
 // ansiModeState reports the state of an ANSI (non-private) mode for DECRQM:
-// 1 set, 2 reset, or 0 when the mode is not recognized.
+// 1 set, 2 reset, 3 permanently set, 4 permanently reset, or 0 when the mode
+// is not recognized.
 func (t *terminal) ansiModeState(mode int) int {
 	set := false
 	switch mode {
@@ -881,6 +886,9 @@ func (t *terminal) ansiModeState(mode int) int {
 		set = t.screen().InsertMode()
 	case 20: // LNM
 		set = t.newlineMode
+	case 1, 5, 7, 10, 11, 13, 14, 15, 16, 17, 18, 19:
+		// Recognized but permanently reset.
+		return 4
 	default:
 		return 0
 	}
@@ -941,14 +949,14 @@ func (t *terminal) csiCursorPosition(params []int) {
 }
 
 // csiCursorMove implements CUU/CUD/CUF/CUB (CSI Ps A/B/C/D). An omitted
-// parameter defaults to 1; an explicit 0 moves zero cells.
+// parameter or an explicit 0 defaults to 1.
 func (t *terminal) csiCursorMove(final byte, params []int) {
 	n := 1
-	if len(params) > 0 {
+	if len(params) > 0 && params[0] > 0 {
 		n = params[0]
 	}
 	switch final {
-	case 'A':
+	case 'A', 'k':
 		t.screen().moveCursor(0, -n, false, false)
 	case 'B':
 		t.screen().moveCursor(0, n, false, false)
@@ -1359,7 +1367,7 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 
 	if prefix == 0 {
 		switch b {
-		case 'A', 'B', 'C', 'D': // Cursor up/down/forward/backward
+		case 'A', 'B', 'C', 'D', 'k': // Cursor up/down/forward/backward (k is CUU alias)
 			t.csiCursorMove(b, params)
 
 		case 'E': // Cursor Next Line
@@ -1390,6 +1398,14 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 		case 'G': // Cursor Character Absolute
 			defaultParam(1)
 			t.screen().setCursorPos(params[0]-1, t.screen().CursorPos().Y)
+
+		case '`': // HPA: Cursor Horizontal Absolute
+			defaultParam(1)
+			col := params[0]
+			if col < 1 {
+				col = 1
+			}
+			t.screen().setCursorPos(col-1, t.screen().CursorPos().Y)
 
 		case 'c': // Send Device Attributes
 			defaultParam(0)

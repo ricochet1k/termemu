@@ -122,7 +122,7 @@ func TestDECRQM_ReportsANSIModes(t *testing.T) {
 	t1.mustHandleCommand(t, "[20h")
 	feedQueryExpectReply(t, t1, r, "\x1b[20$p", "\x1b[20;1$y") // LNM set
 
-	feedQueryExpectReply(t, t1, r, "\x1b[7$p", "\x1b[7;0$y") // unknown ANSI mode
+	feedQueryExpectReply(t, t1, r, "\x1b[7$p", "\x1b[7;4$y") // permanently reset ANSI mode
 }
 
 func TestDECREQTPARM_ReportsParameters(t *testing.T) {

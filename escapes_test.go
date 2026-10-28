@@ -449,6 +449,114 @@ func TestCSI_DeviceStatusReport(t *testing.T) {
 	}
 }
 
+func TestCSI_CUUAlias_k(t *testing.T) {
+	tests := []struct {
+		name   string
+		seq    string
+		startY int
+		wantY  int
+	}{
+		{"no param moves 1", "[k", 5, 4},
+		{"param moves N", "[3k", 5, 2},
+		{"param 0 treated as 1", "[0k", 5, 4},
+		{"clamps at top margin", "[10k", 0, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+			t1.screen().setCursorPos(5, tt.startY)
+			t1.mustHandleCommand(t, tt.seq)
+			pos := t1.screen().CursorPos()
+			if pos.X != 5 || pos.Y != tt.wantY {
+				t.Errorf("cursor = (%d,%d), want (%d,%d)", pos.X, pos.Y, 5, tt.wantY)
+			}
+		})
+	}
+}
+
+func TestCSI_HPA(t *testing.T) {
+	tests := []struct {
+		name   string
+		seq    string
+		startX int
+		wantX  int
+	}{
+		{"no param goes to col 1", "[`", 5, 0},
+		{"param sets col", "[10`", 5, 9},
+		{"param 0 treated as 1", "[0`", 5, 0},
+		{"clamps to width", "[1000`", 5, 79},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+			t1.screen().setCursorPos(tt.startX, 5)
+			t1.mustHandleCommand(t, tt.seq)
+			pos := t1.screen().CursorPos()
+			if pos.X != tt.wantX || pos.Y != 5 {
+				t.Errorf("cursor = (%d,%d), want (%d,%d)", pos.X, pos.Y, tt.wantX, 5)
+			}
+		})
+	}
+}
+
+func TestCSI_HPA_ClearsPendingWrap(t *testing.T) {
+	_, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+	// Move to the last column, write a character to set pending wrap, then
+	// use HPA to column 1 and write another character. If HPA cleared pending
+	// wrap, the second character stays on the first row.
+	if err := t1.testFeedTerminalInputFromBackend([]byte("\x1b[80GX\x1b[1`Z"), TextReadModeRune); err != nil {
+		t.Fatalf("feed error: %v", err)
+	}
+	pos := t1.screen().CursorPos()
+	if pos.X != 1 || pos.Y != 0 {
+		t.Errorf("cursor = (%d,%d), want (1,0); pending wrap was not cleared", pos.X, pos.Y)
+	}
+}
+
+func TestCSI_DECRQM(t *testing.T) {
+	tests := []struct {
+		name     string
+		prep     string
+		seq      string
+		wantResp string
+	}{
+		{"?117 permanently reset", "", "[?117$p", "\x1b[?117;4$y"},
+		{"ANSI 1 permanently reset", "", "[1$p", "\x1b[1;4$y"},
+		{"ANSI 5 permanently reset", "", "[5$p", "\x1b[5;4$y"},
+		{"ANSI 19 permanently reset", "", "[19$p", "\x1b[19;4$y"},
+		{"ANSI 9 not recognized", "", "[9$p", "\x1b[9;0$y"},
+		{"ANSI 4 IRM set", "[4h", "[4$p", "\x1b[4;1$y"},
+		{"ANSI 4 IRM reset", "[4l", "[4$p", "\x1b[4;2$y"},
+		{"?25 set", "[?25h", "[?25$p", "\x1b[?25;1$y"},
+		{"?25 reset", "[?25l", "[?25$p", "\x1b[?25;2$y"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, t1, _ := MakeTerminalWithMock(TextReadModeRune)
+
+			if tt.prep != "" {
+				t1.mustHandleCommand(t, tt.prep)
+			}
+
+			go func() { _ = t1.testHandleCommand(t, tt.seq) }()
+
+			buf := make([]byte, 64)
+			n, err := r.Read(buf)
+			if err != nil {
+				t.Fatalf("Read error: %v", err)
+			}
+			got := string(buf[:n])
+			if got != tt.wantResp {
+				t.Errorf("response = %q, want %q", got, tt.wantResp)
+			}
+		})
+	}
+}
+
 func TestCSI_DeviceAttributes(t *testing.T) {
 	tests := []struct {
 		name        string
