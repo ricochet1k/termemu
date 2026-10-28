@@ -147,19 +147,41 @@ type Frontend interface {
 // change, but may accumulate the damage and render only when the terminal
 // calls the batch methods.
 //
-// PrepareBatch is called with the terminal lock held and receives a
-// LockedView. It must render everything accumulated since the previous frame
-// into frontend-owned memory and must not perform I/O. WriteBatch is called
-// after the terminal lock is released and writes that memory; calls are
-// serialized by the frontend and frame order is preserved.
-//
 // The terminal calls the pair at these boundaries: when the read loop is about
 // to block waiting for more input (so a lone write is still painted
 // immediately), before the loop parks for Pause, after out-of-band screen
 // updates such as Resize and Restore, and whenever the loop otherwise stops.
 // After either method returns, no damage may be left unrendered.
+//
+// The two calls have different locking and I/O rules, and the terminal may
+// call WriteBatch from more than one goroutine: implementing the pair usually
+// means rendering into a frontend-owned back buffer in PrepareBatch and
+// publishing it, under a mutex the frontend owns, in WriteBatch. See the
+// method comments.
 type BatchFrontend interface {
+	// PrepareBatch is called with the terminal lock held and receives a
+	// LockedView, which is valid only for the duration of the call. It must
+	// render everything accumulated since the previous frame into
+	// frontend-owned memory and must not perform I/O: blocking here blocks
+	// every terminal reader.
+	//
+	// PrepareBatch is not called concurrently with itself; the terminal lock
+	// serializes the calls.
 	PrepareBatch(v LockedView)
+
+	// WriteBatch publishes the memory rendered by the most recent
+	// PrepareBatch. It is called after the terminal lock is released, so it
+	// may do I/O (write to a terminal, upload a texture, update a window).
+	//
+	// The terminal does not serialize WriteBatch calls: they can arrive from
+	// the read loop and from Resize/Restore concurrently, and in the general
+	// case from different goroutines. The frontend must serialize them itself
+	// (for example with its own mutex) and preserve frame order, so that the
+	// memory of a newer frame is never published before an older one.
+	//
+	// WriteBatch may also be called when nothing was rendered: the terminal
+	// calls the pair at every batch boundary, and a boundary with no
+	// accumulated damage still produces a PrepareBatch that has nothing to do.
 	WriteBatch()
 }
 
