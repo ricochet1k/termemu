@@ -20,8 +20,22 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
   layout is intentional and idiomatic for a single-package Go library.
 - Examples live under `examples/`: `simple`, `tty`, `unicode_test`,
   `esctest` (interactive escape debugger), and `tmux` (tmux comparison
-  harness).
-- Reference docs live under `docs/` (e.g. `keyboard-protocol.rst`).
+  harness). These are part of the root module and build with `go build ./...`.
+- GUI frontend examples are **separate modules** under `examples/` so their
+  toolkit dependencies never enter the library's `go.mod`: `gioui` (Gio
+  window), `ebiten` (Ebiten window), and `headless` (runs a command and writes
+  the screen to a PNG, no GUI toolkit). They share `examples/internal/raster`,
+  also its own module, which rasterizes screen spans into an `image.RGBA`
+  using the bundled Go Mono font (no glyph atlas, no shaping, no font
+  fallback). Each example module has `replace` directives for
+  `github.com/ricochet1k/termemu` and `examples/internal/raster`, so plain
+  `go build` / `go run` inside the example directory works with no setup; run
+  `go mod tidy` there after changing its imports. `go build ./...`,
+  `go test ./...` and `go vet ./...` at the root skip these modules, but CI's
+  `gofmt -l .` still covers them, so keep them formatted.
+- Reference docs live under `docs/`: `keyboard-protocol.rst` (kitty keyboard
+  protocol notes) and `ghostty-vt-gaps.md` (sequence-by-sequence emulation
+  comparison against Ghostty, with a prioritized gap list).
 - Helper scripts live under `scripts/`; `scripts/bench.sh` runs benchmarks
   (optionally with CPU/heap profiles via `PROFILE=1`). Generated test
   artifacts (`scripts/tmux_integration_test`,
@@ -236,10 +250,28 @@ Run `go test -race ./...` to detect races before merging.
 ## Working with examples
 - Examples compile as separate `main` packages.
 - Run with `go run ./examples/<name>` to validate behavior.
+- The GUI examples (`gioui`, `ebiten`, `headless`) and their shared
+  `examples/internal/raster` renderer are separate modules: `go run .` from
+  inside the directory, not `go run ./examples/gioui` from the root. They also
+  have `_test.go` files (`raster_test.go` checks pixel-level rendering); run
+  `go test ./...` inside `examples/internal/raster`.
+- The raster renderer is deliberately narrow: one monospace face (Go Mono),
+  one cluster per cell, no font fallback. Frontends needing CJK/emoji glyphs
+  should use a text library rather than extending it.
 
 ## Documentation updates
 - Update `README.md` only when public usage changes.
 - Avoid adding new docs unless requested by the user.
+- Keep `docs/ghostty-vt-gaps.md` honest: when adding or removing escape
+  sequences, modes, or OSC handlers, update the matching row and the commit
+  ids at the top. Re-derive Ghostty's side from `src/terminal/stream.zig`,
+  `src/terminal/osc.zig`, `src/terminal/modes.zig` and
+  `include/ghostty/vt/modes.h` in the ghostty repo; its published VT reference
+  page is incomplete.
+- Keep the doc's measurement classes with the numbers: plain (app-initiated,
+  no handshake) counts are real, `gated` counts (kitty graphics, `OSC 21`/`22`,
+  `?2027`, `?2048`, ...) are only floors, and terminal-to-app replies cannot be
+  observed in recordings at all. Never turn a gated zero into "nobody uses it".
 
 ## Agent tips
 - Prefer edits that maintain existing API shape.
