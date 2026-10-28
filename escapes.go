@@ -876,6 +876,160 @@ func (t *terminal) privateModeState(mode int) int {
 	return 2
 }
 
+// applyPrivateMode applies a DEC private mode change using the same code
+// path as DECSET/DECRST (CSI ? Ps h/l). It returns false for unrecognized
+// modes so that XTSAVE/XTRESTORE can ignore them silently.
+func (t *terminal) applyPrivateMode(mode int, value bool) bool {
+	switch mode {
+	case 1: // Application / Normal Cursor Keys
+		t.setViewFlag(VFAppCursorKeys, value)
+
+	case 6: // Origin mode (DECOM)
+		t.screen().SetOriginMode(value)
+		t.screen().homeCursor()
+
+	case 7: // Wraparound
+		t.screen().SetAutoWrap(value)
+
+	case 9: // Send MouseXY on press
+		debugPrintln(debugTodo, "TODO: Send MouseXY on press =", value) // TODO
+		if value {
+			t.setViewInt(VIMouseMode, MMPress)
+		} else {
+			t.setViewInt(VIMouseMode, MMNone)
+		}
+
+	case 12: // Blink Cursor
+		t.setViewFlag(VFBlinkCursor, value)
+
+	case 25: // Show Cursor
+		t.setViewFlag(VFShowCursor, value)
+
+	case 1000: // Send MouseXY on press/release
+		if value {
+			t.setViewInt(VIMouseMode, MMPressRelease)
+		} else {
+			t.setViewInt(VIMouseMode, MMNone)
+		}
+
+	case 1002: // Cell Motion Mouse Tracking
+		if value {
+			t.setViewInt(VIMouseMode, MMPressReleaseMove)
+		} else {
+			t.setViewInt(VIMouseMode, MMNone)
+		}
+
+	case 1003: // All Motion Mouse Tracking
+		if value {
+			t.setViewInt(VIMouseMode, MMPressReleaseMoveAll)
+		} else {
+			t.setViewInt(VIMouseMode, MMNone)
+		}
+
+	case 1004: // Report focus changed
+		t.setViewFlag(VFReportFocus, value)
+
+	case 1007: // Alternate scroll mode
+		t.setViewFlag(VFAltScroll, value)
+
+	case 1016: // SGR-Pixels mouse reporting
+		t.setViewFlag(VFMousePixel, value)
+
+	case 1005: // xterm UTF-8 extended mouse reporting
+		if value {
+			t.setViewInt(VIMouseEncoding, MEUTF8)
+		} else {
+			t.setViewInt(VIMouseEncoding, MEX10)
+		}
+
+	case 1006: // xterm SGR extended mouse reporting
+		if value {
+			t.setViewInt(VIMouseEncoding, MESGR)
+		} else {
+			t.setViewInt(VIMouseEncoding, MEX10)
+		}
+
+	case 1015: // urxvt mouse mode
+		if value {
+			t.setViewInt(VIMouseEncoding, MEURXVT)
+		} else {
+			t.setViewInt(VIMouseEncoding, MEX10)
+		}
+
+	case 1034:
+		debugPrintf(debugTodo, "TODO: Interpret Meta key = %v\n", value)
+
+	case 47: // Alternate screen, preserve contents and cursor slot
+		t.setAltScreen(value)
+
+	case 1047: // Alternate screen; clearing happens on the way out
+		if value {
+			t.setAltScreen(true)
+		} else if t.onAltScreen {
+			size := t.altScreen.Size()
+			t.altScreen.eraseRegion(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRClear)
+			t.setAltScreen(false)
+		}
+
+	case 1048: // Save/restore cursor only, no screen switch
+		if value {
+			t.screen().saveCursorPos()
+		} else {
+			t.screen().restoreCursorPos()
+		}
+
+	case 1046: // Allow (set) or forbid (reset) alt-screen switching
+		t.setViewFlag(VFAltScreenAllowed, value)
+
+	case 1049: // Save cursor, clear alt screen, switch; restore on reset
+		if value {
+			if !t.onAltScreen {
+				t.mainScreen.saveCursorPos()
+				t.enterAltScreen(true)
+			}
+		} else {
+			if t.onAltScreen {
+				t.exitAltScreen()
+				t.mainScreen.restoreCursorPos()
+			}
+		}
+
+	case 2004: // Bracketed paste
+		t.setViewFlag(VFBracketedPaste, value)
+
+	case 2026: // Synchronized output: expose only, no internal batching
+		t.setViewFlag(VFSynchronizedOutput, value)
+
+	default:
+		return false
+	}
+	return true
+}
+
+// xtSavePrivateMode stores the current effective state of a DEC private mode
+// in the terminal-wide saved slot. Unknown modes are ignored.
+func (t *terminal) xtSavePrivateMode(mode int) {
+	state := t.privateModeState(mode)
+	if state == 0 {
+		// Unknown mode: ignore silently.
+		return
+	}
+	if t.savedPrivateModes == nil {
+		t.savedPrivateModes = make(map[int]bool)
+	}
+	t.savedPrivateModes[mode] = state == 1
+}
+
+// xtRestorePrivateMode applies the previously saved state of a DEC private
+// mode, if any, using the same path as DECSET/DECRST. The saved slot is kept.
+func (t *terminal) xtRestorePrivateMode(mode int) {
+	value, ok := t.savedPrivateModes[mode]
+	if !ok {
+		return
+	}
+	t.applyPrivateMode(mode, value)
+}
+
 // ansiModeState reports the state of an ANSI (non-private) mode for DECRQM:
 // 1 set, 2 reset, 3 permanently set, 4 permanently reset, or 0 when the mode
 // is not recognized.
@@ -1602,136 +1756,20 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 				debugPrintf(debugCmd, "CSI ? m params: %v\n", append([]int(nil), params...))
 			}
 			return true
-		case 'h', 'l': // h == set, l == reset  for various modes
-			var value bool
-			if b == 'h' {
-				value = true
+		case 'h', 'l': // h == set, l == reset for various modes
+			value := b == 'h'
+			for _, p := range params {
+				t.applyPrivateMode(p, value)
 			}
 
+		case 's': // XTSAVE: save DEC private mode state
 			for _, p := range params {
-				switch p {
-				case 1: // Application / Normal Cursor Keys
-					t.setViewFlag(VFAppCursorKeys, value)
+				t.xtSavePrivateMode(p)
+			}
 
-				case 6: // Origin mode (DECOM)
-					t.screen().SetOriginMode(value)
-					t.screen().homeCursor()
-
-				case 7: // Wraparound
-					t.screen().SetAutoWrap(value)
-
-				case 9: // Send MouseXY on press
-					debugPrintln(debugTodo, "TODO: Send MouseXY on press =", value) // TODO
-					if value {
-						t.setViewInt(VIMouseMode, MMPress)
-					} else {
-						t.setViewInt(VIMouseMode, MMNone)
-					}
-
-				case 12: // Blink Cursor
-					t.setViewFlag(VFBlinkCursor, value)
-
-				case 25: // Show Cursor
-					t.setViewFlag(VFShowCursor, value)
-
-				case 1000: // Send MouseXY on press/release
-					if value {
-						t.setViewInt(VIMouseMode, MMPressRelease)
-					} else {
-						t.setViewInt(VIMouseMode, MMNone)
-					}
-
-				case 1002: // Cell Motion Mouse Tracking
-					if value {
-						t.setViewInt(VIMouseMode, MMPressReleaseMove)
-					} else {
-						t.setViewInt(VIMouseMode, MMNone)
-					}
-
-				case 1003: // All Motion Mouse Tracking
-					if value {
-						t.setViewInt(VIMouseMode, MMPressReleaseMoveAll)
-					} else {
-						t.setViewInt(VIMouseMode, MMNone)
-					}
-
-				case 1004: // Report focus changed
-					t.setViewFlag(VFReportFocus, value)
-
-				case 1007: // Alternate scroll mode
-					t.setViewFlag(VFAltScroll, value)
-
-				case 1016: // SGR-Pixels mouse reporting
-					t.setViewFlag(VFMousePixel, value)
-
-				case 1005: // xterm UTF-8 extended mouse reporting
-					if value {
-						t.setViewInt(VIMouseEncoding, MEUTF8)
-					} else {
-						t.setViewInt(VIMouseEncoding, MEX10)
-					}
-
-				case 1006: // xterm SGR extended mouse reporting
-					if value {
-						t.setViewInt(VIMouseEncoding, MESGR)
-					} else {
-						t.setViewInt(VIMouseEncoding, MEX10)
-					}
-
-				case 1015: // urxvt mouse mode
-					if value {
-						t.setViewInt(VIMouseEncoding, MEURXVT)
-					} else {
-						t.setViewInt(VIMouseEncoding, MEX10)
-					}
-
-				case 1034:
-					debugPrintf(debugTodo, "TODO: Interpret Meta key = %v\n", value)
-
-				case 47: // Alternate screen, preserve contents and cursor slot
-					t.setAltScreen(value)
-
-				case 1047: // Alternate screen; clearing happens on the way out
-					if value {
-						t.setAltScreen(true)
-					} else if t.onAltScreen {
-						size := t.altScreen.Size()
-						t.altScreen.eraseRegion(Region{X: 0, Y: 0, X2: size.X, Y2: size.Y}, CRClear)
-						t.setAltScreen(false)
-					}
-
-				case 1048: // Save/restore cursor only, no screen switch
-					if value {
-						t.screen().saveCursorPos()
-					} else {
-						t.screen().restoreCursorPos()
-					}
-
-				case 1046: // Allow (set) or forbid (reset) alt-screen switching
-					t.setViewFlag(VFAltScreenAllowed, value)
-
-				case 1049: // Save cursor, clear alt screen, switch; restore on reset
-					if value {
-						if !t.onAltScreen {
-							t.mainScreen.saveCursorPos()
-							t.enterAltScreen(true)
-						}
-					} else {
-						if t.onAltScreen {
-							t.exitAltScreen()
-							t.mainScreen.restoreCursorPos()
-						}
-					}
-
-				case 2004: // Bracketed paste
-					t.setViewFlag(VFBracketedPaste, value)
-
-				case 2026: // Synchronized output: expose only, no internal batching
-					t.setViewFlag(VFSynchronizedOutput, value)
-
-				default:
-					debugPrintf(debugTodo, "TODO: Unhandled flag: %#v %v, %v %#v\n", string(prefix), append([]int(nil), params...), p, string(b))
-				}
+		case 'r': // XTRESTORE: restore DEC private mode state
+			for _, p := range params {
+				t.xtRestorePrivateMode(p)
 			}
 
 		default:
