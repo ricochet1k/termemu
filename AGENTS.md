@@ -33,10 +33,12 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
   `go mod tidy` there after changing its imports. `go build ./...`,
   `go test ./...` and `go vet ./...` at the root skip these modules, but CI's
   `gofmt -l .` still covers them, so keep them formatted. Any harness that
-  needs cgo or external libraries (the planned libghostty-vt oracle comparison)
-  must follow the same pattern: its own module, never a root `go.mod`
-  dependency, so `go build ./...`, `go vet ./...` and `GOOS=windows go build
-  ./...` stay dependency-light.
+  needs cgo or external libraries must follow the same pattern: its own
+  module, never a root `go.mod` dependency, so `go build ./...`,
+  `go vet ./...` and `GOOS=windows go build ./...` stay dependency-light.
+- `oracles/ghostty` is the libghostty-vt comparison module (see "Oracles and
+  capability claims"). It has its own `go.mod`, its own README, and builds
+  without external libraries unless you pass `-tags libghostty`.
 - Reference docs live under `docs/`: `keyboard-protocol.rst` (kitty keyboard
   protocol notes) and `ghostty-vt-gaps.md` (sequence-by-sequence emulation
   comparison against Ghostty, with a prioritized gap list).
@@ -887,14 +889,16 @@ escape sequence or changing what termemu advertises.
   `DECALN`, `DECRQCRA`, tabs, mid-screen scroll regions, or wide-char widths
   (tmux has its own table). Only add a case to `tmuxDiffSequences` when tmux
   implements the feature at all.
-- **Intended semantic oracle:** `libghostty-vt` via
-  `go.mitchellh.com/libghostty` (headless, formats a screen as plain text/VT so
-  two emulators can be diffed on one byte stream). It is cgo and needs an
-  externally built library, so it lives in its **own module** (same pattern as
-  `examples/ebiten` etc., with `replace github.com/ricochet1k/termemu => ../..`)
-  and never in the root `go.mod`; the corpus runner lives there too. The root
+- **Semantic oracle:** `libghostty-vt` via `go.mitchellh.com/libghostty`,
+  implemented in `oracles/ghostty` (own module, `replace` to `../..`, corpus
+  runner included). It is cgo and needs an externally built library: the
+  default build is pure Go and `diff` exits with a message unless you
+  `go get go.mitchellh.com/libghostty` and build with `-tags libghostty`
+  against an installed `libghostty-vt` (`PKG_CONFIG_PATH`). The root
   `go test ./...`, `go vet ./...`, `GOOS=windows go build ./...` and CI matrix
-  must never require it, and if that module gets CI it is its own opt-in job.
+  never see it. See `oracles/ghostty/README.md` for the exact build steps.
+  The `libghostty` file is written against the upstream binding API but is
+  unverified here (no Zig/`libghostty-vt` in this environment).
 - **Deliberately not oracles:** xterm (huge, legacy, dead sequences), libvterm,
   VTE, esctest. Sixel is out of scope by decision and must never be advertised
   via DA1 attribute 4.

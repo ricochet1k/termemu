@@ -384,15 +384,18 @@ it is headless, and it can format a screen as plain text or VT so two emulators
 can be fed one byte stream and diffed. Use it for replaying the corpora,
 fuzzed sequences, and any row in these tables. Practical notes:
 
-- It is cgo and needs `libghostty-vt` installed (`PKG_CONFIG_PATH` pointing at a
-  checkout; static link by default). `libghostty` must **never enter the root
-  `go.mod`**: the comparison harness belongs in its own module alongside the
-  GUI examples (`examples/ebiten`, `examples/gioui`, `examples/headless` are
-  separate modules with a `replace github.com/ricochet1k/termemu => ../..`),
-  which keeps it invisible to the root module's `go build`, `go test`, `go vet`,
-  lint and the `GOOS=windows` cross-build. Put the corpus runner there too, and
-  give that module its own opt-in CI job (or none) rather than gating the root
-  matrix.
+- It lives in `oracles/ghostty`, its own module (`replace
+  github.com/ricochet1k/termemu => ../..`), with the corpus runner alongside
+  the harness. That keeps it invisible to the root module's `go build`,
+  `go test`, `go vet`, lint and the `GOOS=windows` cross-build; give it an
+  opt-in CI job (or none) rather than gating the root matrix.
+- It is cgo and needs `libghostty-vt` installed (`PKG_CONFIG_PATH` pointing at
+  a checkout; static link by default). The default build is pure Go —
+  `replay` works, `diff` exits with a message — so a plain `go build`/`go test`
+  in that module is safe everywhere. To enable the comparison:
+  `go get go.mitchellh.com/libghostty` and `go build -tags libghostty`; see
+  `oracles/ghostty/README.md`. The binding is deliberately absent from
+  `go.mod` so the default build needs no network or cgo.
 - The Go bindings explicitly do not promise API stability yet.
 - It is the reference for *scope*, not for *semantics*. Ghostty declines
   `DECRQSS` (termemu is ahead there) and sixel, so a disagreement means "decide
@@ -449,8 +452,11 @@ convenient.
 - Screen-model changes (margins, rect ops) must keep `checkScreenInvariants`
   passing and should run through `FuzzTerminalInput` /
   `FuzzTerminalInputChunking`, which already round-trip `Snapshot`/`Restore`.
-- Anything in the tables above should be added to the ghostty oracle corpus
-  (its own module, see Oracles) rather than only to `tmuxDiffSequences`.
+- Anything in the tables above should be added to the ghostty oracle corpus in
+  `oracles/ghostty` rather than only to `tmuxDiffSequences`. The tagged build
+  that actually runs the comparison is unverified in this environment (no Zig
+  or `libghostty-vt`), so treat the first real `diff --cast` run as the
+  acceptance test for that path.
 - Cross-channel capability consistency (see Capability channels) deserves its
   own test: `$TERM`/terminfo, DA1/DA2/`XTVERSION` and the `DECRQM`/query
   answers must describe the same terminal.
