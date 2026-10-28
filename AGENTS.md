@@ -282,6 +282,11 @@ Run `go test -race ./...` to detect races before merging.
   observed in recordings at all. Never turn a gated zero into "nobody uses it".
 
 ## Agent tips
+
+- **Delegation model:** when this work is handed to paseo subagents, always use
+  provider `pi/opencode-go/deepseek-v4.1-flash` with
+  `settings.thinkingOptionId: "low"`. The larger models cost far more and are
+  not wanted for repo work.
 - Prefer edits that maintain existing API shape.
 - Keep changes localized to the smallest necessary files.
 - Avoid adding new dependencies unless explicitly requested.
