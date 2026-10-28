@@ -18,9 +18,9 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
 ## Repository layout
 - Core library code lives at repo root (package `termemu`). This flat
   layout is intentional and idiomatic for a single-package Go library.
-- Examples live under `examples/`: `simple`, `tty`, `unicode_test`,
-  `esctest` (interactive escape debugger), and `tmux` (tmux comparison
-  harness). These are part of the root module and build with `go build ./...`.
+- Examples live under `examples/`. Root-module examples (they build with
+  `go build ./...`): `simple`, `tty`, `unicode_test`, `esctest` (interactive
+  escape debugger), `tmux` (tmux comparison harness).
 - GUI frontend examples are **separate modules** under `examples/` so their
   toolkit dependencies never enter the library's `go.mod`: `gioui` (Gio
   window), `ebiten` (Ebiten window), and `headless` (runs a command and writes
@@ -32,7 +32,11 @@ Keep this file up-to-date. If you have to search for something, add it to the Re
   `go build` / `go run` inside the example directory works with no setup; run
   `go mod tidy` there after changing its imports. `go build ./...`,
   `go test ./...` and `go vet ./...` at the root skip these modules, but CI's
-  `gofmt -l .` still covers them, so keep them formatted.
+  `gofmt -l .` still covers them, so keep them formatted. Any harness that
+  needs cgo or external libraries (the planned libghostty-vt oracle comparison)
+  must follow the same pattern: its own module, never a root `go.mod`
+  dependency, so `go build ./...`, `go vet ./...` and `GOOS=windows go build
+  ./...` stay dependency-light.
 - Reference docs live under `docs/`: `keyboard-protocol.rst` (kitty keyboard
   protocol notes) and `ghostty-vt-gaps.md` (sequence-by-sequence emulation
   comparison against Ghostty, with a prioritized gap list).
@@ -63,7 +67,11 @@ custom `MarshalJSON`/`UnmarshalJSON` and `GobEncode`/`GobDecode` over exported
 shadow structs, so `Snapshot.KeyboardMain/KeyboardAlt` and
 `ScreenState.Charsets/SavedCharsets` serialize even though their types are
 unexported. `ScreenState.Tabs` is a plain `[]bool` (nil means the default
-stops every 8 columns). `Style` encodes its three packed uint32 components
+stops every 8 columns). `Snapshot.ViewFlags/ViewInts/ViewStrings` are
+*positional* (indexed by the `ViewFlag`/`ViewInt`/`ViewString` constant), so
+new constants must be appended immediately before the matching `view*Count`
+sentinel — never inserted or renumbered, or old snapshots/handoffs restore the
+wrong field. Extend `serialize_test.go` when adding one. `Style` encodes its three packed uint32 components
 (`fg`, `bg`, `underlineColor`) losslessly; those numbers are the internal
 representation, not palette indexes. Keep the in-memory layout unchanged when
 touching these types, and extend `serialize_test.go` when adding new public
@@ -859,6 +867,37 @@ Keep the forward scan inlinable: erase paints a full-width span per row and a
 non-inlined lookup call there is a measurable regression.
 
 Use benchmarks in `screen_bench_test.go` to catch regressions.
+
+## Oracles and capability claims
+
+`docs/ghostty-vt-gaps.md` is the feature/priority map; read it before adding an
+escape sequence or changing what termemu advertises.
+
+- **tmux is a smoke test, not a source of truth.** It re-parses VT into its own
+  grid and re-emits it, so `capture-pane` reports tmux's model. It cannot decide
+  charsets/DEC graphics, `CHT`, `HPR`/`VPR`, `4:x`/`58`, rect ops, `DECSCA`,
+  `DECALN`, `DECRQCRA`, tabs, mid-screen scroll regions, or wide-char widths
+  (tmux has its own table). Only add a case to `tmuxDiffSequences` when tmux
+  implements the feature at all.
+- **Intended semantic oracle:** `libghostty-vt` via
+  `go.mitchellh.com/libghostty` (headless, formats a screen as plain text/VT so
+  two emulators can be diffed on one byte stream). It is cgo and needs an
+  externally built library, so it lives in its **own module** (same pattern as
+  `examples/ebiten` etc., with `replace github.com/ricochet1k/termemu => ../..`)
+  and never in the root `go.mod`; the corpus runner lives there too. The root
+  `go test ./...`, `go vet ./...`, `GOOS=windows go build ./...` and CI matrix
+  must never require it, and if that module gets CI it is its own opt-in job.
+- **Deliberately not oracles:** xterm (huge, legacy, dead sequences), libvterm,
+  VTE, esctest. Sixel is out of scope by decision and must never be advertised
+  via DA1 attribute 4.
+- When oracles disagree, decide from documentation (xterm ctlseqs as a written
+  spec, kitty protocol docs, DEC manuals) and cite it in the test.
+- **Capability claims must agree across channels.** `TERM`/terminfo (via
+  `defaultAutoEnv` in `backend.go`), `COLORTERM`, `TERM_PROGRAM`/`KITTY_WINDOW_ID`/
+  `WEZTERM_*`/`VTE_VERSION`, DA1/DA2/`XTVERSION`, and the `DECRQM`/`CSI ?u`/
+  DECRQSS answers all describe the same terminal. Do not answer a capability
+  query for something unimplemented (kitty graphics acks would make apps hang),
+  and do not leave `$TERM` claiming less than the replies do without a reason.
 
 ## Dependencies
 
