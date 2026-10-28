@@ -390,12 +390,19 @@ fuzzed sequences, and any row in these tables. Practical notes:
   `go test`, `go vet`, lint and the `GOOS=windows` cross-build; give it an
   opt-in CI job (or none) rather than gating the root matrix.
 - It is cgo and needs `libghostty-vt` installed (`PKG_CONFIG_PATH` pointing at
-  a checkout; static link by default). The default build is pure Go —
-  `replay` works, `diff` exits with a message — so a plain `go build`/`go test`
-  in that module is safe everywhere. To enable the comparison:
-  `go get go.mitchellh.com/libghostty` and `go build -tags libghostty`; see
-  `oracles/ghostty/README.md`. The binding is deliberately absent from
-  `go.mod` so the default build needs no network or cgo.
+  a checkout; static link by default). The binding is a normal dependency of
+  that module, gated by `-tags libghostty`: the default build is pure Go
+  (`replay` works, `diff` exits with a message), so a plain `go build`/`go test`
+  there is safe anywhere. The binding requires Go 1.26, so the oracle module
+  declares its own higher Go version; the root module is unaffected. See
+  `oracles/ghostty/README.md` for the verified build recipe (zig >= 0.17.0,
+  `-Demit-xcframework=false`, then `-tags libghostty`).
+- Verified end to end: built against `libghostty-vt 0.1.0-dev` on
+  darwin/arm64, `diff` reports `no divergences` on a clean cast. First real
+  disagreement found by the harness: `CSI 3;3r` (a one-row scroll region) is
+  accepted by Ghostty (LF then scrolls that row) while termemu ignores the
+  margins, because xterm's ctlseqs requires `Pt < Pb`. That is an oracle
+  disagreement to resolve from the spec, not a bug report.
 - The Go bindings explicitly do not promise API stability yet.
 - It is the reference for *scope*, not for *semantics*. Ghostty declines
   `DECRQSS` (termemu is ahead there) and sixel, so a disagreement means "decide
@@ -454,9 +461,9 @@ convenient.
   `FuzzTerminalInputChunking`, which already round-trip `Snapshot`/`Restore`.
 - Anything in the tables above should be added to the ghostty oracle corpus in
   `oracles/ghostty` rather than only to `tmuxDiffSequences`. The tagged build
-  that actually runs the comparison is unverified in this environment (no Zig
-  or `libghostty-vt`), so treat the first real `diff --cast` run as the
-  acceptance test for that path.
+  works (see Oracles); `asciinema.org` returns 403 for scripted `.cast`
+  downloads, so feed it a locally recorded cast (`asciinema rec x.cast`) rather
+  than scraping the corpus.
 - Cross-channel capability consistency (see Capability channels) deserves its
   own test: `$TERM`/terminfo, DA1/DA2/`XTVERSION` and the `DECRQM`/query
   answers must describe the same terminal.

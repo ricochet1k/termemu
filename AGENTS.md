@@ -891,14 +891,14 @@ escape sequence or changing what termemu advertises.
   implements the feature at all.
 - **Semantic oracle:** `libghostty-vt` via `go.mitchellh.com/libghostty`,
   implemented in `oracles/ghostty` (own module, `replace` to `../..`, corpus
-  runner included). It is cgo and needs an externally built library: the
-  default build is pure Go and `diff` exits with a message unless you
-  `go get go.mitchellh.com/libghostty` and build with `-tags libghostty`
-  against an installed `libghostty-vt` (`PKG_CONFIG_PATH`). The root
-  `go test ./...`, `go vet ./...`, `GOOS=windows go build ./...` and CI matrix
-  never see it. See `oracles/ghostty/README.md` for the exact build steps.
-  The `libghostty` file is written against the upstream binding API but is
-  unverified here (no Zig/`libghostty-vt` in this environment).
+  runner included). The binding is a normal dependency of that module and is
+  gated by `-tags libghostty`, so the default build stays pure Go (`diff` exits
+  with a message); the tagged build additionally needs `libghostty-vt` via
+  `PKG_CONFIG_PATH`. Because the binding declares `go 1.26.0`, that module
+  requires Go 1.26 while the root module keeps its own lower version; the
+  root `go test ./...`, `go vet ./...`, `GOOS=windows go build ./...` and CI
+  matrix never see any of it. See `oracles/ghostty/README.md` for the verified
+  build steps (zig >= 0.17.0, `-Demit-xcframework=false`).
 - **Deliberately not oracles:** xterm (huge, legacy, dead sequences), libvterm,
   VTE, esctest. Sixel is out of scope by decision and must never be advertised
   via DA1 attribute 4.

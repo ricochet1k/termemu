@@ -25,31 +25,42 @@ In this mode `diff` exits with a message explaining that the ghostty comparison 
 
 ## Building with libghostty
 
-1. Build and install `libghostty-vt`. The easiest way is from the Ghostty source tree with Zig:
+`go.mitchellh.com/libghostty` is already a dependency of this module, so no
+`go get` step is needed. It declares `go 1.26.0`, so this module's `go.mod`
+requires Go 1.26 (the go command selects that toolchain automatically). That
+requirement is contained here — the root `termemu` module keeps its own, lower
+Go version.
+
+1. Build and install `libghostty-vt` from the Ghostty source tree with Zig
+   (requires zig >= 0.17.0, matching Ghostty's `minimum_zig_version`):
 
    ```sh
-   zig build -Demit-lib-vt --prefix /tmp/ghostty-vt
+   zig build -Demit-lib-vt -Demit-xcframework=false --prefix /tmp/ghostty-vt
    ```
 
-2. Fetch the Go binding:
+   `-Demit-xcframework=false` matters on macOS: with the xcframework slice
+   enabled, the iOS simulator targets can fail to compile (the vendored
+   Highway C++ library) even though the host library installs fine.
+
+2. Point `pkg-config` at it and build with the `libghostty` tag:
 
    ```sh
    cd oracles/ghostty
    export PKG_CONFIG_PATH=/tmp/ghostty-vt/share/pkgconfig
-   go get go.mitchellh.com/libghostty
-   ```
-
-3. Build with the `libghostty` tag:
-
-   ```sh
+   pkg-config --modversion libghostty-vt   # sanity check
    go build -tags libghostty ./...
    ```
 
-4. Run `diff` against a cast:
+3. Run `diff` against a cast:
 
    ```sh
    ./ghostty diff --cast recording.cast
    ```
+
+This path is verified: built against `libghostty-vt 0.1.0-dev` (ghostty `main`)
+on darwin/arm64 with zig 0.17.0, and `diff` reports `no divergences` on a clean
+cast. Without `PKG_CONFIG_PATH` the tagged build fails at the cgo step with a
+missing `libghostty-vt` pkg-config entry.
 
 ### Cross-compilation
 
