@@ -261,3 +261,168 @@ func TestOSC7_MapsToDirectory(t *testing.T) {
 		t.Fatalf("OSC 6 should set VSCurrentDirectory, got %q", mf.ViewStrings[VSCurrentDirectory])
 	}
 }
+
+func TestOSC0_SetsTitleAndIcon(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	t1.mustHandleCommand(t, "]0;shared\a")
+	if got := mf.ViewStrings[VSWindowTitle]; got != "shared" {
+		t.Fatalf("OSC 0 title = %q, want %q", got, "shared")
+	}
+	if got := mf.ViewStrings[VSWindowIcon]; got != "shared" {
+		t.Fatalf("OSC 0 icon = %q, want %q", got, "shared")
+	}
+}
+
+func TestOSC1_SetsIconOnly(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	// Seed title so we can prove OSC 1 does not touch it.
+	t1.mustHandleCommand(t, "]2;title\a")
+	if got := mf.ViewStrings[VSWindowTitle]; got != "title" {
+		t.Fatalf("setup title = %q, want %q", got, "title")
+	}
+
+	t1.mustHandleCommand(t, "]1;icon\a")
+	if got := mf.ViewStrings[VSWindowIcon]; got != "icon" {
+		t.Fatalf("OSC 1 icon = %q, want %q", got, "icon")
+	}
+	if got := mf.ViewStrings[VSWindowTitle]; got != "title" {
+		t.Fatalf("OSC 1 changed title to %q, want %q", got, "title")
+	}
+}
+
+func TestOSC2_SetsTitleOnly(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	// Seed icon so we can prove OSC 2 does not touch it.
+	t1.mustHandleCommand(t, "]1;icon\a")
+	if got := mf.ViewStrings[VSWindowIcon]; got != "icon" {
+		t.Fatalf("setup icon = %q, want %q", got, "icon")
+	}
+
+	t1.mustHandleCommand(t, "]2;title\a")
+	if got := mf.ViewStrings[VSWindowTitle]; got != "title" {
+		t.Fatalf("OSC 2 title = %q, want %q", got, "title")
+	}
+	if got := mf.ViewStrings[VSWindowIcon]; got != "icon" {
+		t.Fatalf("OSC 2 changed icon to %q, want %q", got, "icon")
+	}
+}
+
+func TestXTWINOPS_TitleStackRoundTrip(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	t1.mustHandleCommand(t, "]2;title-a\a")
+	t1.mustHandleCommand(t, "]1;icon-a\a")
+
+	// Push both (mode 0, explicit and defaulted).
+	t1.mustHandleCommand(t, "[22;0t")
+	t1.mustHandleCommand(t, "]2;title-b\a")
+	t1.mustHandleCommand(t, "]1;icon-b\a")
+	t1.mustHandleCommand(t, "[23t") // default mode 0
+
+	if got := mf.ViewStrings[VSWindowTitle]; got != "title-a" {
+		t.Fatalf("pop mode 0 title = %q, want %q", got, "title-a")
+	}
+	if got := mf.ViewStrings[VSWindowIcon]; got != "icon-a" {
+		t.Fatalf("pop mode 0 icon = %q, want %q", got, "icon-a")
+	}
+}
+
+func TestXTWINOPS_TitleStackMode1(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	t1.mustHandleCommand(t, "]2;title-a\a")
+	t1.mustHandleCommand(t, "]1;icon-a\a")
+
+	// Push icon only, mutate both, pop icon only.
+	t1.mustHandleCommand(t, "[22;1t")
+	t1.mustHandleCommand(t, "]2;title-b\a")
+	t1.mustHandleCommand(t, "]1;icon-b\a")
+	t1.mustHandleCommand(t, "[23;1t")
+
+	if got := mf.ViewStrings[VSWindowTitle]; got != "title-b" {
+		t.Fatalf("mode 1 pop changed title to %q, want %q", got, "title-b")
+	}
+	if got := mf.ViewStrings[VSWindowIcon]; got != "icon-a" {
+		t.Fatalf("mode 1 pop icon = %q, want %q", got, "icon-a")
+	}
+}
+
+func TestXTWINOPS_TitleStackMode2(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	t1.mustHandleCommand(t, "]2;title-a\a")
+	t1.mustHandleCommand(t, "]1;icon-a\a")
+
+	// Push title only, mutate both, pop title only.
+	t1.mustHandleCommand(t, "[22;2t")
+	t1.mustHandleCommand(t, "]2;title-b\a")
+	t1.mustHandleCommand(t, "]1;icon-b\a")
+	t1.mustHandleCommand(t, "[23;2t")
+
+	if got := mf.ViewStrings[VSWindowTitle]; got != "title-a" {
+		t.Fatalf("mode 2 pop title = %q, want %q", got, "title-a")
+	}
+	if got := mf.ViewStrings[VSWindowIcon]; got != "icon-b" {
+		t.Fatalf("mode 2 pop changed icon to %q, want %q", got, "icon-b")
+	}
+}
+
+func TestXTWINOPS_PopEmptyStackNoOp(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	t1.mustHandleCommand(t, "]2;title\a")
+	t1.mustHandleCommand(t, "]1;icon\a")
+
+	// Popping an empty stack must not change current values or error.
+	t1.mustHandleCommand(t, "[23t")
+
+	if got := mf.ViewStrings[VSWindowTitle]; got != "title" {
+		t.Fatalf("pop empty stack changed title to %q, want %q", got, "title")
+	}
+	if got := mf.ViewStrings[VSWindowIcon]; got != "icon" {
+		t.Fatalf("pop empty stack changed icon to %q, want %q", got, "icon")
+	}
+}
+
+func TestXTWINOPS_InvalidModeFallsBackToBoth(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	t1.mustHandleCommand(t, "]2;title-a\a")
+	t1.mustHandleCommand(t, "]1;icon-a\a")
+
+	// An out-of-range mode must behave like mode 0.
+	t1.mustHandleCommand(t, "[22;9t")
+	t1.mustHandleCommand(t, "]2;title-b\a")
+	t1.mustHandleCommand(t, "]1;icon-b\a")
+	t1.mustHandleCommand(t, "[23;9t")
+
+	if got := mf.ViewStrings[VSWindowTitle]; got != "title-a" {
+		t.Fatalf("invalid-mode pop title = %q, want %q", got, "title-a")
+	}
+	if got := mf.ViewStrings[VSWindowIcon]; got != "icon-a" {
+		t.Fatalf("invalid-mode pop icon = %q, want %q", got, "icon-a")
+	}
+}
+
+func TestXTWINOPS_TitleStackOverflowDropsOldest(t *testing.T) {
+	_, t1, mf := MakeTerminalWithMock(TextReadModeRune)
+
+	// Fill the stack beyond its 10-entry limit.
+	for i := 0; i < 12; i++ {
+		t1.mustHandleCommand(t, "]2;title-"+string(rune('a'+i))+"\a")
+		t1.mustHandleCommand(t, "[22t")
+	}
+
+	// Pop back through the stack. The first two pushes (a, b) should have
+	// been dropped, so the oldest remaining value is title-c.
+	for i := 0; i < 10; i++ {
+		t1.mustHandleCommand(t, "[23t")
+	}
+	want := "title-c"
+	if got := mf.ViewStrings[VSWindowTitle]; got != want {
+		t.Fatalf("after overflow pop title = %q, want %q", got, want)
+	}
+}

@@ -235,6 +235,7 @@ func TestSnapshotSerialization(t *testing.T) {
 	ints[VIModifyOtherKeys] = 2
 	strs := make([]string, int(viewStringCount))
 	strs[VSWindowTitle] = "serialization"
+	strs[VSWindowIcon] = "icon"
 	strs[VSCurrentDirectory] = "file:///tmp"
 
 	snap := Snapshot{

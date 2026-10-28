@@ -44,10 +44,14 @@ const (
 // ViewString is an enum of string settings on a terminal
 type ViewString int
 
+// ViewString identifiers are stored positionally in Snapshot.ViewStrings, so
+// new values must be appended at the end of this block. Do not renumber or
+// insert constants in the middle.
 const (
 	VSWindowTitle ViewString = iota
 	VSCurrentDirectory
 	VSCurrentFile
+	VSWindowIcon
 	viewStringCount
 )
 

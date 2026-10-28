@@ -333,6 +333,11 @@ type terminal struct {
 	// link is active carries it in Span.Link.
 	hyperlink string
 
+	// titleStack stores saved window title/icon pairs for XTWINOPS
+	// (CSI 22;Pt / 23;Pt). It is transient UI state and is deliberately not
+	// part of Snapshot/Restore, so a process handoff drops the stack.
+	titleStack []titleStackEntry
+
 	scrollRows    []scrollRow
 	scrollArena   []scrollArenaBlock
 	scrollNextID  ScrollID
@@ -936,6 +941,63 @@ func (t *terminal) GetViewInt(flag ViewInt) int {
 func (t *terminal) setViewString(flag ViewString, value string) {
 	t.viewStrings[flag] = value
 	t.frontend.ViewStringChanged(LockedView{t: t}, flag, value)
+}
+
+// titleStackEntry holds one saved title-stack frame for XTWINOPS.
+// hasIcon/hasTitle record which fields were pushed so pop restores only the
+// requested subset.
+type titleStackEntry struct {
+	icon     string
+	title    string
+	hasIcon  bool
+	hasTitle bool
+}
+
+// maxTitleStack is the maximum number of entries xterm keeps for the
+// window title/icon stack.
+const maxTitleStack = 10
+
+// pushTitleStack saves the current title and/or icon for later restoration.
+// mode follows XTWINOPS: 0 = both, 1 = icon only, 2 = title only.
+func (t *terminal) pushTitleStack(mode int) {
+	entry := titleStackEntry{}
+	switch mode {
+	case 0, 2:
+		entry.title = t.viewStrings[VSWindowTitle]
+		entry.hasTitle = true
+	}
+	switch mode {
+	case 0, 1:
+		entry.icon = t.viewStrings[VSWindowIcon]
+		entry.hasIcon = true
+	}
+	if len(t.titleStack) >= maxTitleStack {
+		t.titleStack = append(t.titleStack[:0], t.titleStack[1:]...)
+	}
+	t.titleStack = append(t.titleStack, entry)
+}
+
+// popTitleStack restores the most recently saved title and/or icon. If the
+// stack is empty this is a no-op. mode follows XTWINOPS: 0 = both,
+// 1 = icon only, 2 = title only.
+func (t *terminal) popTitleStack(mode int) {
+	if len(t.titleStack) == 0 {
+		return
+	}
+	entry := t.titleStack[len(t.titleStack)-1]
+	t.titleStack = t.titleStack[:len(t.titleStack)-1]
+	switch mode {
+	case 0, 2:
+		if entry.hasTitle {
+			t.setViewString(VSWindowTitle, entry.title)
+		}
+	}
+	switch mode {
+	case 0, 1:
+		if entry.hasIcon {
+			t.setViewString(VSWindowIcon, entry.icon)
+		}
+	}
 }
 
 // GetViewString returns a string terminal setting. It locks internally.

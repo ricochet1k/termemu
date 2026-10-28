@@ -1458,9 +1458,18 @@ func (t *terminal) handleCmdCSI(r escapeReader) bool {
 					_ = t.writeReply([]byte(fmt.Sprintf("\033[8;%d;%dt", size.Y, size.X)))
 					return true
 				case 22, 23:
-					// save/restore window title/icon; no-op for now
-					if *debugCmd {
-						debugPrintf(debugCmd, "CSI t params: %v\n", append([]int(nil), params...))
+					// XTWINOPS: save/restore window title and/or icon.
+					mode := 0
+					if len(params) > 1 {
+						mode = params[1]
+					}
+					if mode < 0 || mode > 2 {
+						mode = 0
+					}
+					if params[0] == 22 {
+						t.pushTitleStack(mode)
+					} else {
+						t.popTitleStack(mode)
 					}
 					return true
 				}
@@ -1842,7 +1851,14 @@ func (t *terminal) handleCmdOSC(r escapeReader) bool {
 	}
 
 	switch param {
-	case 0, 2:
+	case 0:
+		t.setViewString(VSWindowTitle, string(param2))
+		t.setViewString(VSWindowIcon, string(param2))
+
+	case 1:
+		t.setViewString(VSWindowIcon, string(param2))
+
+	case 2:
 		t.setViewString(VSWindowTitle, string(param2))
 
 	case 4:
